@@ -825,7 +825,7 @@ void ARMv5Impl<mode>::DataRead8(u32 addr, u32* val)
 
     DataRegion = addr;
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-        GdbCheckD(addr, Gdb::WatchptKind::Read);
+        DebugData(addr, 1, 0, false);
 
     if (addr < ITCMSize)
     {
@@ -857,7 +857,7 @@ void ARMv5Impl<mode>::DataRead16(u32 addr, u32* val)
 
     addr &= ~1;
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-        GdbCheckD(addr, Gdb::WatchptKind::Read);
+        DebugData(addr, 2, 0, false);
 
     if (addr < ITCMSize)
     {
@@ -889,7 +889,7 @@ void ARMv5Impl<mode>::DataRead32(u32 addr, u32* val)
 
     addr &= ~3;
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-        GdbCheckD(addr, Gdb::WatchptKind::Read);
+        DebugData(addr, 4, 0, false);
 
     if (addr < ITCMSize)
     {
@@ -913,7 +913,7 @@ void ARMv5Impl<mode>::DataRead32S(u32 addr, u32* val)
 {
     addr &= ~3;
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-        GdbCheckD(addr, Gdb::WatchptKind::Read);
+        DebugData(addr, 4, 0, false);
 
     if (addr < ITCMSize)
     {
@@ -943,7 +943,7 @@ void ARMv5Impl<mode>::DataWrite8(u32 addr, u8 val)
 
     DataRegion = addr;
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-        GdbCheckD(addr, Gdb::WatchptKind::Write);
+        DebugData(addr, 1, val, true);
 
     if (addr < ITCMSize)
     {
@@ -976,7 +976,7 @@ void ARMv5Impl<mode>::DataWrite16(u32 addr, u16 val)
 
     addr &= ~1;
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-        GdbCheckD(addr, Gdb::WatchptKind::Write);
+        DebugData(addr, 2, val, true);
 
     if (addr < ITCMSize)
     {
@@ -1009,7 +1009,7 @@ void ARMv5Impl<mode>::DataWrite32(u32 addr, u32 val)
 
     addr &= ~3;
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-        GdbCheckD(addr, Gdb::WatchptKind::Write);
+        DebugData(addr, 4, val, true);
 
     if (addr < ITCMSize)
     {
@@ -1034,7 +1034,7 @@ void ARMv5Impl<mode>::DataWrite32S(u32 addr, u32 val)
 {
     addr &= ~3;
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-        GdbCheckD(addr, Gdb::WatchptKind::Write);
+        DebugData(addr, 4, val, true);
 
     if (addr < ITCMSize)
     {

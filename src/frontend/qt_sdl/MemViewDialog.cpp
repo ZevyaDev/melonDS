@@ -563,7 +563,7 @@ MemViewDialog::MemViewDialog(QWidget* parent) : QDialog(parent)
     melonDS::NDS* nds = this->GetNDS();
     if (nds != nullptr) {
         // should never happen for users but wait until the DTCM address is set just in case
-        while (nds->ARM9.DTCMBase == 0xFFFFFFFF) {}
+        while (nds->ARM9->DTCMBase == 0xFFFFFFFF) {}
 
         this->MemRegionBox->setCurrentIndex(memRegionType_Default);
         this->UpdateViewRegion(0x02000000, 0x03000000);
@@ -643,13 +643,13 @@ void* MemViewDialog::GetRAM(uint32_t address)
 
     if (nds != nullptr)
     {
-        if (address < nds->ARM9.ITCMSize)
+        if (address < nds->ARM9->ITCMSize)
         {
-            return &nds->ARM9.ITCM[address & (ITCMPhysicalSize - 1)];
+            return &nds->ARM9->ITCM[address & (ITCMPhysicalSize - 1)];
         }
-        else if (nds->ARM9.DTCM != nullptr && (address & nds->ARM9.DTCMMask) == nds->ARM9.DTCMBase)
+        else if (nds->ARM9->DTCM != nullptr && (address & nds->ARM9->DTCMMask) == nds->ARM9->DTCMBase)
         {
-            return &nds->ARM9.DTCM[address & (DTCMPhysicalSize - 1)];
+            return &nds->ARM9->DTCM[address & (DTCMPhysicalSize - 1)];
         }
         else if ((address & 0xFFFFF000) == 0xFFFF0000)
         {
@@ -710,11 +710,11 @@ void MemViewDialog::SwitchMemRegion(uint32_t address) {
 
     if (nds != nullptr)
     {
-        if (address < nds->ARM9.ITCMSize)
+        if (address < nds->ARM9->ITCMSize)
         {
             index = memRegionType_ITCM;
         }
-        else if ((address & nds->ARM9.DTCMMask) == nds->ARM9.DTCMBase)
+        else if ((address & nds->ARM9->DTCMMask) == nds->ARM9->DTCMBase)
         {
             index = memRegionType_DTCM;
         }
@@ -1102,8 +1102,8 @@ void MemViewDialog::onMemRegionIndexChanged(int index) {
                 newEnd = newStart + nds->MainRAMMask + 1;
                 break;
             case memRegionType_DTCM:
-                newStart = nds->ARM9.DTCMBase;
-                newEnd = nds->ARM9.DTCMBase + DTCMPhysicalSize;
+                newStart = nds->ARM9->DTCMBase;
+                newEnd = nds->ARM9->DTCMBase + DTCMPhysicalSize;
                 break;
             case memRegionType_SWRAM:
                 newStart = 0x03000000;
@@ -1197,7 +1197,7 @@ void MemViewDialog::onDumpBtnPressed()
             memcpy(pBuffer, pRAM, 0x400000);
 
             // copy dtcm
-            memcpy(pBuffer + (nds->ARM9.DTCMBase & 0x00FFFFFF), nds->ARM9.DTCM, DTCMPhysicalSize);
+            memcpy(pBuffer + (nds->ARM9->DTCMBase & 0x00FFFFFF), nds->ARM9->DTCM, DTCMPhysicalSize);
 
             // write file and free previous alloc
             result = Platform::FileWrite(pBuffer, size, 1, file);

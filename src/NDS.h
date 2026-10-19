@@ -43,6 +43,7 @@
 #include "CRC32.h"
 #include "DMA.h"
 #include "FreeBIOS.h"
+#include "debug/Debugger.h"
 
 // when touching the main loop/timing code, pls test a lot of shit
 // with this enabled, to make sure it doesn't desync
@@ -255,6 +256,7 @@ private:
 #ifdef GDBSTUB_ENABLED
     bool EnableGDBStub = false;
 #endif
+    bool DebugMode = false;
 
 public: // TODO: Encapsulate the rest of these members
     void* UserData;
@@ -330,6 +332,7 @@ public: // TODO: Encapsulate the rest of these members
     GBACart::GBACartSlot GBACartSlot;
     melonDS::GPU GPU;
     melonDS::AREngine AREngine;
+    melonDS::Debugger Debugger;
 
     const u32 ARM7WRAMSize = 0x10000;
     u8* ARM7WRAM;

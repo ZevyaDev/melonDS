@@ -205,6 +205,7 @@ protected:
     virtual void BusWrite32(u32 addr, u32 val) = 0;
 
 #ifdef GDBSTUB_ENABLED
+    bool GdbActive = false;
     bool IsSingleStep;
     bool BreakReq;
     bool BreakOnStartup;
@@ -227,7 +228,8 @@ protected:
     void GdbCheckA();
     void GdbCheckB();
     void GdbCheckC();
-    void GdbCheckD(u32 addr, Gdb::WatchptKind kind);
+    void DebugData(u32 addr, u8 size, u32 val, bool write);
+    void DebugFault(bool data);
 };
 
 class ARMv5 : public ARM

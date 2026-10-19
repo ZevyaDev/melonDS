@@ -17,6 +17,7 @@
 */
 
 #include "ARM.h"
+#include "NDS.h"
 #include "Platform.h"
 
 namespace melonDS::ARMInterpreter
@@ -36,6 +37,8 @@ void A_BL(ARM* cpu)
     s32 offset = (s32)(cpu->CurInstr << 8) >> 6;
     cpu->R[14] = cpu->R[15] - 4;
     cpu->JumpTo(cpu->R[15] + offset);
+    if (cpu->NDS.Debugger.CallsArmed)
+        cpu->NDS.Debugger.OnCall(*cpu);
 }
 
 void A_BLX_IMM(ARM* cpu)
@@ -44,6 +47,8 @@ void A_BLX_IMM(ARM* cpu)
     if (cpu->CurInstr & 0x01000000) offset += 2;
     cpu->R[14] = cpu->R[15] - 4;
     cpu->JumpTo(cpu->R[15] + offset + 1);
+    if (cpu->NDS.Debugger.CallsArmed)
+        cpu->NDS.Debugger.OnCall(*cpu);
 }
 
 void A_BX(ARM* cpu)
@@ -56,6 +61,8 @@ void A_BLX_REG(ARM* cpu)
     u32 lr = cpu->R[15] - 4;
     cpu->JumpTo(cpu->R[cpu->CurInstr & 0xF]);
     cpu->R[14] = lr;
+    if (cpu->NDS.Debugger.CallsArmed)
+        cpu->NDS.Debugger.OnCall(*cpu);
 }
 
 
@@ -87,6 +94,8 @@ void T_BLX_REG(ARM* cpu)
     u32 lr = cpu->R[15] - 1;
     cpu->JumpTo(cpu->R[(cpu->CurInstr >> 3) & 0xF]);
     cpu->R[14] = lr;
+    if (cpu->NDS.Debugger.CallsArmed)
+        cpu->NDS.Debugger.OnCall(*cpu);
 }
 
 void T_B(ARM* cpu)
@@ -123,6 +132,8 @@ void T_BL_LONG_2(ARM* cpu)
 
     cpu->R[14] = (cpu->R[15] - 2) | 1;
     cpu->JumpTo(pc);
+    if (cpu->NDS.Debugger.CallsArmed)
+        cpu->NDS.Debugger.OnCall(*cpu);
 }
 
 

@@ -106,9 +106,14 @@ if (ENABLE_GDBSTUB)
 endif()
 
 option(BUILD_QT_SDL "Build Qt/SDL frontend" ON)
+option(BUILD_HEADLESS "Build the headless debugging library" OFF)
 
 add_subdirectory(src)
 
 if (BUILD_QT_SDL)
     add_subdirectory(src/frontend/qt_sdl)
+endif()
+
+if (BUILD_HEADLESS)
+    add_subdirectory(src/frontend/headless)
 endif()

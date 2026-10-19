@@ -83,7 +83,9 @@ add_library(core STATIC
     tiny-AES-c/aes.c
     xxhash/xxhash.c
 
-    blip-buf/blip_buf.c)
+    blip-buf/blip_buf.c
+
+    debug/Debugger.cpp)
 
 if (ENABLE_GDBSTUB)
     message(NOTICE "Enabling GDB stub")

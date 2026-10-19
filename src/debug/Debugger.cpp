@@ -1,0 +1,490 @@
+/*
+    Copyright 2016-2026 melonDS team
+
+    This file is part of melonDS.
+
+    melonDS is free software: you can redistribute it and/or modify it under
+    the terms of the GNU General Public License as published by the Free
+    Software Foundation, either version 3 of the License, or (at your option)
+    any later version.
+
+    melonDS is distributed in the hope that it will be useful, but WITHOUT ANY
+    WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+    FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License along
+    with melonDS. If not, see http://www.gnu.org/licenses/.
+*/
+
+#include <algorithm>
+
+#include "Debugger.h"
+#include "../ARM.h"
+#include "../NDS.h"
+
+namespace melonDS
+{
+
+constexpr u32 PageShift = 12;
+constexpr u32 PageCount = 1u << (32 - PageShift);
+constexpr size_t MaxCallDepth = 4096;
+constexpr u32 MainRAMWords = 0x400000 >> 2;
+
+Debugger::Debugger(melonDS::NDS& nds) noexcept : NDS(nds)
+{
+}
+
+void Debugger::Reset()
+{
+    for (int i = 0; i < 2; i++)
+    {
+        BreakRequested[i] = false;
+        StepRemaining[i] = 0;
+        PendingValid[i] = false;
+        CallStack[i].clear();
+        CurPC[i] = 0;
+    }
+    TraceHead = 0;
+    TraceWrapped = false;
+    if (!LastWriter.empty())
+        std::fill(LastWriter.begin(), LastWriter.end(), 0);
+    Rearm();
+}
+
+int Debugger::AddBreakpoint(u8 cpuMask, u32 addr, BreakCallback callback)
+{
+    Breakpoints.push_back({NextID, cpuMask, true, addr & ~1u, 0, std::move(callback)});
+    RebuildPages();
+    return NextID++;
+}
+
+int Debugger::AddWatchpoint(u8 cpuMask, u32 start, u32 size, u8 flags, BreakCallback callback)
+{
+    if (size == 0 || !(flags & (Watch_Read | Watch_Write)))
+        return -1;
+    u32 end = start + size - 1;
+    if (end < start)
+        end = 0xFFFFFFFF;
+    Watchpoints.push_back({NextID, cpuMask, flags, true, start, end, 0, std::move(callback)});
+    RebuildPages();
+    return NextID++;
+}
+
+bool Debugger::Remove(int id)
+{
+    auto bp = std::find_if(Breakpoints.begin(), Breakpoints.end(), [id](const Breakpoint& b) { return b.ID == id; });
+    if (bp != Breakpoints.end())
+    {
+        Breakpoints.erase(bp);
+        RebuildPages();
+        return true;
+    }
+    auto wp = std::find_if(Watchpoints.begin(), Watchpoints.end(), [id](const Watchpoint& w) { return w.ID == id; });
+    if (wp != Watchpoints.end())
+    {
+        Watchpoints.erase(wp);
+        RebuildPages();
+        return true;
+    }
+    return false;
+}
+
+bool Debugger::SetEnabled(int id, bool enabled)
+{
+    for (auto& b : Breakpoints)
+        if (b.ID == id) { b.Enabled = enabled; RebuildPages(); return true; }
+    for (auto& w : Watchpoints)
+        if (w.ID == id) { w.Enabled = enabled; RebuildPages(); return true; }
+    return false;
+}
+
+void Debugger::ClearAll()
+{
+    Breakpoints.clear();
+    Watchpoints.clear();
+    RebuildPages();
+}
+
+void Debugger::SetBreakHandler(std::function<void(const BreakEvent&)> handler)
+{
+    Handler = std::move(handler);
+}
+
+void Debugger::RequestBreak(u8 cpuMask)
+{
+    for (int i = 0; i < 2; i++)
+        if (cpuMask & (1 << i))
+        {
+            BreakRequested[i] = true;
+            Armed[i] = true;
+        }
+}
+
+void Debugger::Step(u8 cpu, u32 count)
+{
+    StepRemaining[cpu & 1] = count;
+    Rearm();
+}
+
+void Debugger::SetTrace(u8 cpuMask, u32 start, u32 end, u32 capacity)
+{
+    TraceMask = capacity ? cpuMask : 0;
+    TraceStart = start;
+    TraceEnd = end;
+    Trace.assign(TraceMask ? capacity : 0, {});
+    TraceHead = 0;
+    TraceWrapped = false;
+    Rearm();
+}
+
+std::vector<TraceEntry> Debugger::DrainTrace()
+{
+    std::vector<TraceEntry> out;
+    if (TraceWrapped)
+    {
+        out.insert(out.end(), Trace.begin() + TraceHead, Trace.end());
+        out.insert(out.end(), Trace.begin(), Trace.begin() + TraceHead);
+    }
+    else
+        out.insert(out.end(), Trace.begin(), Trace.begin() + TraceHead);
+    TraceHead = 0;
+    TraceWrapped = false;
+    return out;
+}
+
+void Debugger::SetCallTracking(bool enabled)
+{
+    CallTracking = enabled;
+    if (!enabled)
+        for (auto& s : CallStack)
+            s.clear();
+    Rearm();
+}
+
+std::unordered_map<u32, u64> Debugger::DrainCallCounts(u8 cpu)
+{
+    std::unordered_map<u32, u64> out;
+    out.swap(CallCounts[cpu & 1]);
+    return out;
+}
+
+void Debugger::SetCoverage(bool enabled)
+{
+    Coverage = enabled;
+    Rearm();
+}
+
+std::vector<u32> Debugger::DrainCoverage(u8 cpu)
+{
+    std::vector<u32> out;
+    for (auto& [page, bits] : CoveragePages[cpu & 1])
+        for (u32 w = 0; w < bits.size(); w++)
+            for (u64 b = bits[w]; b; b &= b - 1)
+                out.push_back((page << PageShift) | (((w << 6) | __builtin_ctzll(b)) << 1));
+    std::sort(out.begin(), out.end());
+    CoveragePages[cpu & 1].clear();
+    CoverageLastBits[cpu & 1] = nullptr;
+    return out;
+}
+
+void Debugger::SetLastWriter(bool enabled)
+{
+    if (enabled)
+        LastWriter.assign(MainRAMWords, 0);
+    else
+        LastWriter.clear();
+    Rearm();
+}
+
+u32 Debugger::GetLastWriter(u32 addr) const
+{
+    if (LastWriter.empty() || (addr >> 24) != 0x02)
+        return 0;
+    return LastWriter[(addr & 0x3FFFFF) >> 2];
+}
+
+u32 Debugger::Peek(u8 cpu, u32 addr, u8 size) const
+{
+    addr &= ~(u32)(size - 1);
+    if (cpu == 0)
+    {
+        ARMv5& arm9 = *NDS.ARM9;
+        const u8* tcm = nullptr;
+        if (addr < arm9.ITCMSize)
+            tcm = &arm9.ITCM[addr & (ITCMPhysicalSize - 1)];
+        else if ((addr & arm9.DTCMMask) == arm9.DTCMBase)
+            tcm = &arm9.DTCM[addr & (DTCMPhysicalSize - 1)];
+        if (tcm)
+        {
+            if (size == 1) return *tcm;
+            if (size == 2) return *(const u16*)tcm;
+            return *(const u32*)tcm;
+        }
+    }
+    if ((addr >> 24) == 0x04)
+        return 0;
+    if (cpu == 0)
+    {
+        if (size == 1) return NDS.ARM9Read8(addr);
+        if (size == 2) return NDS.ARM9Read16(addr);
+        return NDS.ARM9Read32(addr);
+    }
+    if (size == 1) return NDS.ARM7Read8(addr);
+    if (size == 2) return NDS.ARM7Read16(addr);
+    return NDS.ARM7Read32(addr);
+}
+
+bool Debugger::Poke(u8 cpu, u32 addr, u8 size, u32 value)
+{
+    addr &= ~(u32)(size - 1);
+    if (cpu == 0)
+    {
+        ARMv5& arm9 = *NDS.ARM9;
+        u8* tcm = nullptr;
+        if (addr < arm9.ITCMSize)
+            tcm = &arm9.ITCM[addr & (ITCMPhysicalSize - 1)];
+        else if ((addr & arm9.DTCMMask) == arm9.DTCMBase)
+            tcm = &arm9.DTCM[addr & (DTCMPhysicalSize - 1)];
+        if (tcm)
+        {
+            if (size == 1) *tcm = value;
+            else if (size == 2) *(u16*)tcm = value;
+            else *(u32*)tcm = value;
+            return true;
+        }
+    }
+    if ((addr >> 24) == 0x04)
+        return false;
+    if (cpu == 0)
+    {
+        if (size == 1) NDS.ARM9Write8(addr, value);
+        else if (size == 2) NDS.ARM9Write16(addr, value);
+        else NDS.ARM9Write32(addr, value);
+    }
+    else
+    {
+        if (size == 1) NDS.ARM7Write8(addr, value);
+        else if (size == 2) NDS.ARM7Write16(addr, value);
+        else NDS.ARM7Write32(addr, value);
+    }
+    return true;
+}
+
+void Debugger::Rearm()
+{
+    CallsArmed = CallTracking;
+    for (int i = 0; i < 2; i++)
+    {
+        bool exec = false;
+        bool data = !LastWriter.empty();
+        for (auto& b : Breakpoints)
+            exec |= b.Enabled && (b.CPUMask & (1 << i));
+        for (auto& w : Watchpoints)
+            data |= w.Enabled && (w.CPUMask & (1 << i));
+        DataArmed[i] = data;
+        Armed[i] = exec || data || CallTracking || Coverage || (TraceMask & (1 << i))
+            || StepRemaining[i] || PendingValid[i] || BreakRequested[i];
+    }
+}
+
+void Debugger::RebuildPages()
+{
+    for (int i = 0; i < 2; i++)
+    {
+        ExecPages[i].clear();
+        WatchPages[i].clear();
+        for (auto& b : Breakpoints)
+        {
+            if (!b.Enabled || !(b.CPUMask & (1 << i)))
+                continue;
+            if (ExecPages[i].empty())
+                ExecPages[i].assign(PageCount, 0);
+            ExecPages[i][b.Addr >> PageShift] = 1;
+        }
+        for (auto& w : Watchpoints)
+        {
+            if (!w.Enabled || !(w.CPUMask & (1 << i)))
+                continue;
+            if (WatchPages[i].empty())
+                WatchPages[i].assign(PageCount, 0);
+            for (u64 p = w.Start >> PageShift; p <= (w.End >> PageShift); p++)
+                WatchPages[i][p] = 1;
+        }
+    }
+    Rearm();
+}
+
+void Debugger::Raise(const BreakEvent& ev)
+{
+    if (!Handler || InBreak)
+        return;
+    InBreak = true;
+    Handler(ev);
+    InBreak = false;
+    Rearm();
+}
+
+void Debugger::UnwindCalls(ARM& cpu, u32 pc)
+{
+    auto& stack = CallStack[cpu.Num];
+    u8 mode = cpu.CPSR & 0x1F;
+    while (!stack.empty())
+    {
+        CallFrame& top = stack.back();
+        if ((top.Return & ~1u) == pc)
+        {
+            stack.pop_back();
+            return;
+        }
+        if (top.Mode != mode || cpu.R[13] <= top.SP)
+            return;
+        stack.pop_back();
+    }
+}
+
+void Debugger::OnInstr(ARM& cpu, u32 pc)
+{
+    u8 n = cpu.Num;
+    CurPC[n] = pc;
+
+    if (CallTracking)
+        UnwindCalls(cpu, pc);
+
+    if (Coverage)
+    {
+        u32 page = pc >> PageShift;
+        if (!CoverageLastBits[n] || CoverageLastPage[n] != page)
+        {
+            CoverageLastBits[n] = &CoveragePages[n][page];
+            CoverageLastPage[n] = page;
+        }
+        u32 idx = (pc & ((1u << PageShift) - 1)) >> 1;
+        (*CoverageLastBits[n])[idx >> 6] |= 1ull << (idx & 63);
+    }
+
+    if ((TraceMask & (1 << n)) && pc >= TraceStart && pc <= TraceEnd)
+    {
+        u64 ts = n ? NDS.ARM7Timestamp : (NDS.ARM9Timestamp >> NDS.ARM9ClockShift);
+        Trace[TraceHead] = {ts, pc, cpu.NextInstr[0], cpu.CPSR, n};
+        if (++TraceHead == Trace.size())
+        {
+            TraceHead = 0;
+            TraceWrapped = true;
+        }
+    }
+
+    bool raise = false;
+    BreakEvent ev {BreakKind::Step, n, 0, 0, pc, pc, 0};
+
+    if (PendingValid[n])
+    {
+        PendingValid[n] = false;
+        ev = Pending[n];
+        raise = true;
+    }
+    if (BreakRequested[n].exchange(false) && !raise)
+    {
+        ev.Kind = BreakKind::Request;
+        raise = true;
+    }
+    if (StepRemaining[n] && --StepRemaining[n] == 0 && !raise)
+    {
+        ev.Kind = BreakKind::Step;
+        raise = true;
+    }
+
+    if (!ExecPages[n].empty() && ExecPages[n][pc >> PageShift])
+    {
+        std::vector<int> hits;
+        for (auto& b : Breakpoints)
+            if (b.Enabled && (b.CPUMask & (1 << n)) && b.Addr == pc)
+            {
+                b.Hits++;
+                hits.push_back(b.ID);
+            }
+        for (int id : hits)
+        {
+            auto it = std::find_if(Breakpoints.begin(), Breakpoints.end(), [id](const Breakpoint& b) { return b.ID == id; });
+            if (it == Breakpoints.end())
+                continue;
+            BreakEvent hit {BreakKind::Exec, n, 0, id, pc, pc, 0};
+            BreakCallback cb = it->Callback;
+            if ((!cb || cb(hit)) && !raise)
+            {
+                ev = hit;
+                raise = true;
+            }
+        }
+    }
+
+    if (raise)
+        Raise(ev);
+}
+
+void Debugger::OnData(ARM& cpu, u32 addr, u8 size, u32 value, bool write)
+{
+    u8 n = cpu.Num;
+    if (write && !LastWriter.empty() && (addr >> 24) == 0x02)
+        LastWriter[(addr & 0x3FFFFF) >> 2] = CurPC[n] | n;
+
+    if (WatchPages[n].empty() || !WatchPages[n][addr >> PageShift])
+        return;
+
+    u8 kind = write ? Watch_Write : Watch_Read;
+    u32 last = addr + size - 1;
+    std::vector<int> hits;
+    for (auto& w : Watchpoints)
+        if (w.Enabled && (w.CPUMask & (1 << n)) && (w.Flags & kind) && addr <= w.End && last >= w.Start)
+        {
+            w.Hits++;
+            hits.push_back(w.ID);
+        }
+    if (hits.empty())
+        return;
+
+    if (!write)
+        value = Peek(n, addr, size);
+    for (int id : hits)
+    {
+        auto it = std::find_if(Watchpoints.begin(), Watchpoints.end(), [id](const Watchpoint& w) { return w.ID == id; });
+        if (it == Watchpoints.end())
+            continue;
+        BreakEvent hit {write ? BreakKind::Write : BreakKind::Read, n, size, id, CurPC[n], addr, value};
+        BreakCallback cb = it->Callback;
+        if ((!cb || cb(hit)) && !PendingValid[n])
+        {
+            Pending[n] = hit;
+            PendingValid[n] = true;
+            Armed[n] = true;
+        }
+    }
+}
+
+void Debugger::OnCall(ARM& cpu)
+{
+    u8 n = cpu.Num;
+    u32 entry = cpu.R[15] - ((cpu.CPSR & 0x20) ? 2 : 4);
+    auto& stack = CallStack[n];
+    if (stack.size() >= MaxCallDepth)
+        stack.erase(stack.begin());
+    stack.push_back({CurPC[n], entry, cpu.R[14] & ~1u, cpu.R[13], (u8)(cpu.CPSR & 0x1F), false});
+    CallCounts[n][entry]++;
+}
+
+void Debugger::OnException(ARM& cpu, u32 ret)
+{
+    u8 n = cpu.Num;
+    u32 entry = cpu.R[15] - ((cpu.CPSR & 0x20) ? 2 : 4);
+    auto& stack = CallStack[n];
+    if (stack.size() >= MaxCallDepth)
+        stack.erase(stack.begin());
+    stack.push_back({ret, entry, ret, cpu.R[13], (u8)(cpu.CPSR & 0x1F), true});
+}
+
+void Debugger::OnFault(ARM& cpu, u32 pc, u32 addr)
+{
+    u8 n = cpu.Num;
+    Raise({BreakKind::Fault, n, 0, 0, pc, addr, 0});
+}
+
+}

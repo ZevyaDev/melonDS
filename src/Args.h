@@ -113,6 +113,8 @@ struct NDSArgs
     /// Ignored in builds that don't have the GDB stub included.
     std::optional<GDBArgs> GDB = std::nullopt;
 
+    bool Debug = false;
+
     /// The 3D renderer to initialize the DS with.
     /// Defaults to the software renderer.
     /// Can be changed later at any time.

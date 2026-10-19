@@ -94,7 +94,7 @@ NDS::NDS(NDSArgs&& args, int type, void* userdata) noexcept :
     ARM9BIOS(*args.ARM9BIOS),
     ARM7BIOSNative(CRC32(ARM7BIOS.data(), ARM7BIOS.size()) == ARM7BIOSCRC32),
     ARM9BIOSNative(CRC32(ARM9BIOS.data(), ARM9BIOS.size()) == ARM9BIOSCRC32),
-    JIT(*this, args.JIT),
+    JIT(*this, args.Debug ? std::nullopt : args.JIT),
     SPU(*this, args.BitDepth, args.Interpolation, args.OutputSampleRate),
     Mic(*this),
     GPU(*this, std::move(args.Renderer)),
@@ -104,24 +104,26 @@ NDS::NDS(NDSArgs&& args, int type, void* userdata) noexcept :
     NDSCartSlot(*this, 0, nullptr),
     GBACartSlot(*this, nullptr),
     AREngine(*this),
+    Debugger(*this),
 #ifdef JIT_ENABLED
-    ARM9(args.JIT.has_value() ? (ARMv5*)new ARMv5Impl<CPUExecuteMode::JIT>(*this, args.GDB)
-        : (args.GDB.has_value() ? (ARMv5*)new ARMv5Impl<CPUExecuteMode::InterpreterGDB>(*this, args.GDB)
+    ARM9((args.JIT.has_value() && !args.Debug) ? (ARMv5*)new ARMv5Impl<CPUExecuteMode::JIT>(*this, args.GDB)
+        : ((args.GDB.has_value() || args.Debug) ? (ARMv5*)new ARMv5Impl<CPUExecuteMode::InterpreterGDB>(*this, args.GDB)
             : (ARMv5*)new ARMv5Impl<CPUExecuteMode::Interpreter>(*this, args.GDB))),
-    ARM7(args.JIT.has_value() ? (ARMv4*)new ARMv4Impl<CPUExecuteMode::JIT>(*this, args.GDB)
-        : (args.GDB.has_value() ? (ARMv4*)new ARMv4Impl<CPUExecuteMode::InterpreterGDB>(*this, args.GDB)
+    ARM7((args.JIT.has_value() && !args.Debug) ? (ARMv4*)new ARMv4Impl<CPUExecuteMode::JIT>(*this, args.GDB)
+        : ((args.GDB.has_value() || args.Debug) ? (ARMv4*)new ARMv4Impl<CPUExecuteMode::InterpreterGDB>(*this, args.GDB)
             : (ARMv4*)new ARMv4Impl<CPUExecuteMode::Interpreter>(*this, args.GDB))),
 #else
-    ARM9(args.GDB.has_value() ? (ARMv5*)new ARMv5Impl<CPUExecuteMode::InterpreterGDB>(*this, args.GDB)
+    ARM9((args.GDB.has_value() || args.Debug) ? (ARMv5*)new ARMv5Impl<CPUExecuteMode::InterpreterGDB>(*this, args.GDB)
         : (ARMv5*)new ARMv5Impl<CPUExecuteMode::Interpreter>(*this, args.GDB)),
-    ARM7(args.GDB.has_value() ? (ARMv4*)new ARMv4Impl<CPUExecuteMode::InterpreterGDB>(*this, args.GDB)
+    ARM7((args.GDB.has_value() || args.Debug) ? (ARMv4*)new ARMv4Impl<CPUExecuteMode::InterpreterGDB>(*this, args.GDB)
         : (ARMv4*)new ARMv4Impl<CPUExecuteMode::Interpreter>(*this, args.GDB)),
 #endif
 #ifdef GDBSTUB_ENABLED
     EnableGDBStub(args.GDB.has_value()),
 #endif
+    DebugMode(args.Debug || args.GDB.has_value()),
 #ifdef JIT_ENABLED
-    EnableJIT(args.JIT.has_value()),
+    EnableJIT(args.JIT.has_value() && !args.Debug),
 #endif
     DMAs {
         DMA(0, 0, *this),
@@ -231,6 +233,8 @@ void NDS::SetARM7RegionTimings(u32 addrstart, u32 addrend, u32 region, int buswi
 #ifdef JIT_ENABLED
 void NDS::SetJITArgs(std::optional<JITArgs> args) noexcept
 {
+    if (DebugMode)
+        args = std::nullopt;
     if (args)
     { // If we want to turn the JIT on...
         JIT.SetJITArgs(*args);
@@ -250,6 +254,7 @@ void NDS::SetGdbArgs(std::optional<GDBArgs> args) noexcept
     ARM9->SetGdbArgs(args);
     ARM7->SetGdbArgs(args);
     EnableGDBStub = args.has_value();
+    DebugMode = EnableGDBStub || DebugMode;
 }
 #endif
 
@@ -455,6 +460,7 @@ void NDS::Reset()
 
     RunningGame = false;
     LastSysClockCycles = 0;
+    Debugger.Reset();
 
     // BIOS files are now loaded by the frontend
 
@@ -1094,12 +1100,11 @@ u32 NDS::RunFrame()
         return RunFrame<CPUExecuteMode::JIT>();
     else
 #endif
-#ifdef GDBSTUB_ENABLED
-    if (EnableGDBStub)
+    if (DebugMode)
     {
         return RunFrame<CPUExecuteMode::InterpreterGDB>();
-    } else
-#endif
+    }
+    else
     {
         return RunFrame<CPUExecuteMode::Interpreter>();
     }

@@ -274,6 +274,8 @@ void A_SVC(ARM* cpu)
     cpu->R_SVC[2] = oldcpsr;
     cpu->R[14] = cpu->R[15] - 4;
     cpu->JumpTo(cpu->ExceptionBase + 0x08);
+    if (cpu->NDS.Debugger.CallsArmed)
+        cpu->NDS.Debugger.OnException(*cpu, cpu->R[14]);
 }
 
 void T_SVC(ARM* cpu)
@@ -286,6 +288,8 @@ void T_SVC(ARM* cpu)
     cpu->R_SVC[2] = oldcpsr;
     cpu->R[14] = cpu->R[15] - 2;
     cpu->JumpTo(cpu->ExceptionBase + 0x08);
+    if (cpu->NDS.Debugger.CallsArmed)
+        cpu->NDS.Debugger.OnException(*cpu, cpu->R[14]);
 }
 
 

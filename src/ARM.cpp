@@ -37,7 +37,7 @@ using Platform::LogLevel;
 #ifdef GDBSTUB_ENABLED
 void ARM::GdbCheckA()
 {
-    if (!IsSingleStep && !BreakReq)
+    if (GdbActive && !IsSingleStep && !BreakReq)
     { // check if eg. break signal is incoming etc.
         Gdb::StubState st = GdbStub.Enter(false, Gdb::TgtStatus::NoEvent, ~(u32)0u, BreakOnStartup);
         BreakOnStartup = false;
@@ -47,7 +47,7 @@ void ARM::GdbCheckA()
 }
 void ARM::GdbCheckB()
 {
-    if (IsSingleStep || BreakReq)
+    if (GdbActive && (IsSingleStep || BreakReq))
     { // use else here or we single-step the same insn twice in gdb
         u32 pc_real = R[15] - ((CPSR & 0x20) ? 2 : 4);
         Gdb::StubState st = GdbStub.Enter(true, Gdb::TgtStatus::SingleStep, pc_real);
@@ -58,6 +58,10 @@ void ARM::GdbCheckB()
 void ARM::GdbCheckC()
 {
     u32 pc_real = R[15] - ((CPSR & 0x20) ? 2 : 4);
+    if (NDS.Debugger.Armed[Num])
+        NDS.Debugger.OnInstr(*this, pc_real);
+    if (!GdbActive)
+        return;
     Gdb::StubState st = GdbStub.CheckBkpt(pc_real, true, true);
     if (st != Gdb::StubState::CheckNoHit)
     {
@@ -66,20 +70,44 @@ void ARM::GdbCheckC()
     }
     else GdbCheckB();
 }
-void ARM::GdbCheckD(u32 addr, Gdb::WatchptKind kind)
+void ARM::DebugData(u32 addr, u8 size, u32 val, bool write)
 {
-    Gdb::StubState st = GdbStub.CheckWatchpt(addr, (int)kind, true, true);
+    if (NDS.Debugger.DataArmed[Num])
+        NDS.Debugger.OnData(*this, addr, size, val, write);
+    if (!GdbActive)
+        return;
+    Gdb::StubState st = GdbStub.CheckWatchpt(addr, (int)(write ? Gdb::WatchptKind::Write : Gdb::WatchptKind::Read), true, true);
     if (st != Gdb::StubState::CheckNoHit)
     {
         IsSingleStep = st == Gdb::StubState::Step;
         BreakReq = st == Gdb::StubState::Attach || st == Gdb::StubState::Break;
     }
 }
+void ARM::DebugFault(bool data)
+{
+    u32 pc = R[15] - ((CPSR & 0x20) ? 4 : 8);
+    NDS.Debugger.OnFault(*this, pc, data ? DataRegion : pc);
+    if (GdbActive)
+        GdbStub.Enter(GdbStub.IsConnected(), data ? Gdb::TgtStatus::FaultData : Gdb::TgtStatus::FaultIAcc, pc);
+}
 #else
+void ARM::DebugFault(bool data)
+{
+    u32 pc = R[15] - ((CPSR & 0x20) ? 4 : 8);
+    NDS.Debugger.OnFault(*this, pc, data ? DataRegion : pc);
+}
 void ARM::GdbCheckA() {}
 void ARM::GdbCheckB() {}
-void ARM::GdbCheckC() {}
-void ARM::GdbCheckD() {}
+void ARM::GdbCheckC()
+{
+    if (NDS.Debugger.Armed[Num])
+        NDS.Debugger.OnInstr(*this, R[15] - ((CPSR & 0x20) ? 2 : 4));
+}
+void ARM::DebugData(u32 addr, u8 size, u32 val, bool write)
+{
+    if (NDS.Debugger.DataArmed[Num])
+        NDS.Debugger.OnData(*this, addr, size, val, write);
+}
 #endif
 
 
@@ -186,6 +214,7 @@ void ARM::SetGdbArgs(std::optional<GDBArgs> gdb)
 {
 #ifdef GDBSTUB_ENABLED
     GdbStub.Close();
+    GdbActive = gdb.has_value();
     if (gdb)
     {
         int port = Num ? gdb->PortARM7 : gdb->PortARM9;
@@ -579,6 +608,8 @@ void ARM::TriggerIRQ()
     R_IRQ[2] = oldcpsr;
     R[14] = R[15] + (oldcpsr & 0x20 ? 2 : 0);
     JumpTo(ExceptionBase + 0x18);
+    if (NDS.Debugger.CallsArmed)
+        NDS.Debugger.OnException(*this, R[14] - 4);
 
     // ARDS cheat support
     // normally, those work by hijacking the ARM7 VBlank handler
@@ -594,7 +625,7 @@ void ARMv5Impl<mode>::PrefetchAbort()
 {
     Log(LogLevel::Warn, "ARM9: prefetch abort (%08X)\n", R[15]);
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-        GdbStub.Enter(GdbStub.IsConnected(), Gdb::TgtStatus::FaultIAcc, this->R[15] - ((CPSR & 0x20) ? 4 : 8));
+        DebugFault(false);
 
     u32 oldcpsr = CPSR;
     CPSR &= ~0xBF;
@@ -620,7 +651,7 @@ void ARMv5Impl<mode>::DataAbort()
 {
     Log(LogLevel::Warn, "ARM9: data abort (%08X)\n", R[15]);
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-        GdbStub.Enter(GdbStub.IsConnected(), Gdb::TgtStatus::FaultData, this->R[15] - ((CPSR & 0x20) ? 4 : 8));
+        DebugFault(true);
 
     u32 oldcpsr = CPSR;
     CPSR &= ~0xBF;
@@ -1160,8 +1191,8 @@ template <CPUExecuteMode mode>
 void ARMv4Impl<mode>::DataRead8(u32 addr, u32* val)
 {
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-        GdbCheckD(addr, Gdb::WatchptKind::Read);
-        
+        DebugData(addr, 1, 0, false);
+
     *val = BusRead8(addr);
     DataRegion = addr;
     DataCycles = NDS.ARM7MemTimings[addr >> 15][0];
@@ -1172,7 +1203,7 @@ void ARMv4Impl<mode>::DataRead16(u32 addr, u32* val)
 {
     addr &= ~1;
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-        GdbCheckD(addr, Gdb::WatchptKind::Read);
+        DebugData(addr, 2, 0, false);
 
     *val = BusRead16(addr);
     DataRegion = addr;
@@ -1184,7 +1215,7 @@ void ARMv4Impl<mode>::DataRead32(u32 addr, u32* val)
 {
     addr &= ~3;
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-        GdbCheckD(addr, Gdb::WatchptKind::Read);
+        DebugData(addr, 4, 0, false);
 
     *val = BusRead32(addr);
     DataRegion = addr;
@@ -1196,7 +1227,7 @@ void ARMv4Impl<mode>::DataRead32S(u32 addr, u32* val)
 {
     addr &= ~3;
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-        GdbCheckD(addr, Gdb::WatchptKind::Read);
+        DebugData(addr, 4, 0, false);
 
     *val = BusRead32(addr);
     DataCycles += NDS.ARM7MemTimings[addr >> 15][3];
@@ -1206,7 +1237,7 @@ template <CPUExecuteMode mode>
 void ARMv4Impl<mode>::DataWrite8(u32 addr, u8 val)
 {
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-        GdbCheckD(addr, Gdb::WatchptKind::Write);
+        DebugData(addr, 1, val, true);
 
     BusWrite8(addr, val);
     DataRegion = addr;
@@ -1218,7 +1249,7 @@ void ARMv4Impl<mode>::DataWrite16(u32 addr, u16 val)
 {
     addr &= ~1;
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-        GdbCheckD(addr, Gdb::WatchptKind::Write);
+        DebugData(addr, 2, val, true);
 
     BusWrite16(addr, val);
     DataRegion = addr;
@@ -1230,7 +1261,7 @@ void ARMv4Impl<mode>::DataWrite32(u32 addr, u32 val)
 {
     addr &= ~3;
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-        GdbCheckD(addr, Gdb::WatchptKind::Write);
+        DebugData(addr, 4, val, true);
 
     BusWrite32(addr, val);
     DataRegion = addr;
@@ -1242,7 +1273,7 @@ void ARMv4Impl<mode>::DataWrite32S(u32 addr, u32 val)
 {
     addr &= ~3;
     if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-        GdbCheckD(addr, Gdb::WatchptKind::Write);
+        DebugData(addr, 4, val, true);
 
     BusWrite32(addr, val);
     DataCycles += NDS.ARM7MemTimings[addr >> 15][3];
