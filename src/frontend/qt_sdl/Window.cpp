@@ -57,6 +57,7 @@
 #include "InterfaceSettingsDialog.h"
 #include "ROMInfoDialog.h"
 #include "RAMInfoDialog.h"
+#include "MemViewDialog.h"
 #include "TitleManagerDialog.h"
 #include "PowerManagement/PowerManagementDialog.h"
 
@@ -414,6 +415,9 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent) :
 
                 actTitleManager = menu->addAction("Manage DSi titles");
                 connect(actTitleManager, &QAction::triggered, this, &MainWindow::onOpenTitleManager);
+
+                actMemView = menu->addAction("Memory Viewer");
+                connect(actMemView, &QAction::triggered, this, &MainWindow::onMemView);
             }
 
             {
@@ -700,6 +704,7 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent) :
         actEnableCheats->setEnabled(false);
         actSetupCheats->setEnabled(false);
         actTitleManager->setEnabled(!globalCfg.GetString("DSi.NANDPath").empty());
+        actMemView->setEnabled(false);
 
         actEnableCheats->setChecked(localCfg.GetBool("EnableCheats"));
 
@@ -1313,6 +1318,8 @@ void MainWindow::updateCartInserted(bool gba)
             win->actSetupCheats->setEnabled(inserted);
             win->actROMInfo->setEnabled(inserted);
             win->actRAMInfo->setEnabled(inserted);
+            win->actMemView->setEnabled(inserted);
+            this->onMemView(); // convenience for dev, remove for release!
         });
     }
 }
@@ -1770,6 +1777,10 @@ void MainWindow::onROMInfo()
 void MainWindow::onRAMInfo()
 {
     RAMInfoDialog* dlg = RAMInfoDialog::openDlg(this);
+}
+
+void MainWindow::onMemView() {
+    MemViewDialog* dlg = MemViewDialog::openDlg(this);
 }
 
 void MainWindow::onOpenTitleManager()
