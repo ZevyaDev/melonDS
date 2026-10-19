@@ -73,6 +73,7 @@ public:
     void Reset();
 
     void Start(melonDS::u32 frames);
+    void StopAfter(melonDS::u32 frames);
     RunState Wait(int timeoutMs);
     RunState GetState();
     void Interrupt();
@@ -116,6 +117,7 @@ const std::string& LocalDirectory();
 void SetLocalDirectory(const std::string& dir);
 melonDS::Platform::LogLevel LogThreshold();
 void SetLogThreshold(melonDS::Platform::LogLevel level);
+void SetPacing(int fps);
 
 }
 

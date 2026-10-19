@@ -2,7 +2,7 @@
 name = "melonds-mcp"
 version = "0.1.0"
 requires-python = ">=3.10"
-dependencies = ["mcp", "capstone", "pillow", "pyyaml"]
+dependencies = ["mcp", "capstone", "pillow", "pyyaml", "numpy"]
 
 [project.scripts]
 melonds-mcp = "melonds_mcp.server:main"

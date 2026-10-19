@@ -253,7 +253,15 @@ void Wifi::DoSavestate(Savestate* file)
     file->VarArray(IO, 0x1000);
 
     file->Bool32(&Enabled);
+    bool wasOn = PowerOn;
     file->Bool32(&PowerOn);
+    if (!file->Saving && PowerOn != wasOn)
+    {
+        if (PowerOn)
+            Platform::MP_Begin(NDS.UserData);
+        else
+            Platform::MP_End(NDS.UserData);
+    }
 
     file->Var16(&Random);
 

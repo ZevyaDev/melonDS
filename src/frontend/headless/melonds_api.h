@@ -92,6 +92,8 @@ MDS_API int mds_version(void);
 MDS_API const char* mds_error(void);
 MDS_API void mds_set_local_dir(const char* dir);
 MDS_API void mds_set_log_level(int level);
+MDS_API int mds_mp_timeout(int ms);
+MDS_API void mds_set_pacing(int fps);
 
 MDS_API int mds_create(const char* bios9, const char* bios7, const char* firmware, const char* nickname, int debug);
 MDS_API void mds_destroy(int id);
@@ -100,6 +102,8 @@ MDS_API int mds_reset(int id);
 
 MDS_API int mds_run(const int* ids, int count, uint32_t frames, int timeout_ms, int* states);
 MDS_API int mds_wait(const int* ids, int count, int timeout_ms, int* states);
+MDS_API int mds_start(int id, uint32_t frames);
+MDS_API int mds_stop_after(int id, uint32_t frames);
 MDS_API int mds_interrupt(int id);
 MDS_API int mds_state(int id);
 MDS_API int mds_take_break(int id, mds_break* out);

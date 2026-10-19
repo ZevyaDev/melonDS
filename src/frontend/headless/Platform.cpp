@@ -269,8 +269,13 @@ bool Semaphore_TryWait(Semaphore* sema, int timeout_ms)
 {
     auto s = reinterpret_cast<SemaphoreImpl*>(sema);
     std::unique_lock lock(s->Lock);
-    if (!s->Cond.wait_for(lock, std::chrono::milliseconds(timeout_ms), [s] { return s->Count > 0; }))
-        return false;
+    if (s->Count == 0)
+    {
+        if (timeout_ms <= 0)
+            return false;
+        if (!s->Cond.wait_for(lock, std::chrono::milliseconds(timeout_ms), [s] { return s->Count > 0; }))
+            return false;
+    }
     s->Count--;
     return true;
 }

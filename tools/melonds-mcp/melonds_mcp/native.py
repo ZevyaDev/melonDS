@@ -73,12 +73,16 @@ def _load():
         "mds_error": (c_char_p, []),
         "mds_set_local_dir": (None, [c_char_p]),
         "mds_set_log_level": (None, [c_int]),
+        "mds_mp_timeout": (c_int, [c_int]),
+        "mds_set_pacing": (None, [c_int]),
         "mds_create": (c_int, [c_char_p, c_char_p, c_char_p, c_char_p, c_int]),
         "mds_destroy": (None, [c_int]),
         "mds_load_rom": (c_int, [c_int, c_char_p, c_char_p]),
         "mds_reset": (c_int, [c_int]),
         "mds_run": (c_int, [POINTER(c_int), c_int, c_uint32, c_int, POINTER(c_int)]),
         "mds_wait": (c_int, [POINTER(c_int), c_int, c_int, POINTER(c_int)]),
+        "mds_start": (c_int, [c_int, c_uint32]),
+        "mds_stop_after": (c_int, [c_int, c_uint32]),
         "mds_interrupt": (c_int, [c_int]),
         "mds_state": (c_int, [c_int]),
         "mds_take_break": (c_int, [c_int, POINTER(MdsBreak)]),
@@ -156,6 +160,14 @@ def _mask(cpu):
     return 2 if _cpu(cpu) == 7 else 1
 
 
+def mp_timeout(ms=-1):
+    return _check(lib().mds_mp_timeout(ms))
+
+
+def set_pacing(fps):
+    lib().mds_set_pacing(fps)
+
+
 def run_group(consoles, frames, timeout_ms):
     ids = (c_int * len(consoles))(*[c.id for c in consoles])
     states = (c_int * len(consoles))()
@@ -195,6 +207,12 @@ class Console:
 
     def interrupt(self):
         _check(lib().mds_interrupt(self.id))
+
+    def start(self, frames=0xFFFFFFFF):
+        _check(lib().mds_start(self.id, frames))
+
+    def stop_after(self, frames=0):
+        _check(lib().mds_stop_after(self.id, frames))
 
     @property
     def state(self):

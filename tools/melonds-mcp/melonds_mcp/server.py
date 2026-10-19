@@ -13,6 +13,7 @@ except ImportError:
 from . import native
 from .disasm import disassemble, format_lines
 from .native import Console, MelonError, PARKED, RUNNING
+from .ramtools import COMPARES, RamSearch, Watches, parse_sequence, text_search
 from .symbols import SymbolTable
 
 server = Server(
@@ -26,6 +27,8 @@ server = Server(
 )
 
 CONSOLES: dict[int, Console] = {}
+SEARCHES: dict[int, RamSearch] = {}
+WATCHES = Watches()
 symbols = SymbolTable()
 STATE_NAMES = {0: "idle", 1: "running", 2: "stopped"}
 HEX_DIGITS = set("0123456789abcdefABCDEF")
@@ -160,6 +163,35 @@ def run(frames: int = 1, consoles: list[int] | None = None, timeout_s: float = 6
 
 
 @server.tool()
+def pacing(fps: int = 0) -> str:
+    """Run every console at most `fps` frames per wall-clock second (0 = as fast as possible). Local wireless between
+    consoles needs real-time pacing (60) like the Qt frontend; everything else runs fastest unpaced."""
+    native.set_pacing(fps)
+    return f"pacing {fps or 'off'}"
+
+
+@server.tool()
+def live_start(consoles: list[int] | None = None, fps: int = 60) -> str:
+    """Run consoles continuously at `fps` (local wireless sessions need this: a console that stops stalls the others).
+    Input, screenshots and memory reads work while live; stop with live_stop."""
+    native.set_pacing(fps)
+    for i in consoles or [0]:
+        con(i).start()
+    return "live"
+
+
+@server.tool()
+def live_stop(consoles: list[int] | None = None, timeout_s: float = 30) -> dict:
+    """Stop live consoles at their next frame boundary and turn pacing off."""
+    group = [con(i) for i in (consoles or [0])]
+    for c in group:
+        c.stop_after(0)
+    timed_out, states = native.wait_group(group, int(timeout_s * 1000))
+    native.set_pacing(0)
+    return group_result(group, timed_out, states)
+
+
+@server.tool()
 def wait(consoles: list[int] | None = None, timeout_s: float = 60) -> dict:
     """Wait for running consoles to finish or stop."""
     group = [con(i) for i in (consoles or [0])]
@@ -286,6 +318,92 @@ def press(buttons: list[str], frames: int = 6, release_frames: int = 6, console:
     if states[0] != PARKED and release_frames:
         timed_out, states = native.run_group([c], release_frames, 60000)
     return group_result([c], timed_out, states)
+
+
+@server.tool()
+def input_sequence(steps: str, consoles: list[int] | None = None) -> dict:
+    """Play inputs in one call: tokens like "A*4 w20 Down*30 A+B*2 w10" (buttons*frames held, wN waits N frames).
+    Runs all listed consoles together, so it also drives multiplayer. Stops early on a break."""
+    group = [con(i) for i in (consoles or [0])]
+    timed_out, states = False, [0] * len(group)
+    for keys, frames in parse_sequence(steps):
+        for c in group:
+            c.set_keys(keys)
+        timed_out, states = native.run_group(group, frames, 120000)
+        if PARKED in states or timed_out:
+            break
+    for c in group:
+        c.set_keys([])
+    return group_result(group, timed_out, states)
+
+
+@server.tool()
+def ramsearch_start(start: str = "0x02000000", length: int = 0x400000, size: int = 4, signed: bool = True, cpu: int = 9, console: int = 0) -> dict:
+    """Begin a RAM search: snapshot every aligned value in the range. Then change the game state and narrow
+    with ramsearch_filter, like DeSmuME's RAM Search."""
+    c = con(console)
+    SEARCHES[console] = RamSearch(c, addr_of(start, c), length, size, signed, cpu)
+    return {"candidates": len(SEARCHES[console].cand)}
+
+
+@server.tool()
+def ramsearch_filter(compare: str, value: int | None = None, console: int = 0, show: int = 20) -> dict:
+    """Keep candidates whose value, compared with the previous snapshot (or with `value`), matches:
+    changed, unchanged, increased, decreased, eq, ne, gt, lt, ge, le, delta (current - previous == value)."""
+    s = SEARCHES.get(console)
+    if not s:
+        raise MelonError("call ramsearch_start first")
+    n = s.filter(compare, value)
+    return {"candidates": n, "first": [f"{a:08x} {cur} (was {prev}) {describe(a, s.console)}" for a, cur, prev in s.rows(show)]}
+
+
+@server.tool()
+def ramsearch_list(limit: int = 100, console: int = 0) -> list[str]:
+    """Current RAM search candidates with current and previous values."""
+    s = SEARCHES.get(console)
+    if not s:
+        raise MelonError("call ramsearch_start first")
+    return [f"{a:08x} {cur} (was {prev}) {describe(a, s.console)}" for a, cur, prev in s.rows(limit)]
+
+
+@server.tool()
+def watch_add(name: str, address: str, type: str = "u32", cpu: int = 9, length: int = 0, note: str = "", console: int = 0) -> dict:
+    """Name an address. Types: u8 s8 u16 s16 u32 s32 fx32 fx16 (DS fixed point /4096), bytes, ascii, utf16 (with length)."""
+    WATCHES.add(name, addr_of(address, CONSOLES.get(console)), type, cpu, length, note)
+    return watch_read(console)
+
+
+@server.tool()
+def watch_remove(name: str, console: int = 0) -> dict:
+    """Remove a named watch."""
+    WATCHES.remove(name)
+    return watch_read(console)
+
+
+@server.tool()
+def watch_read(console: int = 0) -> dict:
+    """Current values of all watches."""
+    return WATCHES.read(con(console))
+
+
+@server.tool()
+def watch_save(path: str) -> str:
+    """Save the watch list as JSON, to share findings."""
+    WATCHES.save(path)
+    return f"saved {len(WATCHES.items)} watches"
+
+
+@server.tool()
+def watch_load(path: str) -> list[str]:
+    """Load (merge) a watch list saved by watch_save."""
+    return WATCHES.load(path)
+
+
+@server.tool()
+def text_find(text: str, start: str = "0x02000000", length: int = 0x400000, console: int = 0) -> list[str]:
+    """Find a string in memory as ASCII, UTF-16LE or UTF-8 (e.g. on-screen dialogue to locate the text buffer)."""
+    c = con(console)
+    return [f"{a:08x} {enc} {describe(a, c)}" for a, enc in text_search(c, text, addr_of(start, c), length)]
 
 
 @server.tool()

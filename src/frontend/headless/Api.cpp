@@ -143,6 +143,20 @@ void mds_set_log_level(int level)
     SetLogThreshold((Platform::LogLevel)level);
 }
 
+void mds_set_pacing(int fps)
+{
+    SetPacing(fps);
+}
+
+int mds_mp_timeout(int ms)
+{
+    if (!MPReady)
+        return Fail("create a console first");
+    if (ms >= 0)
+        MPInterface::Get().SetRecvTimeout(ms);
+    return MPInterface::Get().GetRecvTimeout();
+}
+
 int mds_create(const char* bios9, const char* bios7, const char* firmware, const char* nickname, int debug)
 {
     int id = -1;
@@ -282,6 +296,24 @@ int mds_wait(const int* ids, int count, int timeout_ms, int* states)
     return result;
 }
 
+int mds_start(int id, uint32_t frames)
+{
+    Slot* s = Stopped(id);
+    if (!s)
+        return -1;
+    s->Inst->Start(frames);
+    return 0;
+}
+
+int mds_stop_after(int id, uint32_t frames)
+{
+    Slot* s = Find(id);
+    if (!s)
+        return -1;
+    s->Inst->StopAfter(frames);
+    return 0;
+}
+
 int mds_interrupt(int id)
 {
     Slot* s = Find(id);
@@ -317,7 +349,7 @@ uint64_t mds_frames(int id)
 
 int mds_screen(int id, uint32_t* out)
 {
-    Slot* s = Stopped(id);
+    Slot* s = Find(id);
     if (!s)
         return -1;
     void* top = nullptr;
@@ -362,17 +394,20 @@ int mds_set_lid(int id, int closed)
 
 int mds_read(int id, int cpu, uint32_t addr, uint32_t len, uint8_t* out)
 {
-    Slot* s = Stopped(id);
+    Slot* s = Find(id);
     if (!s)
         return -1;
     melonDS::NDS& nds = *s->Inst->NDS;
+    int n = cpu == 7 || cpu == 1;
+    ARMv5& arm9 = *nds.ARM9;
     for (u32 i = 0; i < len; i++)
     {
         u32 a = addr + i;
-        if ((a >> 24) == 0x02)
+        bool tcm = !n && (a < arm9.ITCMSize || (a & arm9.DTCMMask) == arm9.DTCMBase);
+        if ((a >> 24) == 0x02 && !tcm)
             out[i] = nds.MainRAM[a & nds.MainRAMMask];
         else
-            out[i] = nds.Debugger.Peek(cpu == 7 || cpu == 1, a, 1);
+            out[i] = nds.Debugger.Peek(n, a, 1);
     }
     return 0;
 }

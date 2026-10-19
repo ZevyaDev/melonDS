@@ -16,6 +16,7 @@
     with melonDS. If not, see http://www.gnu.org/licenses/.
 */
 
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -198,6 +199,13 @@ void Instance::Reset()
     Lua->OnReset();
 }
 
+static std::atomic<int> PacingFPS = 0;
+
+void SetPacing(int fps)
+{
+    PacingFPS = fps > 0 ? fps : 0;
+}
+
 void Instance::Start(u32 frames)
 {
     {
@@ -209,6 +217,13 @@ void Instance::Start(u32 frames)
         State = RunState::Running;
     }
     Cond.notify_all();
+}
+
+void Instance::StopAfter(u32 frames)
+{
+    std::lock_guard lock(Lock);
+    if (State == RunState::Running)
+        FramesLeft = frames;
 }
 
 RunState Instance::Wait(int timeoutMs)
@@ -253,6 +268,7 @@ void Instance::ThreadMain()
             if (Quit)
                 return;
         }
+        auto next = std::chrono::steady_clock::now();
         for (;;)
         {
             {
@@ -270,6 +286,15 @@ void Instance::ThreadMain()
                 std::lock_guard lock(Lock);
                 if (FramesLeft)
                     FramesLeft--;
+            }
+            if (int fps = PacingFPS)
+            {
+                next += std::chrono::microseconds(1000000 / fps);
+                auto now = std::chrono::steady_clock::now();
+                if (next > now)
+                    std::this_thread::sleep_until(next);
+                else
+                    next = now;
             }
         }
         Cond.notify_all();
