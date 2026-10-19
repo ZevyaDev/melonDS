@@ -35,6 +35,7 @@ struct Hook
     int Ref;
     std::string Name;
     bool Frame;
+    melonDS::NDS* Console;
 };
 
 struct Context
@@ -163,7 +164,9 @@ static int AddHook(lua_State* L, BreakKind kind)
     BreakCallback cb = [ctx, ref](const BreakEvent& ev) { return CallHook(ctx.get(), ref, &ev); };
 
     int id = -1;
+    bool debugMode = true;
     Exec(L, [&](melonDS::NDS& nds) {
+        debugMode = nds.IsDebugMode();
         if (kind == BreakKind::Exec)
             id = nds.Debugger.AddBreakpoint(1 << cpu, addr, cb);
         else
@@ -174,7 +177,9 @@ static int AddHook(lua_State* L, BreakKind kind)
         luaL_unref(L, LUA_REGISTRYINDEX, ref);
         return luaL_error(L, "cannot add hook");
     }
-    ctx->Hooks.push_back({id, ref, name, false});
+    ctx->Hooks.push_back({id, ref, name, false, &Console(L)});
+    if (!debugMode)
+        ctx->H.Print("lua: JIT is on, so memory hooks do not run; turn JIT off, then load the script again");
     lua_pushinteger(L, id);
     return 1;
 }
@@ -190,7 +195,7 @@ static int OnFrameEnd(lua_State* L)
     lua_pushvalue(L, 1);
     int ref = luaL_ref(L, LUA_REGISTRYINDEX);
     int id = ctx->NextFrameID--;
-    ctx->Hooks.push_back({id, ref, luaL_optstring(L, 2, ""), true});
+    ctx->Hooks.push_back({id, ref, luaL_optstring(L, 2, ""), true, nullptr});
     lua_pushinteger(L, id);
     return 1;
 }
@@ -198,10 +203,11 @@ static int OnFrameEnd(lua_State* L)
 static void DropHooks(lua_State* L, Context* ctx, std::vector<size_t> indices)
 {
     std::vector<int> ids;
+    melonDS::NDS* current = ctx->H.GetNDS();
     for (size_t i : indices)
-        if (!ctx->Hooks[i].Frame)
+        if (!ctx->Hooks[i].Frame && ctx->Hooks[i].Console == current)
             ids.push_back(ctx->Hooks[i].ID);
-    if (!ids.empty() && ctx->H.GetNDS())
+    if (!ids.empty() && current)
     {
         auto remove = [&ids](melonDS::NDS& nds) {
             for (int id : ids)
