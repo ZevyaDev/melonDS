@@ -353,7 +353,8 @@ int mds_take_break(int id, mds_break* out)
     BreakEvent ev;
     if (!s->Inst->TakeBreak(ev))
         return 0;
-    *out = {(int32_t)ev.Kind, ev.CPU ? 7 : 9, ev.Size, ev.ID, ev.PC, ev.Addr, ev.Value};
+    *out = {(int32_t)ev.Kind, ev.CPU ? 7 : 9, ev.Size, ev.ID, ev.PC, ev.Addr, ev.Value,
+            ev.DMAChannel == 0xFF ? -1 : (int32_t)ev.DMAChannel};
     return 1;
 }
 

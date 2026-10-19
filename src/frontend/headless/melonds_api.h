@@ -47,6 +47,7 @@ typedef struct
     uint32_t pc;
     uint32_t addr;
     uint32_t value;
+    int32_t dma;
 } mds_break;
 
 typedef struct

@@ -53,14 +53,16 @@ class RamSearch:
         }[compare]
         self.history.append((compare, value, len(self.cand)))
         self.cand = self.cand[mask]
+        self.before = self.prev
         self.prev = cur
         return len(self.cand)
 
     def rows(self, limit=50):
         cur = self._read()
+        before = getattr(self, "before", self.prev)
         out = []
         for i in self.cand[:limit]:
-            out.append((self.start + int(i) * self.size, int(cur[i]), int(self.prev[i])))
+            out.append((self.start + int(i) * self.size, int(cur[i]), int(before[i])))
         return out
 
     def addresses(self):

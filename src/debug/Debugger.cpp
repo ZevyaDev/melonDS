@@ -32,6 +32,7 @@ constexpr u32 StackSwitchDistance = 0x400;
 constexpr u32 StackMatchWindow = 0x200;
 constexpr size_t MaxParkedStacks = 64;
 constexpr u32 MainRAMWords = 0x400000 >> 2;
+constexpr u32 DMAWriterTag = 0xFFFFFFF0;
 
 Debugger::Debugger(melonDS::NDS& nds) noexcept : NDS(nds)
 {
@@ -545,12 +546,23 @@ void Debugger::OnInstr(ARM& cpu, u32 pc)
         Raise(ev);
 }
 
+void Debugger::OnDMA(u8 n, u8 channel, u32 addr, u8 size, u32 value)
+{
+    if (!LastWriter.empty() && (addr >> 24) == 0x02)
+        LastWriter[(addr & 0x3FFFFF) >> 2] = DMAWriterTag | (channel << 1) | n;
+    WatchHit(n, addr, size, value, true, channel);
+}
+
 void Debugger::OnData(ARM& cpu, u32 addr, u8 size, u32 value, bool write)
 {
     u8 n = cpu.Num;
     if (write && !LastWriter.empty() && (addr >> 24) == 0x02)
         LastWriter[(addr & 0x3FFFFF) >> 2] = CurPC[n] | n;
+    WatchHit(n, addr, size, value, write, 0xFF);
+}
 
+void Debugger::WatchHit(u8 n, u32 addr, u8 size, u32 value, bool write, u8 dma)
+{
     if (WatchPages[n].empty() || !WatchPages[n][addr >> PageShift])
         return;
 
@@ -573,7 +585,7 @@ void Debugger::OnData(ARM& cpu, u32 addr, u8 size, u32 value, bool write)
         auto it = std::find_if(Watchpoints.begin(), Watchpoints.end(), [id](const Watchpoint& w) { return w.ID == id; });
         if (it == Watchpoints.end())
             continue;
-        BreakEvent hit {write ? BreakKind::Write : BreakKind::Read, n, size, id, CurPC[n], addr, value};
+        BreakEvent hit {write ? BreakKind::Write : BreakKind::Read, n, size, id, CurPC[n], addr, value, dma};
         BreakCallback cb = it->Callback;
         if ((!cb || cb(hit)) && !PendingValid[n])
         {

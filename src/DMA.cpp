@@ -597,7 +597,10 @@ void DMA::Run9()
             NDS.ARM9Timestamp += (UnitTimings9_16(burststart) << NDS.ARM9ClockShift);
             burststart = false;
 
-            NDS.ARM9Write16(CurDstAddr, NDS.ARM9Read16(CurSrcAddr));
+            u16 val = NDS.ARM9Read16(CurSrcAddr);
+            if (NDS.Debugger.DataArmed[0])
+                NDS.Debugger.OnDMA(0, Num, CurDstAddr, 2, val);
+            NDS.ARM9Write16(CurDstAddr, val);
 
             CurSrcAddr += SrcAddrInc<<1;
             CurDstAddr += DstAddrInc<<1;
@@ -614,7 +617,10 @@ void DMA::Run9()
             NDS.ARM9Timestamp += (UnitTimings9_32(burststart) << NDS.ARM9ClockShift);
             burststart = false;
 
-            NDS.ARM9Write32(CurDstAddr, NDS.ARM9Read32(CurSrcAddr));
+            u32 val = NDS.ARM9Read32(CurSrcAddr);
+            if (NDS.Debugger.DataArmed[0])
+                NDS.Debugger.OnDMA(0, Num, CurDstAddr, 4, val);
+            NDS.ARM9Write32(CurDstAddr, val);
 
             CurSrcAddr += SrcAddrInc<<2;
             CurDstAddr += DstAddrInc<<2;
@@ -673,7 +679,10 @@ void DMA::Run7()
             NDS.ARM7Timestamp += UnitTimings7_16(burststart);
             burststart = false;
 
-            NDS.ARM7Write16(CurDstAddr, NDS.ARM7Read16(CurSrcAddr));
+            u16 val = NDS.ARM7Read16(CurSrcAddr);
+            if (NDS.Debugger.DataArmed[1])
+                NDS.Debugger.OnDMA(1, Num, CurDstAddr, 2, val);
+            NDS.ARM7Write16(CurDstAddr, val);
 
             CurSrcAddr += SrcAddrInc<<1;
             CurDstAddr += DstAddrInc<<1;
@@ -690,7 +699,10 @@ void DMA::Run7()
             NDS.ARM7Timestamp += UnitTimings7_32(burststart);
             burststart = false;
 
-            NDS.ARM7Write32(CurDstAddr, NDS.ARM7Read32(CurSrcAddr));
+            u32 val = NDS.ARM7Read32(CurSrcAddr);
+            if (NDS.Debugger.DataArmed[1])
+                NDS.Debugger.OnDMA(1, Num, CurDstAddr, 4, val);
+            NDS.ARM7Write32(CurDstAddr, val);
 
             CurSrcAddr += SrcAddrInc<<2;
             CurDstAddr += DstAddrInc<<2;

@@ -85,6 +85,8 @@ def break_report(c):
     report = {"kind": b.kind, "cpu": b.cpu, "pc": f"{b.pc:08x}", "at": describe(b.pc, c)}
     if b.kind in ("read", "write"):
         report |= {"addr": f"{b.addr:08x}", "size": b.size, "value": f"{b.value:x}", "data": describe(b.addr, c)}
+        if b.dma >= 0:
+            report["by"] = f"DMA channel {b.dma} (pc is the last instruction this CPU ran)"
     if b.id:
         report["point"] = b.id
     try:
@@ -547,6 +549,8 @@ def last_writer(address: str, console: int = 0) -> str:
     w = c.last_writer(addr_of(address, c))
     if not w:
         return "no write recorded"
+    if w[0] == "dma":
+        return f"arm{w[2]} DMA channel {w[1]}"
     pc, cpu = w
     return f"arm{cpu} {pc:08x} {describe(pc, c)}"
 

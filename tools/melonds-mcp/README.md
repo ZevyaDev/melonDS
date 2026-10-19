@@ -43,15 +43,22 @@ what local multiplayer needs, and a stop in one stops the others at their next i
 
 | tool | does |
 |---|---|
-| `breakpoint_add`, `watchpoint_add` | execute / read / write points, optional Lua condition |
+| `breakpoint_add`, `watchpoint_add` | execute / read / write points (CPU and DMA writes), optional Lua condition |
 | `step`, `run`, `wait`, `pause` | execution control, every wait has a timeout |
+| `live_start`, `live_stop`, `pacing` | free-running consoles at 60 fps; local wireless sessions need this |
 | `registers`, `memory_read`, `memory_write`, `memory_search`, `disassemble_at` | inspection |
-| `calls_track`, `callstack`, `calls_read` | shadow call stack across threads and IRQs, per-function call counts |
+| `ramsearch_start`, `ramsearch_filter`, `ramsearch_list` | DeSmuME-style RAM search: snapshot, then changed / increased / equal / delta |
+| `watch_add`, `watch_read`, `watch_save`, `watch_load` | named, typed addresses (fx32 included), shareable as JSON |
+| `text_find` | find on-screen text in RAM (ASCII, UTF-16, UTF-8) |
+| `input_sequence`, `press`, `touch` | input; `"A*4 w20 Down*30"` plays a whole sequence in one call |
+| `calls_track`, `callstack`, `calls_read` | shadow call stack across threads and nested IRQs, per-function call counts |
 | `coverage_track`, `coverage_read` | every executed instruction, grouped by symbol |
 | `trace_start`, `trace_read` | instruction ring buffer, or function transitions only |
-| `writers_track`, `last_writer` | which instruction last wrote a main-RAM word |
+| `writers_track`, `last_writer` | which instruction (or DMA channel) last wrote a main-RAM word |
 | `packets_track`, `packets_read` | local wireless traffic per console |
-| `savestate_save`, `savestate_load`, `screenshot`, `press`, `touch` | state and input |
+| `savestate_save`, `savestate_load`, `screenshot` | state; savestates need a frame boundary |
+
+The GDB stub (`mds_gdb`, ARM9 3333 / ARM7 3334) also works in the headless build, watchpoints included.
 
 ## Lua
 

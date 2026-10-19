@@ -13,7 +13,7 @@ WATCH_READ, WATCH_WRITE = 1, 2
 
 class MdsBreak(Structure):
     _fields_ = [("kind", c_int32), ("cpu", c_int32), ("size", c_int32), ("id", c_int32),
-                ("pc", c_uint32), ("addr", c_uint32), ("value", c_uint32)]
+                ("pc", c_uint32), ("addr", c_uint32), ("value", c_uint32), ("dma", c_int32)]
 
 
 class MdsPoint(Structure):
@@ -47,6 +47,7 @@ class Break:
     value: int
     size: int
     id: int
+    dma: int = -1
 
 
 def _find_library():
@@ -230,7 +231,7 @@ class Console:
         b = MdsBreak()
         if _check(lib().mds_take_break(self.id, ctypes.byref(b))) == 0:
             return None
-        return Break(BREAK_KINDS[b.kind], b.cpu, b.pc, b.addr, b.value, b.size, b.id)
+        return Break(BREAK_KINDS[b.kind], b.cpu, b.pc, b.addr, b.value, b.size, b.id, b.dma)
 
     def screen(self):
         buf = (c_uint32 * (256 * 384))()
@@ -333,7 +334,11 @@ class Console:
 
     def last_writer(self, addr):
         w = lib().mds_lastwriter_get(self.id, addr)
-        return None if w == 0 else (w & ~1, 7 if w & 1 else 9)
+        if w == 0:
+            return None
+        if w >= 0xFFFFFFF0:
+            return ("dma", (w >> 1) & 3, 7 if w & 1 else 9)
+        return (w & ~1, 7 if w & 1 else 9)
 
     def save_state(self, path):
         _check(lib().mds_savestate(self.id, _b(str(path))))

@@ -58,6 +58,7 @@ struct BreakEvent
     u32 PC;
     u32 Addr;
     u32 Value;
+    u8 DMAChannel = 0xFF;
 };
 
 using BreakCallback = std::function<bool(const BreakEvent&)>;
@@ -146,6 +147,7 @@ public:
 
     void OnInstr(ARM& cpu, u32 pc);
     void OnData(ARM& cpu, u32 addr, u8 size, u32 value, bool write);
+    void OnDMA(u8 cpu, u8 channel, u32 addr, u8 size, u32 value);
     void OnCall(ARM& cpu);
     void OnException(ARM& cpu, u32 ret);
     void OnFault(ARM& cpu, u32 pc, u32 addr);
@@ -200,6 +202,7 @@ private:
     void RebuildPages();
     void Raise(const BreakEvent& ev);
     void UnwindCalls(ARM& cpu, u32 pc);
+    void WatchHit(u8 n, u32 addr, u8 size, u32 value, bool write, u8 dma);
     void SwitchStacks(u8 n, u32 oldSP, u32 newSP);
 };
 
