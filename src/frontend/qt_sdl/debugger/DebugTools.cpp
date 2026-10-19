@@ -30,7 +30,10 @@
 #include "Gfx2DWindows.h"
 #include "Gfx3DWindow.h"
 #include "SoundWindow.h"
+#include "DebugSymbols.h"
 #include "EmuInstance.h"
+#include "Config.h"
+#include "NDSCart.h"
 #include "Window.h"
 
 namespace DebugTools
@@ -63,6 +66,38 @@ static const std::vector<Tool>& Tools()
     return tools;
 }
 
+QString gameCode(DebugBridge* bridge)
+{
+    melonDS::NDS* nds = bridge->instance()->getNDS();
+    if (!nds || !nds->GetNDSCart())
+        return QString();
+    return QString::fromLatin1(nds->GetNDSCart()->GetHeader().GameCode, 4);
+}
+
+void autoLoadSymbols(DebugBridge* bridge)
+{
+    QString code = gameCode(bridge);
+    if (code.isEmpty())
+        return;
+    Config::Table& cfg = bridge->instance()->getGlobalConfig();
+    QString path = QString::fromStdString(cfg.GetString("Debugger.Symbols." + code.toStdString()));
+    if (path.isEmpty() || path == bridge->symbols().source())
+        return;
+    QString error;
+    if (bridge->symbols().load(path, error))
+        emit bridge->symbolsChanged();
+}
+
+void rememberSymbols(DebugBridge* bridge, const QString& path)
+{
+    QString code = gameCode(bridge);
+    if (code.isEmpty())
+        return;
+    Config::Table& cfg = bridge->instance()->getGlobalConfig();
+    cfg.SetString("Debugger.Symbols." + code.toStdString(), path.toStdString());
+    Config::Save();
+}
+
 void showDisassembly(DebugBridge* bridge, QWidget* parent, melonDS::u32 addr)
 {
     DebuggerWindow::open(bridge, parent)->goTo(addr);
@@ -86,6 +121,8 @@ void buildMenu(QMenu* menu, MainWindow* win)
         QObject::connect(bridge, &DebugBridge::broke, bridge, [bridge] {
             DebuggerWindow::open(bridge, bridge->instance()->getMainWindow());
         });
+        QObject::connect(bridge, &DebugBridge::started, bridge, [bridge] { autoLoadSymbols(bridge); });
+        QObject::connect(bridge, &DebugBridge::consoleChanged, bridge, [bridge] { autoLoadSymbols(bridge); });
     }
     for (const Tool& t : Tools())
     {

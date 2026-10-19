@@ -317,6 +317,7 @@ QString Automation::run(const QStringList& args)
         QString error;
         if (!bridge->symbols().load(rest, error))
             return "error: " + error;
+        DebugTools::rememberSymbols(bridge, rest);
         emit bridge->symbolsChanged();
         return QString("ok %1").arg(bridge->symbols().set()->SymbolCount);
     }

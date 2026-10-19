@@ -100,6 +100,7 @@ signals:
     void broke(melonDS::BreakEvent ev);
     void resumed();
     void consoleChanged();
+    void started();
     void pauseChanged(bool paused);
     void pointsChanged();
     void symbolsChanged();

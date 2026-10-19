@@ -42,6 +42,7 @@
 #include "DebuggerWindow.h"
 #include "DebugSymbols.h"
 #include "DebugTool.h"
+#include "DebugTools.h"
 #include "DisasmView.h"
 #include "EmuInstance.h"
 #include "Config.h"
@@ -739,15 +740,6 @@ void DebuggerWindow::setPC(u32 addr)
     refresh();
 }
 
-static QString GameCode(EmuInstance* inst)
-{
-    NDS* nds = inst->getNDS();
-    if (!nds || !nds->GetNDSCart())
-        return QString();
-    const char* code = nds->GetNDSCart()->GetHeader().GameCode;
-    return QString::fromLatin1(code, 4);
-}
-
 void DebuggerWindow::loadSymbols()
 {
     QString path = QFileDialog::getOpenFileName(this, "Load symbols", QString(),
@@ -760,13 +752,7 @@ void DebuggerWindow::loadSymbols()
         QMessageBox::warning(this, "melonDS", error);
         return;
     }
-    QString code = GameCode(Bridge->instance());
-    if (!code.isEmpty())
-    {
-        Config::Table& cfg = Bridge->instance()->getGlobalConfig();
-        cfg.SetString("Debugger.Symbols." + code.toStdString(), path.toStdString());
-        Config::Save();
-    }
+    DebugTools::rememberSymbols(Bridge, path);
     emit Bridge->symbolsChanged();
     refresh();
     Disasm->reload();
@@ -774,17 +760,5 @@ void DebuggerWindow::loadSymbols()
 
 void DebuggerWindow::autoLoadSymbols()
 {
-    QString code = GameCode(Bridge->instance());
-    if (code.isEmpty())
-        return;
-    Config::Table& cfg = Bridge->instance()->getGlobalConfig();
-    QString path = QString::fromStdString(cfg.GetString("Debugger.Symbols." + code.toStdString()));
-    if (path.isEmpty() || path == Bridge->symbols().source())
-        return;
-    QString error;
-    if (Bridge->symbols().load(path, error))
-    {
-        emit Bridge->symbolsChanged();
-        Disasm->reload();
-    }
+    DebugTools::autoLoadSymbols(Bridge);
 }

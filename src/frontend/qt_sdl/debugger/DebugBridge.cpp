@@ -34,7 +34,10 @@ DebugBridge::DebugBridge(EmuInstance* inst) : QObject(nullptr), Inst(inst), Symb
     qRegisterMetaType<melonDS::BreakEvent>("melonDS::BreakEvent");
     EmuThread* thread = inst->getEmuThread();
     connect(thread, &EmuThread::windowEmuPause, this, &DebugBridge::pauseChanged);
-    connect(thread, &EmuThread::windowEmuStart, this, [this] { emit pauseChanged(false); });
+    connect(thread, &EmuThread::windowEmuStart, this, [this] {
+        emit started();
+        emit pauseChanged(false);
+    });
     connect(thread, &EmuThread::windowEmuStop, this, [this] { emit pauseChanged(true); });
 }
 
