@@ -27,6 +27,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPlainTextEdit>
+#include <QTabBar>
+#include <QTabWidget>
 #include <QTableWidget>
 #include <QTimer>
 #include <QTreeWidget>
@@ -198,6 +200,43 @@ QString Automation::run(const QStringList& args)
                 return "ok";
             }
         return "error: no edit";
+    }
+    if (c == "select" && args.size() > 3)
+    {
+        QWidget* w = FindWindow(args[1]);
+        if (!w)
+            return "error: no window";
+        auto views = w->findChildren<QAbstractItemView*>();
+        int n = args[2].toInt();
+        if (n >= views.size())
+            return "error: no view";
+        QAbstractItemView* v = views[n];
+        QModelIndex idx = v->model()->index(args[3].toInt(), 0);
+        v->setCurrentIndex(idx);
+        emit v->clicked(idx);
+        return "ok";
+    }
+    if (c == "tab" && args.size() > 2)
+    {
+        QWidget* w = FindWindow(args[1]);
+        if (!w)
+            return "error: no window";
+        QString text = args.mid(2).join(' ');
+        for (QTabWidget* t : w->findChildren<QTabWidget*>())
+            for (int i = 0; i < t->count(); i++)
+                if (t->tabText(i).remove('&') == text)
+                {
+                    t->setCurrentIndex(i);
+                    return "ok";
+                }
+        for (QTabBar* t : w->findChildren<QTabBar*>())
+            for (int i = 0; i < t->count(); i++)
+                if (t->tabText(i).remove('&') == text)
+                {
+                    t->setCurrentIndex(i);
+                    return "ok";
+                }
+        return "error: no tab";
     }
     if (c == "combo" && args.size() > 3)
     {
