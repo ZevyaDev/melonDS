@@ -81,6 +81,7 @@ def _load():
         "mds_reset": (c_int, [c_int]),
         "mds_run": (c_int, [POINTER(c_int), c_int, c_uint32, c_int, POINTER(c_int)]),
         "mds_wait": (c_int, [POINTER(c_int), c_int, c_int, POINTER(c_int)]),
+        "mds_gdb": (c_int, [c_int, c_int, c_int, c_int]),
         "mds_start": (c_int, [c_int, c_uint32]),
         "mds_stop_after": (c_int, [c_int, c_uint32]),
         "mds_interrupt": (c_int, [c_int]),
@@ -207,6 +208,9 @@ class Console:
 
     def interrupt(self):
         _check(lib().mds_interrupt(self.id))
+
+    def gdb(self, port9=3333, port7=3334, break_on_start=False):
+        _check(lib().mds_gdb(self.id, port9, port7, int(break_on_start)))
 
     def start(self, frames=0xFFFFFFFF):
         _check(lib().mds_start(self.id, frames))

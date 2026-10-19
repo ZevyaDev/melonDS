@@ -296,6 +296,22 @@ int mds_wait(const int* ids, int count, int timeout_ms, int* states)
     return result;
 }
 
+int mds_gdb(int id, int port9, int port7, int break_on_start)
+{
+    Slot* s = Stopped(id);
+    if (!s)
+        return -1;
+#ifdef GDBSTUB_ENABLED
+    if (port9 <= 0 && port7 <= 0)
+        s->Inst->NDS->SetGdbArgs(std::nullopt);
+    else
+        s->Inst->NDS->SetGdbArgs(GDBArgs{(u16)port7, (u16)port9, break_on_start != 0, break_on_start != 0});
+    return 0;
+#else
+    return Fail("built without the GDB stub");
+#endif
+}
+
 int mds_start(int id, uint32_t frames)
 {
     Slot* s = Stopped(id);
@@ -550,7 +566,7 @@ int mds_callstack(int id, int cpu, mds_frame* out, int max)
     Slot* s = Stopped(id);
     if (!s)
         return -1;
-    auto& stack = s->Inst->NDS->Debugger.GetCallStack(cpu == 7 || cpu == 1);
+    auto stack = s->Inst->NDS->Debugger.GetCallStack(cpu == 7 || cpu == 1);
     int n = std::min<int>(max, stack.size());
     for (int i = 0; i < n; i++)
     {

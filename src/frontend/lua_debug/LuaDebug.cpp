@@ -288,7 +288,7 @@ static int SetRegister(lua_State* L)
 static int CallStack(lua_State* L)
 {
     int cpu = CPUArg(L, 1, 0);
-    auto& stack = Console(L).Debugger.GetCallStack(cpu);
+    auto stack = Console(L).Debugger.GetCallStack(cpu);
     lua_createtable(L, stack.size(), 0);
     for (size_t i = 0; i < stack.size(); i++)
     {

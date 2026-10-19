@@ -126,7 +126,7 @@ public:
     std::vector<TraceEntry> DrainTrace();
 
     void SetCallTracking(bool enabled);
-    const std::vector<CallFrame>& GetCallStack(u8 cpu) const { return CallStack[cpu]; }
+    std::vector<CallFrame> GetCallStack(u8 cpu) const;
     std::unordered_map<u32, u64> DrainCallCounts(u8 cpu);
 
     void SetCoverage(bool enabled);
@@ -177,6 +177,16 @@ private:
     std::array<std::map<u32, std::vector<CallFrame>>, 2> ParkedStacks;
     std::array<std::array<u32, 16>, 2> LastSP {};
     std::array<u8, 2> LastMode {};
+    std::array<u32, 2> PrevInstr {};
+    std::array<bool, 2> PrevThumb {};
+
+    struct Interrupted
+    {
+        u32 Return;
+        u32 SP;
+        std::vector<CallFrame> Stack;
+    };
+    std::array<std::vector<Interrupted>, 2> Exceptions;
     std::array<std::unordered_map<u32, u64>, 2> CallCounts;
 
     bool Coverage = false;

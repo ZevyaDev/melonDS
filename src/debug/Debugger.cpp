@@ -46,6 +46,7 @@ void Debugger::Reset()
         PendingValid[i] = false;
         CallStack[i].clear();
         ParkedStacks[i].clear();
+        Exceptions[i].clear();
         LastSP[i] = {};
         CurPC[i] = 0;
     }
@@ -165,9 +166,19 @@ void Debugger::SetCallTracking(bool enabled)
         {
             CallStack[i].clear();
             ParkedStacks[i].clear();
+            Exceptions[i].clear();
             LastSP[i] = {};
         }
     Rearm();
+}
+
+std::vector<CallFrame> Debugger::GetCallStack(u8 cpu) const
+{
+    std::vector<CallFrame> out;
+    for (auto& ex : Exceptions[cpu & 1])
+        out.insert(out.end(), ex.Stack.begin(), ex.Stack.end());
+    out.insert(out.end(), CallStack[cpu & 1].begin(), CallStack[cpu & 1].end());
+    return out;
 }
 
 std::unordered_map<u32, u64> Debugger::DrainCallCounts(u8 cpu)
@@ -343,17 +354,60 @@ void Debugger::SwitchStacks(u8 n, u32 oldSP, u32 newSP)
         parked[oldSP] = std::move(CallStack[n]);
     }
     CallStack[n].clear();
-    auto it = parked.lower_bound(newSP > StackMatchWindow ? newSP - StackMatchWindow : 0);
-    if (it != parked.end() && it->first <= newSP + StackMatchWindow)
+    auto best = parked.end();
+    u32 bestDist = StackMatchWindow + 1;
+    for (auto it = parked.lower_bound(newSP > StackMatchWindow ? newSP - StackMatchWindow : 0);
+         it != parked.end() && it->first <= newSP + StackMatchWindow; ++it)
     {
-        CallStack[n] = std::move(it->second);
-        parked.erase(it);
+        u32 dist = it->first > newSP ? it->first - newSP : newSP - it->first;
+        if (dist < bestDist)
+        {
+            best = it;
+            bestDist = dist;
+        }
+    }
+    if (best != parked.end())
+    {
+        CallStack[n] = std::move(best->second);
+        parked.erase(best);
     }
 }
 
 static bool IsExceptionMode(u8 mode)
 {
     return mode != 0x10 && mode != 0x1F;
+}
+
+static bool IsExceptionReturn(u32 instr, bool thumb)
+{
+    if (thumb)
+        return false;
+    if ((instr & 0x0C000000) == 0)
+        return (instr & (1 << 20)) && ((instr >> 12) & 0xF) == 15;
+    if ((instr & 0x0E000000) == 0x08000000)
+        return (instr & (1 << 20)) && (instr & (1 << 22)) && (instr & (1 << 15));
+    return false;
+}
+
+static bool IsStackAdjust(u32 instr, bool thumb)
+{
+    if (thumb)
+    {
+        u16 t = instr & 0xFFFF;
+        return (t & 0xFF00) == 0xB000 || (t & 0xF600) == 0xB400;
+    }
+    u32 rn = (instr >> 16) & 0xF;
+    u32 rd = (instr >> 12) & 0xF;
+    if ((instr & 0x0C000000) == 0)
+    {
+        u32 op = (instr >> 21) & 0xF;
+        return rd == 13 && rn == 13 && (op == 0x2 || op == 0x4);
+    }
+    if ((instr & 0x0E000000) == 0x08000000)
+        return rn == 13 && (instr & (1 << 21)) && !(instr & (1 << 13));
+    if ((instr & 0x0C000000) == 0x04000000)
+        return rn == 13 && rd != 13 && (!(instr & (1 << 24)) || (instr & (1 << 21)));
+    return false;
 }
 
 void Debugger::UnwindCalls(ARM& cpu, u32 pc)
@@ -363,34 +417,45 @@ void Debugger::UnwindCalls(ARM& cpu, u32 pc)
     u8 mode = cpu.CPSR & 0x1F;
     u32 sp = cpu.R[13];
 
-    if (mode != LastMode[n] && IsExceptionMode(LastMode[n]) && !IsExceptionMode(mode))
+    if (!Exceptions[n].empty() && IsExceptionMode(LastMode[n]) && IsExceptionReturn(PrevInstr[n], PrevThumb[n]))
     {
-        for (size_t i = stack.size(); i-- > 0;)
-            if (stack[i].Exception && stack[i].Mode == LastMode[n])
-            {
-                stack.resize(i);
-                break;
-            }
+        Interrupted ex = std::move(Exceptions[n].back());
+        Exceptions[n].pop_back();
+        if ((ex.Return & ~1u) == pc || IsExceptionMode(mode))
+            stack = std::move(ex.Stack);
+        else
+        {
+            CallStack[n] = std::move(ex.Stack);
+            SwitchStacks(n, ex.SP, sp);
+        }
+        LastSP[n][(mode == 0x1F ? 0x10 : mode) & 0xF] = sp;
+        LastMode[n] = mode;
     }
 
     u32& last = LastSP[n][(mode == 0x1F ? 0x10 : mode) & 0xF];
-    if (last)
+    if (last && sp != last && Exceptions[n].empty())
     {
+        bool sameBank = mode == LastMode[n];
         u32 delta = sp > last ? sp - last : last - sp;
-        if (delta >= StackSwitchDistance)
+        if ((sameBank && !IsStackAdjust(PrevInstr[n], PrevThumb[n])) || delta >= StackSwitchDistance)
             SwitchStacks(n, last, sp);
     }
     last = sp;
     LastMode[n] = mode;
 
+    size_t depth = stack.size();
+    for (size_t k = 0; k < std::min<size_t>(depth, 8); k++)
+    {
+        const CallFrame& f = stack[depth - 1 - k];
+        if ((f.Return & ~1u) == pc && f.Mode == mode && cpu.R[13] >= f.SP)
+        {
+            stack.resize(depth - 1 - k);
+            return;
+        }
+    }
     while (!stack.empty())
     {
         CallFrame& top = stack.back();
-        if ((top.Return & ~1u) == pc)
-        {
-            stack.pop_back();
-            return;
-        }
         if (top.Mode != mode || cpu.R[13] <= top.SP)
             return;
         stack.pop_back();
@@ -403,7 +468,11 @@ void Debugger::OnInstr(ARM& cpu, u32 pc)
     CurPC[n] = pc;
 
     if (CallTracking)
+    {
         UnwindCalls(cpu, pc);
+        PrevInstr[n] = cpu.NextInstr[0];
+        PrevThumb[n] = cpu.CPSR & 0x20;
+    }
 
     if (Coverage)
     {
@@ -530,10 +599,12 @@ void Debugger::OnException(ARM& cpu, u32 ret)
 {
     u8 n = cpu.Num;
     u32 entry = cpu.R[15] - ((cpu.CPSR & 0x20) ? 2 : 4);
-    auto& stack = CallStack[n];
-    if (stack.size() >= MaxCallDepth)
-        stack.erase(stack.begin());
-    stack.push_back({ret, entry, ret, cpu.R[13], (u8)(cpu.CPSR & 0x1F), true});
+    u8 from = LastMode[n];
+    u32 fromSP = LastSP[n][(from == 0x1F ? 0x10 : from) & 0xF];
+    if (Exceptions[n].size() >= 16)
+        Exceptions[n].erase(Exceptions[n].begin());
+    Exceptions[n].push_back({ret, fromSP, std::move(CallStack[n])});
+    CallStack[n] = {{ret, entry, ret, cpu.R[13], (u8)(cpu.CPSR & 0x1F), true}};
 }
 
 void Debugger::OnFault(ARM& cpu, u32 pc, u32 addr)

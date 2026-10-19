@@ -102,6 +102,7 @@ MDS_API int mds_reset(int id);
 
 MDS_API int mds_run(const int* ids, int count, uint32_t frames, int timeout_ms, int* states);
 MDS_API int mds_wait(const int* ids, int count, int timeout_ms, int* states);
+MDS_API int mds_gdb(int id, int port9, int port7, int break_on_start);
 MDS_API int mds_start(int id, uint32_t frames);
 MDS_API int mds_stop_after(int id, uint32_t frames);
 MDS_API int mds_interrupt(int id);
