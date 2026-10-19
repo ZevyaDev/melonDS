@@ -1,4 +1,5 @@
 #include "lua/LuaMain.h"
+#include "LuaDebug.h"
 #include <QPushButton>
 #include <QLabel>
 #include <QComboBox>
@@ -15,12 +16,13 @@ void LuaBundle::luaCallback(int ref)
 {
     //Call refrenced lua function
     if (!luaState || flagPause) return;
+    LuaDebug::Guard guard(luaState);
     lua_rawgeti(luaState, LUA_REGISTRYINDEX, ref);
     if (lua_pcall(luaState,0,0,0)!=0)
     {
         //Handel Errors
         printText(lua_tostring(luaState,-1));
-        luaState = nullptr;
+        closeState();
     }
 }
 

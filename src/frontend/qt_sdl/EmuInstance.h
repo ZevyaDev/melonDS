@@ -81,6 +81,8 @@ enum
 bool isRightModKey(QKeyEvent* event);
 int getEventKeyVal(QKeyEvent* event);
 
+class DebugBridge;
+
 class EmuInstance
 {
 public:
@@ -90,6 +92,7 @@ public:
     int getInstanceID() { return instanceID; }
     int getConsoleType() { return consoleType; }
     EmuThread* getEmuThread() { return emuThread; }
+    DebugBridge* getDebugBridge() { return debugBridge; }
     melonDS::NDS* getNDS() { return nds; }
 
     MainWindow* getMainWindow() { return mainWindow; }
@@ -270,6 +273,7 @@ private:
     int instanceID;
 
     EmuThread* emuThread;
+    DebugBridge* debugBridge;
 
     MainWindow* mainWindow;
     MainWindow* windowList[kMaxWindows];

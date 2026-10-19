@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - debug
       - ci/*
   pull_request:
     branches:

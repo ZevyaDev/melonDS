@@ -54,6 +54,7 @@
 #include "Savestate.h"
 
 #include "EmuInstance.h"
+#include "debugger/DebugBridge.h"
 
 using namespace melonDS;
 
@@ -437,13 +438,14 @@ void EmuThread::run()
             snprintf(melontitle, sizeof(melontitle), "melonDS " MELONDS_VERSION);
             changeWindowTitle(melontitle);
 
-            SDL_Delay(75);
+            emuInstance->getDebugBridge()->idle(75);
 
             emuInstance->drawScreen();
         }
 
         handleMessages();
-        
+        emuInstance->getDebugBridge()->serviceFrame();
+
         //Lua Script Stuff (-for now happens at the end of each frame regardless of emuStatus)
         emit signalLuaUpdate();
     }
@@ -454,6 +456,7 @@ void EmuThread::sendMessage(Message msg)
     msgMutex.lock();
     msgQueue.enqueue(msg);
     msgMutex.unlock();
+    emuInstance->getDebugBridge()->wake();
 }
 
 void EmuThread::waitMessage(int num)
@@ -469,14 +472,48 @@ void EmuThread::waitAllMessages()
         msgSemaphore.acquire();
 }
 
-void EmuThread::handleMessages()
+static bool IsParkSafe(EmuThread::MessageType type)
+{
+    return type == EmuThread::msg_EmuPause || type == EmuThread::msg_EmuUnpause || type == EmuThread::msg_EmuFrameStep;
+}
+
+int EmuThread::handleParkedMessages()
+{
+    return handleMessages(true);
+}
+
+void EmuThread::debugResume()
+{
+    if (!emuActive || emuStatus != emuStatus_Paused)
+        return;
+    emuPauseStack = emuPauseStackRunning;
+    emuStatus = emuStatus_Running;
+    emuInstance->audioEnable();
+    emit windowEmuPause(false);
+}
+
+int EmuThread::handleMessages(bool parked)
 {
     bool glborrow = false;
+    int parkAction = park_Stay;
 
     msgMutex.lock();
     while (!msgQueue.empty())
     {
+        if (parked && !IsParkSafe(msgQueue.head().type))
+        {
+            parkAction = park_Detach;
+            break;
+        }
+
         Message msg = msgQueue.dequeue();
+        if (parked && msg.type == msg_EmuFrameStep)
+        {
+            emuStatus = emuStatus_Paused;
+            parkAction = park_Resume;
+            msgSemaphore.release();
+            continue;
+        }
         switch (msg.type)
         {
         case msg_Exit:
@@ -667,6 +704,8 @@ void EmuThread::handleMessages()
         glBorrowCond.wait(&glBorrowMutex);
         glBorrowMutex.unlock();
     }
+
+    return parkAction;
 }
 
 void EmuThread::changeWindowTitle(char* title)

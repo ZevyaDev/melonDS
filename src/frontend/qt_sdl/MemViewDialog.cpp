@@ -17,6 +17,10 @@
 */
 
 #include "MemViewDialog.h"
+#include "debugger/DebugBridge.h"
+#include "debugger/DebugSymbols.h"
+#include "debugger/DebugTool.h"
+#include "debugger/DebugTools.h"
 #include "Platform.h"
 #include <QPainter>
 #include <QGraphicsTextItem>
@@ -380,6 +384,41 @@ MemViewDialog::MemViewDialog(QWidget* parent) : QDialog(parent)
     this->DumpBtn->setGeometry(7, 259, 145, 32);
     this->DumpBtn->setObjectName("pushbutton_dump");
 
+    this->setFixedSize(730, 404);
+    this->SearchLineEdit->setMaxLength(128);
+    this->SearchLineEdit->setToolTip("Address or symbol[+offset]");
+
+    this->InfoLabel = new QLabel(this);
+    this->InfoLabel->setGeometry(8, 334, 714, 24);
+    this->InfoLabel->setFont(MonoFont());
+    this->InfoLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    this->InfoLabel->setObjectName("label_info");
+
+    QPushButton* breakWrite = new QPushButton("Break on write", this);
+    breakWrite->setGeometry(7, 364, 120, 32);
+    breakWrite->setToolTip("Add a write watchpoint on the focused address (size from the bits box)");
+    connect(breakWrite, &QPushButton::clicked, this, [this] { this->AddWatch(melonDS::Watch_Write); });
+
+    QPushButton* breakRead = new QPushButton("Break on read", this);
+    breakRead->setGeometry(131, 364, 120, 32);
+    breakRead->setToolTip("Add a read watchpoint on the focused address (size from the bits box)");
+    connect(breakRead, &QPushButton::clicked, this, [this] { this->AddWatch(melonDS::Watch_Read); });
+
+    QPushButton* disasm = new QPushButton("Disassemble", this);
+    disasm->setGeometry(255, 364, 110, 32);
+    connect(disasm, &QPushButton::clicked, this, [this] {
+        uint32_t addr = this->GetFocusAddress(this->GfxScene->focusItem());
+        if (addr != (uint32_t)-1)
+            DebugTools::showDisassembly(this->GetBridge(), (QWidget*)this->parent(), addr);
+    });
+
+    QCheckBox* writers = new QCheckBox("Track last writer", this);
+    writers->setGeometry(375, 368, 160, 24);
+    writers->setToolTip("Record which instruction or DMA last wrote each word of main RAM");
+    connect(writers, &QCheckBox::toggled, this, [this](bool on) {
+        this->GetBridge()->post([on](melonDS::NDS& nds) { nds.Debugger.SetLastWriter(on); });
+    });
+
     this->GfxView->setScene(this->GfxScene);
     this->GfxView->setGeometry(160, 10, 550, 280);
     this->GfxView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -573,6 +612,7 @@ MemViewDialog::MemViewDialog(QWidget* parent) : QDialog(parent)
     connect(this->GoBtn, &QPushButton::pressed, this, &MemViewDialog::onGoBtnPressed);
     connect(this->SetValBtn, &QPushButton::pressed, this, &MemViewDialog::onValueBtnSetPressed);
     connect(this->GfxScene, &QGraphicsScene::focusItemChanged, this->GfxScene, &CustomGraphicsScene::onFocusItemChanged);
+    connect(this->GfxScene, &QGraphicsScene::focusItemChanged, this, [this] { this->UpdateInfo(); });
     connect(this->ScrollBar, &QScrollBar::valueChanged, this, &MemViewDialog::onScrollBarValueChanged);
     connect(this->MemRegionBox, &QComboBox::currentIndexChanged, this, &MemViewDialog::onMemRegionIndexChanged);
     connect(this->DumpBtn, &QPushButton::pressed, this, &MemViewDialog::onDumpBtnPressed);
@@ -734,6 +774,7 @@ void MemViewDialog::SwitchMemRegion(uint32_t address) {
                     break;
                 case 0x05000000:
                     index = memRegionType_Palettes;
+                    break;
                 case 0x07000000:
                     index = memRegionType_OAM;
                 default:
@@ -852,16 +893,17 @@ void MemViewDialog::GoToAddress(const QString &text)
     QString rawAddr = text;
     uint32_t addr = 0;
 
-    // remove the 0x prefix
-    this->StripStringHex(&rawAddr);
-
-    // make sure the address is the right length
-    if (rawAddr.length() < 8)
+    if (!this->GetBridge()->symbols().parseAddress(text, addr))
     {
-        return;
-    }
+        this->StripStringHex(&rawAddr);
 
-    addr = rawAddr.toUInt(0, 16);
+        if (rawAddr.length() < 8)
+        {
+            return;
+        }
+
+        addr = rawAddr.toUInt(0, 16);
+    }
 
     // change memory region if necessary
     if (addr < this->ARM9AddrStart || addr > this->ARM9AddrEnd + 0x100)
@@ -911,27 +953,11 @@ void MemViewDialog::onValueBtnSetPressed()
     text = this->SetValNumber->text();
     this->StripStringHex(&text);
 
-    void* pRAM = this->GetRAM(address);
     bool isHex = this->SetValIsHex->isChecked() || this->SetValNumber->text().startsWith("0x");
     int base = isHex == true ? 16 : 10;
-
-    if (pRAM != nullptr)
-    {
-        switch (this->SetValBits->currentIndex())
-        {
-            case 0: // 8 bits
-                *((uint8_t*)pRAM) = text.toUInt(0, base);
-                break;
-            case 1: // 16 bits
-                *((uint16_t*)pRAM) = text.toUInt(0, base);
-                break;
-            case 2: // 32 bits
-                *((uint32_t*)pRAM) = text.toUInt(0, base);
-                break;
-            default:
-                return;
-        }
-    }
+    u32 value = text.toUInt(0, base);
+    u8 size = 1 << this->SetValBits->currentIndex();
+    this->GetBridge()->post([address, size, value](melonDS::NDS& nds) { nds.Debugger.Poke(0, address, size, value); });
 }
 
 void MemViewDialog::onApplyEditToRAM(uint8_t value, QGraphicsItem *focus)
@@ -942,11 +968,54 @@ void MemViewDialog::onApplyEditToRAM(uint8_t value, QGraphicsItem *focus)
         return;
     }
 
-    uint8_t* pRAM = (uint8_t*)this->GetRAM(addr);
-    if (pRAM != nullptr)
+    this->GetBridge()->post([addr, value](melonDS::NDS& nds) { nds.Debugger.Poke(0, addr, 1, value); });
+}
+
+DebugBridge* MemViewDialog::GetBridge()
+{
+    return ((MainWindow*)this->parent())->getEmuInstance()->getDebugBridge();
+}
+
+void MemViewDialog::UpdateInfo()
+{
+    uint32_t addr = this->GetFocusAddress(this->GfxScene->focusItem());
+    if (addr == (uint32_t)-1)
     {
-        *pRAM = value;
+        this->InfoLabel->clear();
+        return;
     }
+    DebugBridge* bridge = this->GetBridge();
+    QString text = Hex(addr);
+    QString sym = bridge->symbols().describe(addr);
+    if (!sym.isEmpty())
+    {
+        text += "  " + sym;
+    }
+    this->InfoLabel->setText(text);
+    bridge->call(this, [addr](melonDS::NDS& nds) { return nds.Debugger.GetLastWriter(addr); },
+        [this, addr, text](const u32& writer) {
+            if (this->GetFocusAddress(this->GfxScene->focusItem()) != addr || !writer)
+            {
+                return;
+            }
+            DebugBridge* bridge = this->GetBridge();
+            QString by = (writer & 0xFFFFFFF0) == 0xFFFFFFF0
+                ? QString("DMA%1").arg((writer >> 1) & 3)
+                : Hex(writer & ~1u) + " " + bridge->symbols().describe(writer & ~1u);
+            this->InfoLabel->setText(text + "    last written by " + by);
+        });
+}
+
+void MemViewDialog::AddWatch(u8 flags)
+{
+    uint32_t addr = this->GetFocusAddress(this->GfxScene->focusItem());
+    if (addr == (uint32_t)-1)
+    {
+        return;
+    }
+    u32 size = 1 << this->SetValBits->currentIndex();
+    this->GetBridge()->post([addr, size, flags](melonDS::NDS& nds) { nds.Debugger.AddWatchpoint(1, addr, size, flags); });
+    this->InfoLabel->setText(QString("Watchpoint on %1 (%2 bytes); see the Debugger window").arg(Hex(addr)).arg(size));
 }
 
 void MemViewDialog::onSwitchFocus(FocusDirection eDirection, FocusAction eAction)

@@ -35,6 +35,10 @@
 #include "ArchiveUtil.h"
 #endif
 #include "EmuInstance.h"
+#include "debugger/DebugBridge.h"
+#ifdef MELONDS_AUTOMATION
+#include "debugger/Automation.h"
+#endif
 #include "Config.h"
 #include "Platform.h"
 #include "Net.h"
@@ -132,6 +136,7 @@ EmuInstance::EmuInstance(int inst) : deleting(false),
     net.RegisterInstance(instanceID);
 
     emuThread = new EmuThread(this);
+    debugBridge = new DebugBridge(this);
 
     numWindows = 0;
     mainWindow = nullptr;
@@ -142,6 +147,10 @@ EmuInstance::EmuInstance(int inst) : deleting(false),
     createWindow();
 
     emuThread->start();
+
+#ifdef MELONDS_AUTOMATION
+    Automation::start(this);
+#endif
 
     // if any extra windows were saved as enabled, open them
     for (int i = 1; i < kMaxWindows; i++)
@@ -171,8 +180,10 @@ EmuInstance::~EmuInstance()
     if (nds)
     {
         saveRTCData();
+        debugBridge->detachConsole();
         delete nds;
     }
+    delete debugBridge;
 }
 
 
@@ -1344,6 +1355,7 @@ bool EmuInstance::updateConsole() noexcept
         if (nds)
         {
             saveRTCData();
+            debugBridge->detachConsole();
             delete nds;
         }
 
@@ -1353,6 +1365,7 @@ bool EmuInstance::updateConsole() noexcept
             nds = new NDS(std::move(ndsargs), this);
 
         nds->Reset();
+        debugBridge->attachConsole(nds);
         loadRTCData();
         emuThread->updateVideoRenderer();
     }

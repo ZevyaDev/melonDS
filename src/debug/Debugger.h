@@ -120,7 +120,10 @@ public:
     const std::vector<Watchpoint>& GetWatchpoints() const { return Watchpoints; }
 
     void SetBreakHandler(std::function<void(const BreakEvent&)> handler);
+    void SetServiceHandler(std::function<void()> handler);
+    void RequestService();
     void RequestBreak(u8 cpuMask);
+    void CancelBreakRequests();
     void Step(u8 cpu, u32 count);
 
     void SetTrace(u8 cpuMask, u32 start, u32 end, u32 capacity);
@@ -162,6 +165,8 @@ private:
     std::array<std::vector<u8>, 2> ExecPages;
     std::array<std::vector<u8>, 2> WatchPages;
     std::function<void(const BreakEvent&)> Handler;
+    std::function<void()> ServiceHandler;
+    std::atomic<bool> ServiceRequested {false};
     std::array<std::atomic<bool>, 2> BreakRequested {};
     std::array<u32, 2> StepRemaining {};
     std::array<bool, 2> PendingValid {};

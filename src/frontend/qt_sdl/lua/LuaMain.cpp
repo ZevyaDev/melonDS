@@ -1,4 +1,9 @@
 #include "lua/LuaMain.h"
+#include "LuaDebug.h"
+#include "debugger/DebugBridge.h"
+#include <QApplication>
+#include <QBoxLayout>
+#include <QThread>
 #include <QFileDialog>
 #include <QPushButton>
 #include <QScrollBar>
@@ -26,24 +31,44 @@ LuaConsoleDialog::LuaConsoleDialog(QWidget* parent) : QDialog(parent)
     }
     bundle = new LuaBundle(this,mainWindow->getEmuInstance());
     console = new LuaConsole(this);
-    console->setGeometry(0,20,302,80);
     bar = console->verticalScrollBar();
     buttonPausePlay = new QPushButton("Pause/UnPause",this);
-    buttonPausePlay->setGeometry(0,0,100,20);
     buttonStartStop = new QPushButton("Stop",this);
-    buttonStartStop->setGeometry(101,0,100,20);
     buttonOpenScript = new QPushButton("OpenLuaFile",this);
-    buttonOpenScript->setGeometry(202,0,100,20);
+    commandLine = new QLineEdit(this);
+    commandLine->setObjectName("command");
+    commandLine->setPlaceholderText("Lua command, e.g. print(emu.getregister(\"pc\"))");
+
+    QVBoxLayout* layout = new QVBoxLayout(this);
+    QHBoxLayout* buttons = new QHBoxLayout();
+    buttons->addWidget(buttonPausePlay);
+    buttons->addWidget(buttonStartStop);
+    buttons->addWidget(buttonOpenScript);
+    buttons->addStretch();
+    layout->addLayout(buttons);
+    layout->addWidget(console);
+    layout->addWidget(commandLine);
+    resize(560, 360);
+
     connect(buttonOpenScript,&QPushButton::clicked,this,&LuaConsoleDialog::onOpenScript);
     connect(buttonStartStop,&QPushButton::clicked,this,&LuaConsoleDialog::onStop);
     connect(buttonPausePlay,&QPushButton::clicked,this,&LuaConsoleDialog::onPausePlay);
+    connect(commandLine, &QLineEdit::returnPressed, this, [this] {
+        QString line = commandLine->text();
+        if (line.trimmed().isEmpty())
+            return;
+        commandLine->clear();
+        bundle->runLine(line);
+    });
     this->setWindowTitle("Lua Script");
 }
 
 void LuaConsoleDialog::closeEvent(QCloseEvent *event)
 {
     onStop();
+    bundle->closeState();
     bundle->overlays->clear();
+    bundle->luaCanvas = nullptr;
     flagClosed = true;
     event->accept();
 }
@@ -70,7 +95,62 @@ void LuaConsole::onGetText(const QString& string)
 
 void LuaBundle::printText(QString string)
 {
-    this->luaDialog->console->onGetText(string);
+    LuaConsole* console = this->luaDialog->console;
+    if (QThread::currentThread() == console->thread())
+        console->onGetText(string);
+    else
+        QMetaObject::invokeMethod(console, [console, string] { console->onGetText(string); }, Qt::QueuedConnection);
+}
+
+static int GuiOnly(lua_State* L)
+{
+    if (QThread::currentThread() != qApp->thread())
+        return luaL_error(L, "%s is not available inside a memory hook; set a flag there and act on it in _Update",
+            lua_tostring(L, lua_upvalueindex(2)));
+    if (lua_toboolean(L, lua_upvalueindex(3)) && !get_bundle(L)->luaCanvas)
+        return luaL_error(L, "%s needs a canvas: call gui.MakeCanvas, then gui.SetCanvas", lua_tostring(L, lua_upvalueindex(2)));
+    auto fn = (lua_CFunction)lua_touserdata(L, lua_upvalueindex(1));
+    return fn(L);
+}
+
+static void GuardLibrary(lua_State* L, const char* lib)
+{
+    bool gui = std::string(lib) == "gui";
+    if (lua_getglobal(L, lib) != LUA_TTABLE)
+    {
+        lua_pop(L, 1);
+        return;
+    }
+    std::vector<std::pair<std::string, lua_CFunction>> funcs;
+    lua_pushnil(L);
+    while (lua_next(L, -2))
+    {
+        if (lua_type(L, -2) == LUA_TSTRING && lua_iscfunction(L, -1))
+            funcs.emplace_back(lua_tostring(L, -2), lua_tocfunction(L, -1));
+        lua_pop(L, 1);
+    }
+    for (auto& [name, fn] : funcs)
+    {
+        lua_pushlightuserdata(L, (void*)fn);
+        lua_pushstring(L, (std::string(lib) + "." + name).c_str());
+        lua_pushboolean(L, gui && name != "MakeCanvas" && name != "SetCanvas" && name != "clearImageCache");
+        lua_pushcclosure(L, GuiOnly, 3);
+        lua_setfield(L, -2, name.c_str());
+    }
+    lua_pop(L, 1);
+}
+
+void LuaBundle::closeState()
+{
+    lua_State* L = luaState;
+    if (!L)
+        return;
+    luaState = nullptr;
+    {
+        LuaDebug::Guard guard(L);
+        LuaDebug::Unregister(L);
+    }
+    lua_close(L);
 }
 
 void LuaConsole::onClear()
@@ -124,11 +204,76 @@ void LuaLibrary::load(lua_State* L)
 void LuaBundle::createLuaState()
 {
     if (!flagNewLua) return;
+    closeState();
     overlays->clear();
+    luaCanvas = nullptr;
     flagNewLua = false;
-    luaState = nullptr;
+    flagStop = false;
     QByteArray fileName = luaDialog->currentScript.fileName().toLocal8Bit();
     QString filedir = luaDialog->currentScript.dir().path();
+    lua_State* L = newState();
+    QDir::setCurrent(filedir);
+    bool loaded;
+    {
+        LuaDebug::Guard guard(L);
+        loaded = luaL_dofile(L,fileName.data())==LUA_OK;
+        if (!loaded)
+            printText(lua_tostring(L,-1));
+    }
+    luaState = L;
+    if (!loaded)
+        closeState();
+}
+
+void LuaBundle::runLine(const QString& line)
+{
+    printText("> " + line);
+    if (!luaState)
+    {
+        flagStop = false;
+        luaState = newState();
+    }
+    lua_State* L = luaState;
+    LuaDebug::Guard guard(L);
+    int base = lua_gettop(L);
+    QByteArray code = line.toUtf8();
+    QByteArray expr = "return " + code;
+    int status = luaL_loadbuffer(L, expr.constData(), expr.size(), "=console");
+    if (status != LUA_OK)
+    {
+        lua_settop(L, base);
+        status = luaL_loadbuffer(L, code.constData(), code.size(), "=console");
+    }
+    if (status == LUA_OK)
+        status = lua_pcall(L, 0, LUA_MULTRET, 0);
+    if (status != LUA_OK)
+    {
+        printText(lua_tostring(L, -1));
+        lua_settop(L, base);
+        return;
+    }
+    QStringList values;
+    int top = lua_gettop(L);
+    for (int i = base + 1; i <= top; i++)
+    {
+        if (lua_isinteger(L, i))
+        {
+            lua_Integer v = lua_tointeger(L, i);
+            values << QString("%1 (0x%2)").arg(v).arg((quint64)(quint32)v, 0, 16);
+        }
+        else
+        {
+            values << QString::fromUtf8(luaL_tolstring(L, i, nullptr));
+            lua_pop(L, 1);
+        }
+    }
+    lua_settop(L, base);
+    if (!values.isEmpty())
+        printText(values.join("\t"));
+}
+
+lua_State* LuaBundle::newState()
+{
     lua_State* L = luaL_newstate();
     LuaBundle* pBundle = this;
     std::memcpy(lua_getextraspace(L), &pBundle, sizeof(LuaBundle*)); //Write a pointer to this LuaBundle into the extra space of the new lua_State
@@ -137,16 +282,21 @@ void LuaBundle::createLuaState()
         lua_register(L,function->name,function->cfunction);
     for (LuaLibrary* lLib: luaLibraries)
         lLib->load(L);
-    QDir::setCurrent(filedir);
-    lua_sethook(L,&luaHookFunction,LUA_MASKCOUNT,MELON_LUA_HOOK_INSTRUCTION_COUNT); 
-    if (luaL_dofile(L,fileName.data())==LUA_OK)
-    {
-        luaState = L;
-    }
-    else //Error loading script
-    {
-        printText(lua_tostring(L,-1));
-    }
+    for (const char* lib : {"gui", "forms", "input", "client", "savestate", "console"})
+        GuardLibrary(L, lib);
+
+    EmuInstance* inst = emuInstance;
+    DebugBridge* bridge = inst->getDebugBridge();
+    LuaDebug::Register(L, {
+        [inst] { return inst->getNDS(); },
+        [this](const std::string& s) { printText(QString::fromStdString(s)); },
+        [bridge](const std::function<void(melonDS::NDS&)>& fn) { return bridge->run(fn); },
+        [bridge] { bridge->idle(1); },
+        [bridge] { bridge->resume(); },
+    });
+
+    lua_sethook(L,&luaHookFunction,LUA_MASKCOUNT,MELON_LUA_HOOK_INSTRUCTION_COUNT);
+    return L;
 }
 
 void LuaConsoleDialog::onStop()
@@ -169,19 +319,25 @@ void LuaConsoleDialog::onLuaUpdate()
 //Gets Called once a frame
 void LuaBundle::luaUpdate()
 {
-    if (!luaState || flagPause) return;
-    if (lua_getglobal(luaState,"_Update")!=LUA_TFUNCTION)
+    if (!luaState) return;
+    if (flagStop)
     {
-        printText("No \"_Update\" Function found, pausing script...");
-        flagPause = true;
+        closeState();
+        printText("Script stopped");
         return;
     }
-    if (lua_pcall(luaState,0,0,0)!=0)
+    if (flagPause) return;
+    LuaDebug::Guard guard(luaState);
+    if (lua_getglobal(luaState,"_Update")!=LUA_TFUNCTION)
+        lua_pop(luaState, 1);
+    else if (lua_pcall(luaState,0,0,0)!=0)
     {
         //Handel Errors
         printText(lua_tostring(luaState,-1));
-        luaState = nullptr;
+        closeState();
+        return;
     }
+    LuaDebug::RunFrameEnd(luaState);
 }
 
 //"Global" lua functions

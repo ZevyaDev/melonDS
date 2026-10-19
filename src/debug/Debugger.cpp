@@ -117,6 +117,18 @@ void Debugger::SetBreakHandler(std::function<void(const BreakEvent&)> handler)
     Handler = std::move(handler);
 }
 
+void Debugger::SetServiceHandler(std::function<void()> handler)
+{
+    ServiceHandler = std::move(handler);
+}
+
+void Debugger::RequestService()
+{
+    ServiceRequested = true;
+    Armed[0] = true;
+    Armed[1] = true;
+}
+
 void Debugger::RequestBreak(u8 cpuMask)
 {
     for (int i = 0; i < 2; i++)
@@ -125,6 +137,14 @@ void Debugger::RequestBreak(u8 cpuMask)
             BreakRequested[i] = true;
             Armed[i] = true;
         }
+}
+
+void Debugger::CancelBreakRequests()
+{
+    BreakRequested[0] = false;
+    BreakRequested[1] = false;
+    StepRemaining = {};
+    Rearm();
 }
 
 void Debugger::Step(u8 cpu, u32 count)
@@ -304,7 +324,7 @@ void Debugger::Rearm()
             data |= w.Enabled && (w.CPUMask & (1 << i));
         DataArmed[i] = data;
         Armed[i] = exec || data || CallTracking || Coverage || (TraceMask & (1 << i))
-            || StepRemaining[i] || PendingValid[i] || BreakRequested[i];
+            || StepRemaining[i] || PendingValid[i] || BreakRequested[i] || ServiceRequested;
     }
 }
 
@@ -467,6 +487,13 @@ void Debugger::OnInstr(ARM& cpu, u32 pc)
 {
     u8 n = cpu.Num;
     CurPC[n] = pc;
+
+    if (ServiceRequested.load(std::memory_order_relaxed) && ServiceRequested.exchange(false))
+    {
+        if (ServiceHandler)
+            ServiceHandler();
+        Rearm();
+    }
 
     if (CallTracking)
     {

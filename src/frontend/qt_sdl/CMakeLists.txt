@@ -69,6 +69,22 @@ set(SOURCES_QT_SDL
     lua/libs/LuaMemory.cpp
     lua/libs/LuaSavestate.cpp
     lua/libs/LuaMisc.cpp
+
+    ../lua_debug/LuaDebug.cpp
+
+    debugger/DebugBridge.cpp
+    debugger/DebugSymbols.cpp
+    debugger/DebugTool.cpp
+    debugger/DebugTools.cpp
+    debugger/DebuggerWindow.cpp
+    debugger/Disassembler.cpp
+    debugger/DisasmView.cpp
+    debugger/TraceWindow.cpp
+    debugger/RamSearchWindow.cpp
+    debugger/IORegsWindow.cpp
+    debugger/Gfx2DWindows.cpp
+    debugger/Gfx3DWindow.cpp
+    debugger/SoundWindow.cpp
 )
 
 option(USE_QT6 "Use Qt 6 instead of Qt 5" ON)
@@ -201,6 +217,23 @@ else()
 endif()
 
 target_include_directories(melonDS PRIVATE ${LUA_INCLUDE_DIR})
+target_include_directories(melonDS PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/debugger"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../lua_debug")
+
+option(MELONDS_AUTOMATION "Drive the Qt frontend through a command directory named by MELONDS_AUTOMATION (for testing)" OFF)
+if (MELONDS_AUTOMATION)
+    target_sources(melonDS PRIVATE debugger/Automation.cpp)
+    target_compile_definitions(melonDS PRIVATE MELONDS_AUTOMATION)
+endif()
+
+pkg_check_modules(Capstone IMPORTED_TARGET capstone)
+if (Capstone_FOUND)
+    target_link_libraries(melonDS PRIVATE PkgConfig::Capstone)
+    target_compile_definitions(melonDS PRIVATE MELONDS_HAVE_CAPSTONE)
+else()
+    message(WARNING "capstone not found: the debugger shows raw opcodes instead of disassembly")
+endif()
 
 target_link_libraries(melonDS PRIVATE core)
 target_link_libraries(melonDS PRIVATE PkgConfig::SDL2 PkgConfig::LibArchive PkgConfig::Zstd PkgConfig::Faad ${LUA_LIBRARIES})

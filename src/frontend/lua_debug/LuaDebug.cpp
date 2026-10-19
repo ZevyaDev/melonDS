@@ -16,6 +16,7 @@
     with melonDS. If not, see http://www.gnu.org/licenses/.
 */
 
+#include <algorithm>
 #include <cstring>
 #include <map>
 #include <vector>
@@ -45,14 +46,22 @@ struct Context
     std::recursive_mutex Lock;
 };
 
+using ContextPtr = std::shared_ptr<Context>;
+
 static const char* ContextKey = "melonDS.LuaDebug";
+
+static ContextPtr* Owner(lua_State* L)
+{
+    lua_getfield(L, LUA_REGISTRYINDEX, ContextKey);
+    auto owner = static_cast<ContextPtr*>(lua_touserdata(L, -1));
+    lua_pop(L, 1);
+    return owner;
+}
 
 static Context* Ctx(lua_State* L)
 {
-    lua_getfield(L, LUA_REGISTRYINDEX, ContextKey);
-    auto ctx = static_cast<Context*>(lua_touserdata(L, -1));
-    lua_pop(L, 1);
-    return ctx;
+    ContextPtr* owner = Owner(L);
+    return owner ? owner->get() : nullptr;
 }
 
 static melonDS::NDS& Console(lua_State* L)
@@ -61,6 +70,30 @@ static melonDS::NDS& Console(lua_State* L)
     if (!nds)
         luaL_error(L, "no console running");
     return *nds;
+}
+
+static void Exec(lua_State* L, const std::function<void(melonDS::NDS&)>& fn)
+{
+    Context* ctx = Ctx(L);
+    melonDS::NDS& nds = Console(L);
+    if (!ctx->H.Exec)
+    {
+        fn(nds);
+        return;
+    }
+    if (!ctx->H.Exec(fn))
+        luaL_error(L, "the emulator thread did not answer");
+}
+
+static void Acquire(Context* ctx)
+{
+    if (!ctx->H.Wait)
+    {
+        ctx->Lock.lock();
+        return;
+    }
+    while (!ctx->Lock.try_lock())
+        ctx->H.Wait();
 }
 
 int CPUArg(lua_State* L, int idx, int def)
@@ -93,8 +126,11 @@ static void PushEvent(lua_State* L, const BreakEvent& ev)
 
 static bool CallHook(Context* ctx, int ref, const BreakEvent* ev)
 {
-    std::lock_guard lock(ctx->Lock);
+    Acquire(ctx);
+    std::lock_guard lock(ctx->Lock, std::adopt_lock);
     lua_State* L = ctx->L;
+    if (!L)
+        return false;
     lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
     int nargs = 0;
     if (ev)
@@ -121,17 +157,18 @@ static int AddHook(lua_State* L, BreakKind kind)
     int cpu = CPUArg(L, 4, 0);
     u32 size = (u32)luaL_optinteger(L, 5, 1);
 
-    Context* ctx = Ctx(L);
+    ContextPtr ctx = *Owner(L);
     lua_pushvalue(L, 1);
     int ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    BreakCallback cb = [ctx, ref](const BreakEvent& ev) { return CallHook(ctx, ref, &ev); };
+    BreakCallback cb = [ctx, ref](const BreakEvent& ev) { return CallHook(ctx.get(), ref, &ev); };
 
-    melonDS::NDS& nds = Console(L);
-    int id;
-    if (kind == BreakKind::Exec)
-        id = nds.Debugger.AddBreakpoint(1 << cpu, addr, cb);
-    else
-        id = nds.Debugger.AddWatchpoint(1 << cpu, addr, size, kind == BreakKind::Read ? Watch_Read : Watch_Write, cb);
+    int id = -1;
+    Exec(L, [&](melonDS::NDS& nds) {
+        if (kind == BreakKind::Exec)
+            id = nds.Debugger.AddBreakpoint(1 << cpu, addr, cb);
+        else
+            id = nds.Debugger.AddWatchpoint(1 << cpu, addr, size, kind == BreakKind::Read ? Watch_Read : Watch_Write, cb);
+    });
     if (id < 0)
     {
         luaL_unref(L, LUA_REGISTRYINDEX, ref);
@@ -158,14 +195,29 @@ static int OnFrameEnd(lua_State* L)
     return 1;
 }
 
-static void DropHook(lua_State* L, Context* ctx, size_t i)
+static void DropHooks(lua_State* L, Context* ctx, std::vector<size_t> indices)
 {
-    Hook h = ctx->Hooks[i];
-    ctx->Hooks.erase(ctx->Hooks.begin() + i);
-    if (!h.Frame)
-        if (melonDS::NDS* nds = ctx->H.GetNDS())
-            nds->Debugger.Remove(h.ID);
-    luaL_unref(L, LUA_REGISTRYINDEX, h.Ref);
+    std::vector<int> ids;
+    for (size_t i : indices)
+        if (!ctx->Hooks[i].Frame)
+            ids.push_back(ctx->Hooks[i].ID);
+    if (!ids.empty() && ctx->H.GetNDS())
+    {
+        auto remove = [&ids](melonDS::NDS& nds) {
+            for (int id : ids)
+                nds.Debugger.Remove(id);
+        };
+        if (ctx->H.Exec)
+            ctx->H.Exec(remove);
+        else
+            remove(*ctx->H.GetNDS());
+    }
+    std::sort(indices.rbegin(), indices.rend());
+    for (size_t i : indices)
+    {
+        luaL_unref(L, LUA_REGISTRYINDEX, ctx->Hooks[i].Ref);
+        ctx->Hooks.erase(ctx->Hooks.begin() + i);
+    }
 }
 
 static int UnregisterByID(lua_State* L)
@@ -175,7 +227,7 @@ static int UnregisterByID(lua_State* L)
     for (size_t i = 0; i < ctx->Hooks.size(); i++)
         if (ctx->Hooks[i].ID == id)
         {
-            DropHook(L, ctx, i);
+            DropHooks(L, ctx, {i});
             lua_pushboolean(L, 1);
             return 1;
         }
@@ -187,14 +239,12 @@ static int UnregisterByName(lua_State* L)
 {
     std::string name = luaL_checkstring(L, 1);
     Context* ctx = Ctx(L);
-    bool any = false;
-    for (size_t i = ctx->Hooks.size(); i-- > 0;)
+    std::vector<size_t> hits;
+    for (size_t i = 0; i < ctx->Hooks.size(); i++)
         if (ctx->Hooks[i].Name == name)
-        {
-            DropHook(L, ctx, i);
-            any = true;
-        }
-    lua_pushboolean(L, any);
+            hits.push_back(i);
+    DropHooks(L, ctx, hits);
+    lua_pushboolean(L, !hits.empty());
     return 1;
 }
 
@@ -210,8 +260,6 @@ static ARM& CPU(melonDS::NDS& nds, int cpu)
 
 static u32 InstrAddress(melonDS::NDS& nds, int cpu)
 {
-    if (nds.Debugger.IsBreaking())
-        return nds.Debugger.CurPC[cpu];
     ARM& arm = CPU(nds, cpu);
     return arm.R[15] - ((arm.CPSR & 0x20) ? 2 : 4);
 }
@@ -240,31 +288,37 @@ static int GetRegister(lua_State* L)
     int reg = ParseRegister(luaL_checkstring(L, 1), cpu);
     if (reg < 0)
         return luaL_argerror(L, 1, "unknown register");
-    melonDS::NDS& nds = Console(L);
-    ARM& arm = CPU(nds, cpu);
-    if (reg == 16)
-        lua_pushinteger(L, arm.CPSR);
-    else if (reg == 15)
-        lua_pushinteger(L, InstrAddress(nds, cpu));
-    else
-        lua_pushinteger(L, arm.R[reg]);
+    u32 value = 0;
+    Exec(L, [&](melonDS::NDS& nds) {
+        ARM& arm = CPU(nds, cpu);
+        value = reg == 16 ? arm.CPSR : reg == 15 ? InstrAddress(nds, cpu) : arm.R[reg];
+    });
+    lua_pushinteger(L, value);
     return 1;
 }
 
 static int GetRegisters(lua_State* L)
 {
-    melonDS::NDS& nds = Console(L);
+    u32 regs[2][17];
+    Exec(L, [&](melonDS::NDS& nds) {
+        for (int cpu = 0; cpu < 2; cpu++)
+        {
+            ARM& arm = CPU(nds, cpu);
+            for (int i = 0; i < 16; i++)
+                regs[cpu][i] = i == 15 ? InstrAddress(nds, cpu) : arm.R[i];
+            regs[cpu][16] = arm.CPSR;
+        }
+    });
     lua_newtable(L);
     for (int cpu = 0; cpu < 2; cpu++)
     {
-        ARM& arm = CPU(nds, cpu);
         const char* prefix = cpu ? "ARM7 " : "ARM9 ";
         for (int i = 0; i < 16; i++)
         {
-            lua_pushinteger(L, i == 15 ? InstrAddress(nds, cpu) : arm.R[i]);
+            lua_pushinteger(L, regs[cpu][i]);
             lua_setfield(L, -2, (std::string(prefix) + RegNames[i]).c_str());
         }
-        lua_pushinteger(L, arm.CPSR);
+        lua_pushinteger(L, regs[cpu][16]);
         lua_setfield(L, -2, (std::string(prefix) + "cpsr").c_str());
     }
     return 1;
@@ -277,18 +331,21 @@ static int SetRegister(lua_State* L)
     u32 value = (u32)luaL_checkinteger(L, 2);
     if (reg < 0 || reg == 16)
         return luaL_argerror(L, 1, "register not writable");
-    ARM& arm = CPU(Console(L), cpu);
-    if (reg == 15)
-        arm.JumpTo(value | ((arm.CPSR & 0x20) ? 1 : 0));
-    else
-        arm.R[reg] = value;
+    Exec(L, [&](melonDS::NDS& nds) {
+        ARM& arm = CPU(nds, cpu);
+        if (reg == 15)
+            arm.JumpTo(value | ((arm.CPSR & 0x20) ? 1 : 0));
+        else
+            arm.R[reg] = value;
+    });
     return 0;
 }
 
 static int CallStack(lua_State* L)
 {
     int cpu = CPUArg(L, 1, 0);
-    auto stack = Console(L).Debugger.GetCallStack(cpu);
+    std::vector<CallFrame> stack;
+    Exec(L, [&](melonDS::NDS& nds) { stack = nds.Debugger.GetCallStack(cpu); });
     lua_createtable(L, stack.size(), 0);
     for (size_t i = 0; i < stack.size(); i++)
     {
@@ -305,14 +362,16 @@ static int CallStack(lua_State* L)
 
 static int TrackCalls(lua_State* L)
 {
-    Console(L).Debugger.SetCallTracking(lua_toboolean(L, 1));
+    bool on = lua_toboolean(L, 1);
+    Exec(L, [&](melonDS::NDS& nds) { nds.Debugger.SetCallTracking(on); });
     return 0;
 }
 
 static int CallCounts(lua_State* L)
 {
     int cpu = CPUArg(L, 1, 0);
-    auto counts = Console(L).Debugger.DrainCallCounts(cpu);
+    std::unordered_map<u32, u64> counts;
+    Exec(L, [&](melonDS::NDS& nds) { counts = nds.Debugger.DrainCallCounts(cpu); });
     lua_createtable(L, 0, counts.size());
     for (auto& [entry, n] : counts)
     {
@@ -324,13 +383,16 @@ static int CallCounts(lua_State* L)
 
 static int Coverage(lua_State* L)
 {
-    Console(L).Debugger.SetCoverage(lua_toboolean(L, 1));
+    bool on = lua_toboolean(L, 1);
+    Exec(L, [&](melonDS::NDS& nds) { nds.Debugger.SetCoverage(on); });
     return 0;
 }
 
 static int DrainCoverage(lua_State* L)
 {
-    auto addrs = Console(L).Debugger.DrainCoverage(CPUArg(L, 1, 0));
+    int cpu = CPUArg(L, 1, 0);
+    std::vector<u32> addrs;
+    Exec(L, [&](melonDS::NDS& nds) { addrs = nds.Debugger.DrainCoverage(cpu); });
     lua_createtable(L, addrs.size(), 0);
     for (size_t i = 0; i < addrs.size(); i++)
     {
@@ -346,13 +408,14 @@ static int Trace(lua_State* L)
     int cpu = CPUArg(L, 2, 0);
     u32 start = (u32)luaL_optinteger(L, 3, 0);
     u32 end = (u32)luaL_optinteger(L, 4, 0xFFFFFFFF);
-    Console(L).Debugger.SetTrace(1 << cpu, start, end, capacity);
+    Exec(L, [&](melonDS::NDS& nds) { nds.Debugger.SetTrace(1 << cpu, start, end, capacity); });
     return 0;
 }
 
 static int DrainTrace(lua_State* L)
 {
-    auto entries = Console(L).Debugger.DrainTrace();
+    std::vector<TraceEntry> entries;
+    Exec(L, [&](melonDS::NDS& nds) { entries = nds.Debugger.DrainTrace(); });
     lua_createtable(L, entries.size(), 0);
     for (size_t i = 0; i < entries.size(); i++)
     {
@@ -368,13 +431,16 @@ static int DrainTrace(lua_State* L)
 
 static int TrackWriters(lua_State* L)
 {
-    Console(L).Debugger.SetLastWriter(lua_toboolean(L, 1));
+    bool on = lua_toboolean(L, 1);
+    Exec(L, [&](melonDS::NDS& nds) { nds.Debugger.SetLastWriter(on); });
     return 0;
 }
 
 static int LastWriter(lua_State* L)
 {
-    u32 w = Console(L).Debugger.GetLastWriter((u32)luaL_checkinteger(L, 1));
+    u32 addr = (u32)luaL_checkinteger(L, 1);
+    u32 w = 0;
+    Exec(L, [&](melonDS::NDS& nds) { w = nds.Debugger.GetLastWriter(addr); });
     if (!w)
     {
         lua_pushnil(L);
@@ -387,13 +453,25 @@ static int LastWriter(lua_State* L)
 
 static int Break(lua_State* L)
 {
-    Console(L).Debugger.RequestBreak(1 << CPUArg(L, 1, 0));
+    int cpu = CPUArg(L, 1, 0);
+    Exec(L, [&](melonDS::NDS& nds) { nds.Debugger.RequestBreak(1 << cpu); });
     return 0;
 }
 
 static int Step(lua_State* L)
 {
-    Console(L).Debugger.Step(CPUArg(L, 2, 0), (u32)luaL_optinteger(L, 1, 1));
+    u32 count = (u32)luaL_optinteger(L, 1, 1);
+    int cpu = CPUArg(L, 2, 0);
+    Exec(L, [&](melonDS::NDS& nds) { nds.Debugger.Step(cpu, count); });
+    return 0;
+}
+
+static int Resume(lua_State* L)
+{
+    Context* ctx = Ctx(L);
+    if (!ctx->H.Resume)
+        return luaL_error(L, "debugger.resume is not available here");
+    ctx->H.Resume();
     return 0;
 }
 
@@ -403,7 +481,10 @@ static int Peek(lua_State* L)
     int size = (int)luaL_optinteger(L, 2, 4);
     if (size != 1 && size != 2 && size != 4)
         return luaL_argerror(L, 2, "size must be 1, 2 or 4");
-    lua_pushinteger(L, Console(L).Debugger.Peek(CPUArg(L, 3, 0), addr, size));
+    int cpu = CPUArg(L, 3, 0);
+    u32 value = 0;
+    Exec(L, [&](melonDS::NDS& nds) { value = nds.Debugger.Peek(cpu, addr, size); });
+    lua_pushinteger(L, value);
     return 1;
 }
 
@@ -421,8 +502,10 @@ static void SetFuncs(lua_State* L, const char* table, const luaL_Reg* funcs)
 
 void Register(lua_State* L, Host host)
 {
-    auto ctx = new Context {std::move(host), L};
-    lua_pushlightuserdata(L, ctx);
+    auto owner = new ContextPtr(std::make_shared<Context>());
+    (*owner)->H = std::move(host);
+    (*owner)->L = L;
+    lua_pushlightuserdata(L, owner);
     lua_setfield(L, LUA_REGISTRYINDEX, ContextKey);
 
     static const luaL_Reg eventFuncs[] = {
@@ -452,6 +535,7 @@ void Register(lua_State* L, Host host)
         {"lastwriter", LastWriter},
         {"pause", Break},
         {"step", Step},
+        {"resume", Resume},
         {"peek", Peek},
         {nullptr, nullptr},
     };
@@ -462,21 +546,27 @@ void Register(lua_State* L, Host host)
 
 void Unregister(lua_State* L)
 {
-    Context* ctx = Ctx(L);
-    if (!ctx)
+    ContextPtr* owner = Owner(L);
+    if (!owner)
         return;
-    while (!ctx->Hooks.empty())
-        DropHook(L, ctx, ctx->Hooks.size() - 1);
+    ContextPtr ctx = *owner;
+    std::lock_guard lock(ctx->Lock);
+    std::vector<size_t> all;
+    for (size_t i = 0; i < ctx->Hooks.size(); i++)
+        all.push_back(i);
+    DropHooks(L, ctx.get(), all);
+    ctx->L = nullptr;
     lua_pushnil(L);
     lua_setfield(L, LUA_REGISTRYINDEX, ContextKey);
-    delete ctx;
+    delete owner;
 }
 
 Guard::Guard(lua_State* L) : Lock(nullptr)
 {
-    if (Context* ctx = Ctx(L))
+    if (ContextPtr* owner = Owner(L))
     {
-        Lock = &ctx->Lock;
+        Hold = *owner;
+        Lock = &(*owner)->Lock;
         Lock->lock();
     }
 }

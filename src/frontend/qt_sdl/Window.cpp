@@ -58,6 +58,7 @@
 #include "ROMInfoDialog.h"
 #include "RAMInfoDialog.h"
 #include "MemViewDialog.h"
+#include "debugger/DebugTools.h"
 #include "TitleManagerDialog.h"
 #include "PowerManagement/PowerManagementDialog.h"
 
@@ -446,6 +447,13 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent) :
                 actNPTest = submenu->addAction("NETPLAY GO");
                 connect(actNPTest, &QAction::triggered, this, &MainWindow::onNPTest);*/
             }
+        }
+        {
+            QMenu * menu = menubar->addMenu("Debug");
+            DebugTools::buildMenu(menu, this);
+            menu->addSeparator();
+            menu->addAction("Memory viewer", this, &MainWindow::onMemView);
+            menu->addAction("Lua console", this, &MainWindow::onOpenLuaScript);
         }
         {
             QMenu * menu = menubar->addMenu("View");
@@ -1053,6 +1061,8 @@ void MainWindow::onFocusOut()
 
 void MainWindow::onAppStateChanged(Qt::ApplicationState state)
 {
+    if (!emuInstance)
+        return;
     if (state == Qt::ApplicationInactive)
     {
         emuInstance->keyReleaseAll();
@@ -1319,7 +1329,6 @@ void MainWindow::updateCartInserted(bool gba)
             win->actROMInfo->setEnabled(inserted);
             win->actRAMInfo->setEnabled(inserted);
             win->actMemView->setEnabled(inserted);
-            this->onMemView(); // convenience for dev, remove for release!
         });
     }
 }

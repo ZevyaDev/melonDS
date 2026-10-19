@@ -30,6 +30,11 @@
 		},
 		"faad2",
 		"lua",
+		{
+			"name": "capstone",
+			"default-features": false,
+			"features": [ "arm" ]
+		},
 		"pkgconf",
 		{ "name": "pkgconf", "host": true },
 		{ "name": "dirent", "platform": "windows" }

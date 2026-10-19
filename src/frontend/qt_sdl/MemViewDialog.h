@@ -40,6 +40,7 @@
 class NDS;
 class EmuInstance;
 class MemViewThread;
+class DebugBridge;
 
 typedef enum HighlightState {
     hightlightState_Init,
@@ -328,6 +329,9 @@ private:
     void UpdateAddress(int index);
     void UpdateDecoded(int index);
     void UpdateScene();
+    DebugBridge* GetBridge();
+    void UpdateInfo();
+    void AddWatch(melonDS::u8 flags);
 
 private slots:
     void done(int r);
@@ -358,6 +362,7 @@ private:
     QSpinBox* UpdateRate;
     QComboBox* MemRegionBox;
     QPushButton* DumpBtn;
+    QLabel* InfoLabel;
 
     // value setter group
     QGroupBox* SetValGroup;

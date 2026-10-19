@@ -3,6 +3,7 @@
 #include <QDialog>
 #include <QPlainTextEdit>
 #include <QFileInfo>
+#include <QLineEdit>
 #include <lua.hpp>
 #include "EmuInstance.h"
 
@@ -29,6 +30,7 @@ public:
     LuaConsole* console;
     QFileInfo currentScript;
     QPushButton* buttonOpenScript;
+    QLineEdit* commandLine;
     QPushButton* buttonStartStop;
     QPushButton* buttonPausePlay;
     QScrollBar* bar;
@@ -123,6 +125,9 @@ public:
     LuaConsoleDialog* getluaDialog(){return luaDialog;};
     void printText(QString string);
     void createLuaState();
+    lua_State* newState();
+    void runLine(const QString& line);
+    void closeState();
     void luaUpdate();
     void luaCallback(int ref);
     bool flagPause = false;

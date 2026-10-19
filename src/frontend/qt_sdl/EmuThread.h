@@ -130,6 +130,16 @@ public:
     bool emuIsRunning();
     bool emuIsActive();
 
+    enum ParkAction
+    {
+        park_Stay,
+        park_Resume,
+        park_Detach,
+    };
+
+    int handleParkedMessages();
+    void debugResume();
+
     void initContext(int win);
     void deinitContext(int win);
     void borrowGL();
@@ -163,7 +173,7 @@ signals:
     void signalLuaUpdate();
 
 private:
-    void handleMessages();
+    int handleMessages(bool parked = false);
 
     void updateRenderer();
     void compileShaders();

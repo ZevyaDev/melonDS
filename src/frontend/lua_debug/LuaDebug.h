@@ -20,6 +20,7 @@
 #define LUADEBUG_H
 
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 
@@ -37,6 +38,9 @@ struct Host
 {
     std::function<melonDS::NDS*()> GetNDS;
     std::function<void(const std::string&)> Print;
+    std::function<bool(const std::function<void(melonDS::NDS&)>&)> Exec;
+    std::function<void()> Wait;
+    std::function<void()> Resume;
 };
 
 void Register(lua_State* L, Host host);
@@ -53,6 +57,7 @@ public:
     Guard& operator=(const Guard&) = delete;
 
 private:
+    std::shared_ptr<void> Hold;
     std::recursive_mutex* Lock;
 };
 
