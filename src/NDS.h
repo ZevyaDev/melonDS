@@ -507,6 +507,7 @@ public: // TODO: Encapsulate the rest of these members
 #else
     void SetGdbArgs(std::optional<GDBArgs> args) noexcept {}
 #endif
+    [[nodiscard]] bool IsDebugMode() const noexcept { return DebugMode; }
 
 protected:
     void InitTimings();

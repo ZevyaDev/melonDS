@@ -136,6 +136,7 @@ MDS_API int mds_savestate(int id, const char* path);
 MDS_API int mds_loadstate(int id, const char* path);
 
 MDS_API int mds_lua_run(int id, const char* source, int is_file);
+MDS_API int mds_lua_exec(int id, const char* code);
 MDS_API int mds_lua_stop(int id);
 MDS_API int mds_lua_output(int id, char* out, int max);
 

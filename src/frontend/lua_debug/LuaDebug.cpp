@@ -42,6 +42,7 @@ struct Context
     lua_State* L;
     std::vector<Hook> Hooks;
     int NextFrameID = -1;
+    std::recursive_mutex Lock;
 };
 
 static const char* ContextKey = "melonDS.LuaDebug";
@@ -92,6 +93,7 @@ static void PushEvent(lua_State* L, const BreakEvent& ev)
 
 static bool CallHook(Context* ctx, int ref, const BreakEvent* ev)
 {
+    std::lock_guard lock(ctx->Lock);
     lua_State* L = ctx->L;
     lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
     int nargs = 0;
@@ -470,11 +472,27 @@ void Unregister(lua_State* L)
     delete ctx;
 }
 
+Guard::Guard(lua_State* L) : Lock(nullptr)
+{
+    if (Context* ctx = Ctx(L))
+    {
+        Lock = &ctx->Lock;
+        Lock->lock();
+    }
+}
+
+Guard::~Guard()
+{
+    if (Lock)
+        Lock->unlock();
+}
+
 void RunFrameEnd(lua_State* L)
 {
     Context* ctx = Ctx(L);
     if (!ctx)
         return;
+    std::lock_guard lock(ctx->Lock);
     std::vector<int> refs;
     for (auto& h : ctx->Hooks)
         if (h.Frame)

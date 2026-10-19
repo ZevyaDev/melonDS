@@ -604,6 +604,15 @@ int mds_lua_run(int id, const char* source, int is_file)
     return s->Inst->Lua->Run(source, is_file != 0, error) ? 0 : Fail(error);
 }
 
+int mds_lua_exec(int id, const char* code)
+{
+    Slot* s = Stopped(id);
+    if (!s)
+        return -1;
+    std::string error;
+    return s->Inst->Lua->Exec(code, error) ? 0 : Fail(error);
+}
+
 int mds_lua_stop(int id)
 {
     Slot* s = Stopped(id);

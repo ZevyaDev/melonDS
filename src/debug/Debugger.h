@@ -22,6 +22,7 @@
 #include <array>
 #include <atomic>
 #include <functional>
+#include <map>
 #include <unordered_map>
 #include <vector>
 
@@ -173,6 +174,9 @@ private:
 
     bool CallTracking = false;
     std::array<std::vector<CallFrame>, 2> CallStack;
+    std::array<std::map<u32, std::vector<CallFrame>>, 2> ParkedStacks;
+    std::array<std::array<u32, 16>, 2> LastSP {};
+    std::array<u8, 2> LastMode {};
     std::array<std::unordered_map<u32, u64>, 2> CallCounts;
 
     bool Coverage = false;
@@ -186,6 +190,7 @@ private:
     void RebuildPages();
     void Raise(const BreakEvent& ev);
     void UnwindCalls(ARM& cpu, u32 pc);
+    void SwitchStacks(u8 n, u32 oldSP, u32 newSP);
 };
 
 }

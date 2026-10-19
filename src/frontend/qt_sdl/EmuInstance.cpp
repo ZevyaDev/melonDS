@@ -1296,6 +1296,8 @@ bool EmuInstance::updateConsole() noexcept
     std::optional<GDBArgs> gdbargs = std::nullopt;
 #endif
 
+    bool debugMode = !jitargs.has_value();
+
     NDSArgs ndsargs {
             std::move(arm9bios),
             std::move(arm7bios),
@@ -1306,6 +1308,7 @@ bool EmuInstance::updateConsole() noexcept
             (double) audioFreq,
             gdbargs,
     };
+    ndsargs.Debug = debugMode;
     NDSArgs* args = &ndsargs;
 
     std::optional<DSiArgs> dsiargs = std::nullopt;
@@ -1336,7 +1339,7 @@ bool EmuInstance::updateConsole() noexcept
     }
 
     renderLock.lock();
-    if ((!nds) || (consoleType != nds->ConsoleType))
+    if ((!nds) || (consoleType != nds->ConsoleType) || (debugMode != nds->IsDebugMode()))
     {
         if (nds)
         {

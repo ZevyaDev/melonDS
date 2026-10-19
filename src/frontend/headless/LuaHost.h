@@ -36,6 +36,7 @@ public:
     ~LuaHost();
 
     bool Run(const std::string& source, bool isFile, std::string& error);
+    bool Exec(const std::string& code, std::string& error);
     void Stop();
     std::string TakeOutput();
 

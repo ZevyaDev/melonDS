@@ -109,6 +109,7 @@ def _load():
         "mds_savestate": (c_int, [c_int, c_char_p]),
         "mds_loadstate": (c_int, [c_int, c_char_p]),
         "mds_lua_run": (c_int, [c_int, c_char_p, c_int]),
+        "mds_lua_exec": (c_int, [c_int, c_char_p]),
         "mds_lua_stop": (c_int, [c_int]),
         "mds_lua_output": (c_int, [c_int, POINTER(c_char), c_int]),
         "mds_packets": (c_int, [c_int, c_int, c_int]),
@@ -320,6 +321,10 @@ class Console:
 
     def lua_run(self, source, is_file=False):
         _check(lib().mds_lua_run(self.id, _b(str(source)), int(is_file)))
+
+    def lua_exec(self, code):
+        _check(lib().mds_lua_exec(self.id, _b(code)))
+        return self.lua_output()
 
     def lua_stop(self):
         _check(lib().mds_lua_stop(self.id))

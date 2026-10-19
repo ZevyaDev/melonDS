@@ -330,6 +330,17 @@ bool LuaHost::Run(const std::string& source, bool isFile, std::string& error)
     return true;
 }
 
+bool LuaHost::Exec(const std::string& code, std::string& error)
+{
+    if (luaL_loadbuffer(L, code.data(), code.size(), "=exec") != LUA_OK || lua_pcall(L, 0, 0, 0) != LUA_OK)
+    {
+        error = lua_tostring(L, -1);
+        lua_pop(L, 1);
+        return false;
+    }
+    return true;
+}
+
 void LuaHost::Resume()
 {
     if (!Main)

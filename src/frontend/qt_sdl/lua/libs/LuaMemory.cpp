@@ -68,13 +68,13 @@ static void ARM9Access(u8* buffer, s64 address, s64 count,bool write,NDS* Curren
 	{
 		while (count--)
 		{
-			if (address < CurrentNDS->ARM9.ITCMSize)
+			if (address < CurrentNDS->ARM9->ITCMSize)
 			{
-				CurrentNDS->ARM9.ITCM[address & (melonDS::ITCMPhysicalSize - 1)] = *buffer;
+				CurrentNDS->ARM9->ITCM[address & (melonDS::ITCMPhysicalSize - 1)] = *buffer;
 			}
-			else if ((address & CurrentNDS->ARM9.DTCMMask) == CurrentNDS->ARM9.DTCMBase)
+			else if ((address & CurrentNDS->ARM9->DTCMMask) == CurrentNDS->ARM9->DTCMBase)
 			{
-				CurrentNDS->ARM9.DTCM[address & (melonDS::DTCMPhysicalSize - 1)] = *buffer;
+				CurrentNDS->ARM9->DTCM[address & (melonDS::DTCMPhysicalSize - 1)] = *buffer;
 			}
 			else
 			{
@@ -89,13 +89,13 @@ static void ARM9Access(u8* buffer, s64 address, s64 count,bool write,NDS* Curren
 	{
 		while (count--)
 		{
-			if (address < CurrentNDS->ARM9.ITCMSize)
+			if (address < CurrentNDS->ARM9->ITCMSize)
 			{
-				*buffer = CurrentNDS->ARM9.ITCM[address & (melonDS::ITCMPhysicalSize - 1)];
+				*buffer = CurrentNDS->ARM9->ITCM[address & (melonDS::ITCMPhysicalSize - 1)];
 			}
-			else if ((address & CurrentNDS->ARM9.DTCMMask) == CurrentNDS->ARM9.DTCMBase)
+			else if ((address & CurrentNDS->ARM9->DTCMMask) == CurrentNDS->ARM9->DTCMBase)
 			{
-				*buffer = CurrentNDS->ARM9.DTCM[address & (melonDS::DTCMPhysicalSize - 1)];
+				*buffer = CurrentNDS->ARM9->DTCM[address & (melonDS::DTCMPhysicalSize - 1)];
 			}
 			else
 			{
@@ -226,8 +226,8 @@ memoryDomain L_checkForMemoryDomain(lua_State* L, int narg)
 		ADD_MEMORY_DOMAIN("GBA ROM", const_cast<u8*>(gbaCart->GetROM()), gbaCart->GetROMLength());
 	}
 
-	ADD_MEMORY_DOMAIN("Instruction TCM", CurrentNDS->ARM9.ITCM, melonDS::ITCMPhysicalSize);
-	ADD_MEMORY_DOMAIN("Data TCM", CurrentNDS->ARM9.DTCM, melonDS::DTCMPhysicalSize);
+	ADD_MEMORY_DOMAIN("Instruction TCM", CurrentNDS->ARM9->ITCM, melonDS::ITCMPhysicalSize);
+	ADD_MEMORY_DOMAIN("Data TCM", CurrentNDS->ARM9->DTCM, melonDS::DTCMPhysicalSize);
 
 	ADD_MEMORY_DOMAIN("ARM9 BIOS", const_cast<u8*>(CurrentNDS->GetARM9BIOS().data()), melonDS::ARM9BIOSSize);
 	ADD_MEMORY_DOMAIN("ARM7 BIOS", const_cast<u8*>(CurrentNDS->GetARM7BIOS().data()), melonDS::ARM7BIOSSize);

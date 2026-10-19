@@ -28,6 +28,9 @@ namespace melonDS
 constexpr u32 PageShift = 12;
 constexpr u32 PageCount = 1u << (32 - PageShift);
 constexpr size_t MaxCallDepth = 4096;
+constexpr u32 StackSwitchDistance = 0x400;
+constexpr u32 StackMatchWindow = 0x200;
+constexpr size_t MaxParkedStacks = 64;
 constexpr u32 MainRAMWords = 0x400000 >> 2;
 
 Debugger::Debugger(melonDS::NDS& nds) noexcept : NDS(nds)
@@ -42,6 +45,8 @@ void Debugger::Reset()
         StepRemaining[i] = 0;
         PendingValid[i] = false;
         CallStack[i].clear();
+        ParkedStacks[i].clear();
+        LastSP[i] = {};
         CurPC[i] = 0;
     }
     TraceHead = 0;
@@ -156,8 +161,12 @@ void Debugger::SetCallTracking(bool enabled)
 {
     CallTracking = enabled;
     if (!enabled)
-        for (auto& s : CallStack)
-            s.clear();
+        for (int i = 0; i < 2; i++)
+        {
+            CallStack[i].clear();
+            ParkedStacks[i].clear();
+            LastSP[i] = {};
+        }
     Rearm();
 }
 
@@ -324,10 +333,56 @@ void Debugger::Raise(const BreakEvent& ev)
     Rearm();
 }
 
+void Debugger::SwitchStacks(u8 n, u32 oldSP, u32 newSP)
+{
+    auto& parked = ParkedStacks[n];
+    if (!CallStack[n].empty())
+    {
+        if (parked.size() >= MaxParkedStacks)
+            parked.erase(parked.begin());
+        parked[oldSP] = std::move(CallStack[n]);
+    }
+    CallStack[n].clear();
+    auto it = parked.lower_bound(newSP > StackMatchWindow ? newSP - StackMatchWindow : 0);
+    if (it != parked.end() && it->first <= newSP + StackMatchWindow)
+    {
+        CallStack[n] = std::move(it->second);
+        parked.erase(it);
+    }
+}
+
+static bool IsExceptionMode(u8 mode)
+{
+    return mode != 0x10 && mode != 0x1F;
+}
+
 void Debugger::UnwindCalls(ARM& cpu, u32 pc)
 {
-    auto& stack = CallStack[cpu.Num];
+    u8 n = cpu.Num;
+    auto& stack = CallStack[n];
     u8 mode = cpu.CPSR & 0x1F;
+    u32 sp = cpu.R[13];
+
+    if (mode != LastMode[n] && IsExceptionMode(LastMode[n]) && !IsExceptionMode(mode))
+    {
+        for (size_t i = stack.size(); i-- > 0;)
+            if (stack[i].Exception && stack[i].Mode == LastMode[n])
+            {
+                stack.resize(i);
+                break;
+            }
+    }
+
+    u32& last = LastSP[n][(mode == 0x1F ? 0x10 : mode) & 0xF];
+    if (last)
+    {
+        u32 delta = sp > last ? sp - last : last - sp;
+        if (delta >= StackSwitchDistance)
+            SwitchStacks(n, last, sp);
+    }
+    last = sp;
+    LastMode[n] = mode;
+
     while (!stack.empty())
     {
         CallFrame& top = stack.back();

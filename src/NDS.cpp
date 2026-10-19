@@ -121,7 +121,11 @@ NDS::NDS(NDSArgs&& args, int type, void* userdata) noexcept :
 #ifdef GDBSTUB_ENABLED
     EnableGDBStub(args.GDB.has_value()),
 #endif
+#ifdef JIT_ENABLED
+    DebugMode(args.Debug || (args.GDB.has_value() && !args.JIT.has_value())),
+#else
     DebugMode(args.Debug || args.GDB.has_value()),
+#endif
 #ifdef JIT_ENABLED
     EnableJIT(args.JIT.has_value() && !args.Debug),
 #endif
@@ -254,7 +258,6 @@ void NDS::SetGdbArgs(std::optional<GDBArgs> args) noexcept
     ARM9->SetGdbArgs(args);
     ARM7->SetGdbArgs(args);
     EnableGDBStub = args.has_value();
-    DebugMode = EnableGDBStub || DebugMode;
 }
 #endif
 

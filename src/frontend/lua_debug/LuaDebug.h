@@ -20,6 +20,7 @@
 #define LUADEBUG_H
 
 #include <functional>
+#include <mutex>
 #include <string>
 
 #include <lua.hpp>
@@ -42,6 +43,18 @@ void Register(lua_State* L, Host host);
 void Unregister(lua_State* L);
 void RunFrameEnd(lua_State* L);
 int CPUArg(lua_State* L, int idx, int def);
+
+class Guard
+{
+public:
+    explicit Guard(lua_State* L);
+    ~Guard();
+    Guard(const Guard&) = delete;
+    Guard& operator=(const Guard&) = delete;
+
+private:
+    std::recursive_mutex* Lock;
+};
 
 }
 
