@@ -48,7 +48,8 @@ what local multiplayer needs, and a stop in one stops the others at their next i
 | `live_start`, `live_stop`, `pacing` | free-running consoles at 60 fps; local wireless sessions need this |
 | `registers`, `memory_read`, `memory_write`, `memory_search`, `disassemble_at` | inspection |
 | `ramsearch_start`, `ramsearch_filter`, `ramsearch_list` | DeSmuME-style RAM search: snapshot, then changed / increased / equal / delta |
-| `watch_add`, `watch_read`, `watch_save`, `watch_load` | named, typed addresses (fx32 included), shareable as JSON |
+| `watch_add`, `watch_read`, `watch_save`, `watch_load` | named, typed addresses (fx32 included), shareable as JSON; one list per game (see below) |
+| `symbols_load`, `symbol_lookup`, `overlays_loaded` | per-console symbol tables |
 | `text_find` | find on-screen text in RAM (ASCII, UTF-16, UTF-8) |
 | `input_sequence`, `press`, `touch` | input; `"A*4 w20 Down*30"` plays a whole sequence in one call |
 | `calls_track`, `callstack`, `calls_read` | shadow call stack across threads and nested IRQs, per-function call counts |
@@ -57,6 +58,15 @@ what local multiplayer needs, and a stop in one stops the others at their next i
 | `writers_track`, `last_writer` | which instruction (or DMA channel) last wrote a main-RAM word |
 | `packets_track`, `packets_read` | local wireless traffic per console |
 | `savestate_save`, `savestate_load`, `screenshot` | state; savestates need a frame boundary |
+
+Symbols and watches are per console. `symbols_load(path, console=0)` fills that console's table, and
+every tool that prints or parses addresses uses the table of the console it targets, so two consoles
+can run different games or different overlays. `MELONDS_SYMBOLS` applies to the `MELONDS_ROM`
+console (console 0); other consoles start with no symbols unless `console_create(symbols=...)` or
+`symbols_load` gives them some. Destroying a console drops its table. A watch list belongs to a game:
+consoles whose ROM path (made absolute) is the same share one list, consoles with different ROMs do
+not, and a console without a ROM has its own. The list is dropped when no console runs that game any
+more. `watch_save` and `watch_load` take `console` and use that console's list; the JSON format is unchanged.
 
 The GDB stub (`mds_gdb`, ARM9 3333 / ARM7 3334) also works in the headless build, watchpoints included.
 
