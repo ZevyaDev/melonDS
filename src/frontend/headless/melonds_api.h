@@ -111,10 +111,54 @@ MDS_API int mds_state(int id);
 MDS_API int mds_take_break(int id, mds_break* out);
 MDS_API uint64_t mds_frames(int id);
 
+typedef struct
+{
+    uint32_t offset;    // system cycles from frame start
+    uint16_t x, y;
+    uint8_t down;
+    uint8_t pad[3];
+} mds_touch_point;
+
+typedef struct
+{
+    uint32_t seq;
+    uint16_t buttons;       // 12 bits, same order as mds_set_keys
+    uint8_t lid;            // 1 = closed
+    uint8_t touch_count;    // 0 = pen unchanged
+    uint8_t mic_kind;       // 0 none, 1 samples, 2 level
+    uint8_t flags;          // bit 0: count the payload as a socket client's (the repeat-mode stall timeout applies)
+    uint16_t mic_count;
+    uint16_t mic_level;
+    uint16_t pad2;
+} mds_input;
+
+typedef struct
+{
+    uint64_t frame;
+    uint32_t seq;           // 0 for in-process sources
+    uint16_t buttons;
+    uint8_t lid;
+    uint8_t touch_count;
+    uint8_t mic_kind;
+    uint8_t pad;
+    uint16_t mic_level;
+    uint16_t pad2;
+    uint16_t pad3;
+} mds_input_log_entry;
+
 MDS_API int mds_screen(int id, uint32_t* out);
 MDS_API int mds_set_keys(int id, uint32_t pressed);
 MDS_API int mds_touch(int id, int x, int y);
 MDS_API int mds_set_lid(int id, int closed);
+
+// Queue one frame of input. Returns the queue depth, or -1 (mds_error: bad_payload / input_queue_full).
+MDS_API int mds_input_submit(int id, const mds_input* in, const mds_touch_point* points, const int16_t* mic);
+// mode: 0 repeat, 1 neutral, 2 wait, -1 unchanged. stall_frames: -1 unchanged, 0 never.
+MDS_API int mds_input_mode(int id, int mode, int stall_frames);
+MDS_API int mds_input_depth(int id);
+MDS_API int mds_input_waiting(int id);
+MDS_API int mds_input_clear(int id);
+MDS_API int mds_input_log(int id, uint64_t from_frame, mds_input_log_entry* out, int max);
 
 MDS_API int mds_read(int id, int cpu, uint32_t addr, uint32_t len, uint8_t* out);
 MDS_API int mds_write(int id, int cpu, uint32_t addr, uint32_t len, const uint8_t* data);

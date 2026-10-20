@@ -398,16 +398,22 @@ int mds_screen(int id, uint32_t* out)
     });
 }
 
+// The setters go through the same queue as every other source: they amend the newest queued
+// setter payload if there is one, so keys and touch set before a frame land in that frame.
+static int Modify(Slot* s, const std::function<void(InputPayload&)>& fn)
+{
+    std::string error;
+    if (s->Inst->Input.Modify(fn, error) < 0)
+        return Fail(error);
+    return 0;
+}
+
 int mds_set_keys(int id, uint32_t pressed)
 {
     Slot* s = Find(id);
     if (!s)
         return -1;
-    return OnEmu(s, [&](Instance& inst, std::string&) {
-        inst.Lua->Keys = pressed & 0xFFF;
-        inst.NDS->SetKeyMask(~pressed & 0xFFF);
-        return 0;
-    });
+    return Modify(s, [&](InputPayload& p) { p.Buttons = pressed & 0xFFF; });
 }
 
 int mds_touch(int id, int x, int y)
@@ -415,12 +421,11 @@ int mds_touch(int id, int x, int y)
     Slot* s = Find(id);
     if (!s)
         return -1;
-    return OnEmu(s, [&](Instance& inst, std::string&) {
+    return Modify(s, [&](InputPayload& p) {
         if (x < 0 || y < 0)
-            inst.NDS->ReleaseScreen();
+            p.Touch = {{0, 0, 0, 0}};
         else
-            inst.NDS->TouchScreen(std::min(x, 255), std::min(y, 191));
-        return 0;
+            p.Touch = {{0, (u16)std::min(x, 255), (u16)std::min(y, 191), 1}};
     });
 }
 
@@ -429,10 +434,80 @@ int mds_set_lid(int id, int closed)
     Slot* s = Find(id);
     if (!s)
         return -1;
-    return OnEmu(s, [&](Instance& inst, std::string&) {
-        inst.NDS->SetLidClosed(closed != 0);
-        return 0;
-    });
+    return Modify(s, [&](InputPayload& p) { p.Lid = closed != 0; });
+}
+
+int mds_input_submit(int id, const mds_input* in, const mds_touch_point* points, const int16_t* mic)
+{
+    Slot* s = Find(id);
+    if (!s)
+        return -1;
+    if (!in)
+        return Fail("bad_payload: no input");
+    if ((in->touch_count && !points) || (in->mic_count && !mic))
+        return Fail("bad_payload: missing touch or microphone data");
+    InputPayload p;
+    p.Source = (in->flags & 1) ? InputSource::Client : InputSource::Local;
+    p.Seq = in->seq;
+    p.Buttons = in->buttons;
+    p.Lid = in->lid != 0;
+    for (int i = 0; i < in->touch_count; i++)
+        p.Touch.push_back({points[i].offset, points[i].x, points[i].y, points[i].down});
+    p.MicKind = in->mic_kind;
+    if (in->mic_count)
+        p.Mic.assign(mic, mic + in->mic_count);
+    p.MicLevel = in->mic_level;
+    std::string error;
+    int depth = s->Inst->Input.Submit(std::move(p), error);
+    if (depth < 0)
+        return Fail(error);
+    return depth;
+}
+
+int mds_input_mode(int id, int mode, int stall_frames)
+{
+    Slot* s = Find(id);
+    if (!s)
+        return -1;
+    if (mode < -1 || mode > 2)
+        return Fail("unknown input mode");
+    if (stall_frames >= 0)
+        s->Inst->Input.SetStallTimeout(stall_frames);
+    if (mode >= 0)
+        s->Inst->Input.SetMode((EmptyMode)mode);
+    return 0;
+}
+
+int mds_input_depth(int id)
+{
+    Slot* s = Find(id);
+    return s ? (int)s->Inst->Input.Depth() : -1;
+}
+
+int mds_input_waiting(int id)
+{
+    Slot* s = Find(id);
+    return s ? (s->Inst->WaitingForInput() ? 1 : 0) : -1;
+}
+
+int mds_input_clear(int id)
+{
+    Slot* s = Find(id);
+    if (!s)
+        return -1;
+    s->Inst->Input.Clear();
+    return 0;
+}
+
+int mds_input_log(int id, uint64_t from_frame, mds_input_log_entry* out, int max)
+{
+    Slot* s = Find(id);
+    if (!s)
+        return -1;
+    int n = 0;
+    for (const InputLogEntry& e : s->Inst->Input.ReadLog(from_frame, max > 0 ? max : 0))
+        out[n++] = {e.Frame, e.Seq, e.Buttons, e.Lid, e.TouchCount, e.MicKind, 0, e.MicLevel, 0, 0};
+    return n;
 }
 
 int mds_read(int id, int cpu, uint32_t addr, uint32_t len, uint8_t* out)

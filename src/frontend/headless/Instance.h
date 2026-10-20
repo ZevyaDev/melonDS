@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "Commands.h"
+#include "Input.h"
 #include "NDS.h"
 #include "Net.h"
 
@@ -95,7 +96,11 @@ public:
     void WriteSave(const melonDS::u8* data, melonDS::u32 len);
     void LogPacket(bool sent, melonDS::u8 type, const melonDS::u8* data, int len, melonDS::u64 timestamp);
 
+    // True while the emulator thread is blocked at a frame boundary in Wait mode.
+    bool WaitingForInput();
+
     melonDS::u64 FramesRun = 0;
+    InputQueue Input;
 
 private:
     std::string SavePath;
@@ -107,6 +112,8 @@ private:
     melonDS::u32 FramesLeft = 0;
     bool Quit = false;
     bool BreakPending = false;
+    bool Waiting = false;           // blocked for input (guarded by Lock)
+    bool WaitInterrupt = false;     // Interrupt() arrived while Waiting
     melonDS::BreakEvent LastBreak {};
 
     std::mutex PacketLock;
@@ -118,6 +125,7 @@ private:
 
     void ThreadMain();
     void Park(const melonDS::BreakEvent& ev);
+    bool AcquireInput(AppliedInput& out);
 };
 
 melonDS::Net& Network();

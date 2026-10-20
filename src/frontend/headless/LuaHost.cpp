@@ -16,6 +16,7 @@
     with melonDS. If not, see http://www.gnu.org/licenses/.
 */
 
+#include <algorithm>
 #include <cstring>
 
 #include "LuaHost.h"
@@ -139,30 +140,29 @@ static int GetSystemID(lua_State* L)
 static int JoypadSet(lua_State* L)
 {
     luaL_checktype(L, 1, LUA_TTABLE);
-    LuaHost& host = Host(L);
+    InputState& state = Host(L).EditInput();
     for (int i = 0; i < 12; i++)
     {
         lua_getfield(L, 1, KeyNames[i]);
         if (!lua_isnil(L, -1))
         {
             if (lua_toboolean(L, -1))
-                host.Keys |= 1u << i;
+                state.Buttons |= 1u << i;
             else
-                host.Keys &= ~(1u << i);
+                state.Buttons &= ~(1u << i);
         }
         lua_pop(L, 1);
     }
-    Console(L).SetKeyMask(~host.Keys & 0xFFF);
     return 0;
 }
 
 static int JoypadGet(lua_State* L)
 {
-    LuaHost& host = Host(L);
+    InputState state = Host(L).CurrentInput();
     lua_createtable(L, 0, 12);
     for (int i = 0; i < 12; i++)
     {
-        lua_pushboolean(L, (host.Keys >> i) & 1);
+        lua_pushboolean(L, (state.Buttons >> i) & 1);
         lua_setfield(L, -2, KeyNames[i]);
     }
     return 1;
@@ -170,13 +170,16 @@ static int JoypadGet(lua_State* L)
 
 static int TouchDown(lua_State* L)
 {
-    Console(L).TouchScreen((u16)luaL_checkinteger(L, 1), (u16)luaL_checkinteger(L, 2));
+    InputState& state = Host(L).EditInput();
+    state.TouchDown = 1;
+    state.TouchX = (u16)std::clamp<lua_Integer>(luaL_checkinteger(L, 1), 0, 255);
+    state.TouchY = (u16)std::clamp<lua_Integer>(luaL_checkinteger(L, 2), 0, 191);
     return 0;
 }
 
 static int TouchUp(lua_State* L)
 {
-    Console(L).ReleaseScreen();
+    Host(L).EditInput().TouchDown = 0;
     return 0;
 }
 
@@ -327,6 +330,7 @@ bool LuaHost::Run(const std::string& source, bool isFile, std::string& error)
         return false;
     }
     Resume();
+    FlushInput();
     return true;
 }
 
@@ -338,6 +342,7 @@ bool LuaHost::Exec(const std::string& code, std::string& error)
         lua_pop(L, 1);
         return false;
     }
+    FlushInput();
     return true;
 }
 
@@ -365,11 +370,42 @@ void LuaHost::OnFrameEnd()
         return;
     LuaDebug::RunFrameEnd(L);
     Resume();
+    FlushInput();
 }
 
 void LuaHost::OnReset()
 {
-    Keys = 0;
+    PendingActive = false;
+}
+
+InputState& LuaHost::EditInput()
+{
+    if (!PendingActive)
+    {
+        Pending = Inst.Input.NewestState();
+        PendingActive = true;
+    }
+    return Pending;
+}
+
+InputState LuaHost::CurrentInput() const
+{
+    return PendingActive ? Pending : Inst.Input.LastState();
+}
+
+void LuaHost::FlushInput()
+{
+    if (!PendingActive)
+        return;
+    PendingActive = false;
+    InputPayload p;
+    p.Source = InputSource::Local;
+    p.Buttons = Pending.Buttons;
+    p.Lid = Pending.Lid;
+    p.Touch = {{0, Pending.TouchX, Pending.TouchY, Pending.TouchDown}};
+    std::string error;
+    if (Inst.Input.Submit(std::move(p), error) < 0)
+        Print("lua: input: " + error);
 }
 
 void LuaHost::Print(const std::string& text)

@@ -8,6 +8,8 @@ endif()
 add_library(melonds_headless SHARED
     Api.cpp
     Commands.cpp
+    Input.cpp
+    InputApply.cpp
     Instance.cpp
     LuaHost.cpp
     Platform.cpp
@@ -35,7 +37,9 @@ endif()
 add_executable(headless_tests
     tests/main.cpp
     tests/CommandQueueTests.cpp
+    tests/InputQueueTests.cpp
     Commands.cpp
+    Input.cpp
 )
 find_package(Threads REQUIRED)
 target_include_directories(headless_tests PRIVATE

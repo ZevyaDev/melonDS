@@ -1,7 +1,8 @@
 import ctypes
 import os
 import sys
-from ctypes import POINTER, Structure, c_char, c_char_p, c_int, c_int32, c_uint8, c_uint32, c_uint64
+from ctypes import (POINTER, Structure, c_char, c_char_p, c_int, c_int16, c_int32, c_uint8, c_uint16, c_uint32,
+                    c_uint64)
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,6 +33,26 @@ class MdsFrame(Structure):
 
 class MdsPacket(Structure):
     _fields_ = [("timestamp", c_uint64), ("sent", c_uint32), ("type", c_uint32), ("length", c_uint32)]
+
+
+class MdsTouchPoint(Structure):
+    _fields_ = [("offset", c_uint32), ("x", c_uint16), ("y", c_uint16), ("down", c_uint8), ("pad", c_uint8 * 3)]
+
+
+class MdsInput(Structure):
+    _fields_ = [("seq", c_uint32), ("buttons", c_uint16), ("lid", c_uint8), ("touch_count", c_uint8),
+                ("mic_kind", c_uint8), ("flags", c_uint8), ("mic_count", c_uint16), ("mic_level", c_uint16),
+                ("pad2", c_uint16)]
+
+
+class MdsInputLogEntry(Structure):
+    _fields_ = [("frame", c_uint64), ("seq", c_uint32), ("buttons", c_uint16), ("lid", c_uint8),
+                ("touch_count", c_uint8), ("mic_kind", c_uint8), ("pad", c_uint8), ("mic_level", c_uint16),
+                ("pad2", c_uint16), ("pad3", c_uint16)]
+
+
+INPUT_FLAG_CLIENT = 1
+INPUT_MODES = {"repeat": 0, "neutral": 1, "wait": 2}
 
 
 class MelonError(RuntimeError):
@@ -93,6 +114,12 @@ def _load():
         "mds_set_keys": (c_int, [c_int, c_uint32]),
         "mds_touch": (c_int, [c_int, c_int, c_int]),
         "mds_set_lid": (c_int, [c_int, c_int]),
+        "mds_input_submit": (c_int, [c_int, POINTER(MdsInput), POINTER(MdsTouchPoint), POINTER(c_int16)]),
+        "mds_input_mode": (c_int, [c_int, c_int, c_int]),
+        "mds_input_depth": (c_int, [c_int]),
+        "mds_input_waiting": (c_int, [c_int]),
+        "mds_input_clear": (c_int, [c_int]),
+        "mds_input_log": (c_int, [c_int, c_uint64, POINTER(MdsInputLogEntry), c_int]),
         "mds_read": (c_int, [c_int, c_int, c_uint32, c_uint32, POINTER(c_uint8)]),
         "mds_write": (c_int, [c_int, c_int, c_uint32, c_uint32, POINTER(c_uint8)]),
         "mds_get_regs": (c_int, [c_int, c_int, POINTER(c_uint32)]),
@@ -154,6 +181,15 @@ def _cpu(cpu):
     if cpu in (9, 0, "arm9", "ARM9"):
         return 9
     raise MelonError(f"cpu must be 9 or 7, not {cpu!r}")
+
+
+def _key_mask(keys):
+    if isinstance(keys, int):
+        return keys & 0xFFF
+    mask = 0
+    for k in keys:
+        mask |= 1 << KEYS.index(k)
+    return mask
 
 
 def _mask(cpu):
@@ -239,16 +275,55 @@ class Console:
         return buf
 
     def set_keys(self, pressed):
-        mask = 0
-        for k in pressed:
-            mask |= 1 << KEYS.index(k)
-        _check(lib().mds_set_keys(self.id, mask))
+        _check(lib().mds_set_keys(self.id, _key_mask(pressed)))
 
     def touch(self, x=None, y=None):
         _check(lib().mds_touch(self.id, -1 if x is None else x, -1 if y is None else y))
 
     def set_lid(self, closed):
         _check(lib().mds_set_lid(self.id, int(closed)))
+
+    def submit_input(self, buttons=0, lid=False, touch=None, mic=None, mic_level=None, seq=0, client=False):
+        """Queue one frame of input; returns the queue depth. buttons: key names or a bitmask.
+        touch: list of (offset, x, y, down) or a single (x, y). mic: list of int16 samples.
+        client=True marks the payload as coming from a socket client (subject to the stall timeout)."""
+        if touch and not isinstance(touch[0], (tuple, list)):
+            touch = [(0, touch[0], touch[1], 1)]
+        pts = (MdsTouchPoint * max(len(touch or []), 1))()
+        for i, (offset, x, y, down) in enumerate(touch or []):
+            pts[i].offset, pts[i].x, pts[i].y, pts[i].down = offset, x, y, int(down)
+        samples = list(mic or [])
+        buf = (c_int16 * max(len(samples), 1))(*samples)
+        hdr = MdsInput()
+        hdr.seq = seq
+        hdr.buttons = _key_mask(buttons)
+        hdr.lid = int(lid)
+        hdr.touch_count = len(touch or [])
+        hdr.mic_kind = 2 if mic_level is not None else (1 if mic is not None else 0)
+        hdr.flags = INPUT_FLAG_CLIENT if client else 0
+        hdr.mic_count = len(samples)
+        hdr.mic_level = mic_level or 0
+        return _check(lib().mds_input_submit(self.id, ctypes.byref(hdr), pts, buf))
+
+    def input_mode(self, mode=None, stall_frames=None):
+        """mode: "repeat", "neutral" or "wait" (None = unchanged). stall_frames: repeat-mode timeout, 0 = off."""
+        m = -1 if mode is None else INPUT_MODES[mode]
+        _check(lib().mds_input_mode(self.id, m, -1 if stall_frames is None else stall_frames))
+
+    def input_depth(self):
+        return _check(lib().mds_input_depth(self.id))
+
+    def input_waiting(self):
+        return bool(_check(lib().mds_input_waiting(self.id)))
+
+    def input_clear(self):
+        _check(lib().mds_input_clear(self.id))
+
+    def input_log(self, from_frame=0, max=4096):
+        buf = (MdsInputLogEntry * max)()
+        n = _check(lib().mds_input_log(self.id, from_frame, buf, max))
+        return [{"frame": e.frame, "seq": e.seq, "buttons": e.buttons, "lid": e.lid, "touch_count": e.touch_count,
+                 "mic_kind": e.mic_kind, "mic_level": e.mic_level} for e in buf[:n]]
 
     def read(self, addr, length, cpu=9):
         buf = (c_uint8 * length)()

@@ -138,6 +138,10 @@ Instance::Instance(int id, const Config& config, std::string& error) : ID(id)
         { std::lock_guard lock(Lock); }
         Cond.notify_all();
     });
+    Input.SetWake([this] {
+        { std::lock_guard lock(Lock); }
+        Cond.notify_all();
+    });
     Thread = std::thread([this] { ThreadMain(); });
     Commands.SetDrainThread(Thread.get_id());
 }
@@ -203,6 +207,7 @@ void Instance::Reset()
         NDS->SetupDirectBoot(ROMName);
     NDS->Start();
     FramesRun = 0;
+    Input.Reset();
     Lua->OnReset();
 }
 
@@ -228,9 +233,12 @@ void Instance::Start(u32 frames)
 
 void Instance::StopAfter(u32 frames)
 {
-    std::lock_guard lock(Lock);
-    if (State == RunState::Running)
-        FramesLeft = frames;
+    {
+        std::lock_guard lock(Lock);
+        if (State == RunState::Running)
+            FramesLeft = frames;
+    }
+    Cond.notify_all();      // a console waiting for input has to see FramesLeft change
 }
 
 RunState Instance::Wait(int timeoutMs)
@@ -252,7 +260,23 @@ RunState Instance::GetState()
 
 void Instance::Interrupt()
 {
+    {
+        std::lock_guard lock(Lock);
+        if (Waiting)
+        {
+            // No CPU is running to take a break request: park at the frame boundary instead.
+            WaitInterrupt = true;
+            Cond.notify_all();
+            return;
+        }
+    }
     NDS->Debugger.RequestBreak(3);
+}
+
+bool Instance::WaitingForInput()
+{
+    std::lock_guard lock(Lock);
+    return Waiting;
 }
 
 bool Instance::TakeBreak(BreakEvent& out)
@@ -299,6 +323,18 @@ void Instance::ThreadMain()
                     break;
                 }
             }
+            AppliedInput applied;
+            if (!AcquireInput(applied))
+            {
+                std::lock_guard lock(Lock);
+                if (Quit || FramesLeft == 0)
+                {
+                    State = RunState::Idle;
+                    break;
+                }
+                continue;
+            }
+            ApplyInput(*this, applied);
             NDS->RunFrame();
             FramesRun++;
             Lua->OnFrameEnd();
@@ -318,6 +354,45 @@ void Instance::ThreadMain()
             }
         }
         Cond.notify_all();
+    }
+}
+
+// Resolve the input for the next frame. In Wait mode with nothing queued this blocks at the frame
+// boundary (FramesLeft is not used up) until input arrives or something else needs attention.
+// False means the caller should look at Quit/FramesLeft again before running a frame.
+bool Instance::AcquireInput(AppliedInput& out)
+{
+    for (;;)
+    {
+        if (Input.Next(FramesRun, out))
+            return true;
+
+        std::unique_lock lock(Lock);
+        Waiting = true;
+        Cond.notify_all();
+        Cond.wait(lock, [this] {
+            return Quit || FramesLeft == 0 || WaitInterrupt || Commands.HasPending()
+                || Input.Depth() != 0 || Input.Mode() != EmptyMode::Wait;
+        });
+        Waiting = false;
+        if (Quit || FramesLeft == 0)
+            return false;
+        if (WaitInterrupt)
+        {
+            WaitInterrupt = false;
+            BreakEvent ev {};
+            ev.Kind = BreakKind::Request;
+            ev.PC = NDS->ARM9->R[15];
+            lock.unlock();
+            Park(ev);
+            return false;
+        }
+        if (Commands.HasPending())
+        {
+            lock.unlock();
+            Commands.Drain();
+            return false;
+        }
     }
 }
 
@@ -377,6 +452,7 @@ bool Instance::LoadState(const std::string& path, std::string& error)
         error = "cannot read " + path;
         return false;
     }
+    Input.Clear();
     Savestate backup;
     NDS->DoSavestate(&backup);
     Savestate state(data.data(), data.size(), false);
