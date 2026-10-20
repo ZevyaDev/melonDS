@@ -21,12 +21,14 @@
 
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "Commands.h"
 #include "NDS.h"
 #include "Net.h"
 
@@ -79,6 +81,10 @@ public:
     void Interrupt();
     bool TakeBreak(melonDS::BreakEvent& out);
 
+    // Run fn on this console's emulator thread (inline if already there) and wait.
+    // False if the console is being destroyed and fn did not run.
+    bool Call(const std::function<void(Instance&)>& fn);
+
     bool SaveState(const std::string& path, std::string& error);
     bool LoadState(const std::string& path, std::string& error);
 
@@ -107,6 +113,8 @@ private:
     bool PacketLogging = false;
     size_t PacketCapacity = 0;
     std::deque<PacketRecord> Packets;
+
+    CommandQueue Commands;
 
     void ThreadMain();
     void Park(const melonDS::BreakEvent& ev);

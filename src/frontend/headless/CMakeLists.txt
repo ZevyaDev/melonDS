@@ -7,6 +7,7 @@ endif()
 
 add_library(melonds_headless SHARED
     Api.cpp
+    Commands.cpp
     Instance.cpp
     LuaHost.cpp
     Platform.cpp
@@ -28,4 +29,37 @@ target_link_libraries(melonds_headless PRIVATE core net-utils ${LUA_LIBRARIES})
 if (WIN32)
     target_link_libraries(melonds_headless PRIVATE ws2_32 iphlpapi)
     target_link_options(melonds_headless PRIVATE -static-libgcc -static-libstdc++)
+endif()
+
+# Unit tests for the pure-logic sources (no NDS needed)
+add_executable(headless_tests
+    tests/main.cpp
+    tests/CommandQueueTests.cpp
+    Commands.cpp
+)
+find_package(Threads REQUIRED)
+target_include_directories(headless_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+target_link_libraries(headless_tests PRIVATE Threads::Threads)
+if (WIN32)
+    target_link_options(headless_tests PRIVATE -static-libgcc -static-libstdc++)
+endif()
+add_test(NAME headless_unit COMMAND headless_tests)
+set_tests_properties(headless_unit PROPERTIES TIMEOUT 60)
+
+# Python integration tests drive the DLL through the ctypes wrapper
+find_package(Python3 COMPONENTS Interpreter)
+if (Python3_Interpreter_FOUND)
+    set(MCP_DIR "${CMAKE_SOURCE_DIR}/tools/melonds-mcp")
+    add_test(NAME python_integration
+        COMMAND ${Python3_EXECUTABLE} -m unittest discover -s "${MCP_DIR}/tests" -t "${MCP_DIR}" -v)
+    set(PY_TEST_ENV "MELONDS_HEADLESS_LIB=$<TARGET_FILE:melonds_headless>")
+    if (WIN32)
+        get_filename_component(RUNTIME_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+        list(APPEND PY_TEST_ENV "MELONDS_DLL_DIRS=${RUNTIME_DIR}")
+    endif()
+    set_tests_properties(python_integration PROPERTIES ENVIRONMENT "${PY_TEST_ENV}" TIMEOUT 300)
+else()
+    message(STATUS "Python3 not found: python_integration test disabled")
 endif()

@@ -133,7 +133,13 @@ Instance::Instance(int id, const Config& config, std::string& error) : ID(id)
     Network().RegisterInstance(ID);
     Lua = std::make_unique<LuaHost>(*this);
 
+    Commands.SetWake([this] {
+        // Take the lock so a thread between its predicate check and its wait cannot miss this.
+        { std::lock_guard lock(Lock); }
+        Cond.notify_all();
+    });
     Thread = std::thread([this] { ThreadMain(); });
+    Commands.SetDrainThread(Thread.get_id());
 }
 
 Instance::~Instance()
@@ -143,6 +149,7 @@ Instance::~Instance()
         Quit = true;
         FramesLeft = 0;
     }
+    Commands.Shutdown();
     NDS->Debugger.SetBreakHandler(nullptr);
     Cond.notify_all();
     if (Thread.joinable())
@@ -192,7 +199,7 @@ bool Instance::LoadROM(const std::string& path, const std::string& savePath, std
 void Instance::Reset()
 {
     NDS->Reset();
-    if (NDS->NeedsDirectBoot())
+    if (NDS->CartInserted() && NDS->NeedsDirectBoot())
         NDS->SetupDirectBoot(ROMName);
     NDS->Start();
     FramesRun = 0;
@@ -258,19 +265,32 @@ bool Instance::TakeBreak(BreakEvent& out)
     return true;
 }
 
+bool Instance::Call(const std::function<void(Instance&)>& fn)
+{
+    return Commands.Call([this, &fn] { fn(*this); });
+}
+
 void Instance::ThreadMain()
 {
     for (;;)
     {
         {
             std::unique_lock lock(Lock);
-            Cond.wait(lock, [this] { return Quit || State == RunState::Running; });
+            Cond.wait(lock, [this] { return Quit || State == RunState::Running || Commands.HasPending(); });
             if (Quit)
                 return;
+            if (State != RunState::Running)
+            {
+                // woken by a command while idle
+                lock.unlock();
+                Commands.Drain();
+                continue;
+            }
         }
         auto next = std::chrono::steady_clock::now();
         for (;;)
         {
+            Commands.Drain();   // frame boundary: the only place the NDS is touched from outside
             {
                 std::lock_guard lock(Lock);
                 if (Quit || FramesLeft == 0)
@@ -310,7 +330,17 @@ void Instance::Park(const BreakEvent& ev)
     BreakPending = true;
     State = RunState::Parked;
     Cond.notify_all();
-    Cond.wait(lock, [this] { return Quit || State == RunState::Running; });
+    while (!Quit && State != RunState::Running)
+    {
+        if (Commands.HasPending())
+        {
+            lock.unlock();
+            Commands.Drain();
+            lock.lock();
+            continue;
+        }
+        Cond.wait(lock, [this] { return Quit || State == RunState::Running || Commands.HasPending(); });
+    }
 }
 
 bool Instance::SaveState(const std::string& path, std::string& error)

@@ -108,6 +108,20 @@ u32 SPSR(ARM& arm)
     }
 }
 
+// Run f(inst, error) on the console's emulator thread and return its result. A negative
+// result with a non-empty error reports that error to the caller's thread.
+template <typename F>
+int OnEmu(Slot* s, F f)
+{
+    int result = -1;
+    std::string error;
+    if (!s->Inst->Call([&](Instance& inst) { result = f(inst, error); }))
+        return Fail("console is shutting down");
+    if (result < 0 && !error.empty())
+        LastError = error;
+    return result;
+}
+
 template <typename T, typename F>
 int Take(std::vector<T>& staging, F refill, T* out, int max)
 {
@@ -213,10 +227,9 @@ int mds_load_rom(int id, const char* rom, const char* save)
     Slot* s = Stopped(id);
     if (!s)
         return -1;
-    std::string error;
-    if (!s->Inst->LoadROM(rom, save ? save : "", error))
-        return Fail(error);
-    return 0;
+    return OnEmu(s, [&](Instance& inst, std::string& error) {
+        return inst.LoadROM(rom, save ? save : "", error) ? 0 : -1;
+    });
 }
 
 int mds_reset(int id)
@@ -226,8 +239,10 @@ int mds_reset(int id)
         return -1;
     if (s->Inst->GetState() != RunState::Idle)
         return Fail("reset needs an idle console");
-    s->Inst->Reset();
-    return 0;
+    return OnEmu(s, [](Instance& inst, std::string&) {
+        inst.Reset();
+        return 0;
+    });
 }
 
 int mds_run(const int* ids, int count, uint32_t frames, int timeout_ms, int* states)
@@ -369,13 +384,18 @@ int mds_screen(int id, uint32_t* out)
     Slot* s = Find(id);
     if (!s)
         return -1;
-    void* top = nullptr;
-    void* bottom = nullptr;
-    if (!s->Inst->NDS->GPU.GetFramebuffers(&top, &bottom) || !top || !bottom)
-        return Fail("no framebuffer");
-    memcpy(out, top, 256 * 192 * 4);
-    memcpy(out + 256 * 192, bottom, 256 * 192 * 4);
-    return 0;
+    return OnEmu(s, [&](Instance& inst, std::string& error) {
+        void* top = nullptr;
+        void* bottom = nullptr;
+        if (!inst.NDS->GPU.GetFramebuffers(&top, &bottom) || !top || !bottom)
+        {
+            error = "no framebuffer";
+            return -1;
+        }
+        memcpy(out, top, 256 * 192 * 4);
+        memcpy(out + 256 * 192, bottom, 256 * 192 * 4);
+        return 0;
+    });
 }
 
 int mds_set_keys(int id, uint32_t pressed)
@@ -383,9 +403,11 @@ int mds_set_keys(int id, uint32_t pressed)
     Slot* s = Find(id);
     if (!s)
         return -1;
-    s->Inst->Lua->Keys = pressed & 0xFFF;
-    s->Inst->NDS->SetKeyMask(~pressed & 0xFFF);
-    return 0;
+    return OnEmu(s, [&](Instance& inst, std::string&) {
+        inst.Lua->Keys = pressed & 0xFFF;
+        inst.NDS->SetKeyMask(~pressed & 0xFFF);
+        return 0;
+    });
 }
 
 int mds_touch(int id, int x, int y)
@@ -393,11 +415,13 @@ int mds_touch(int id, int x, int y)
     Slot* s = Find(id);
     if (!s)
         return -1;
-    if (x < 0 || y < 0)
-        s->Inst->NDS->ReleaseScreen();
-    else
-        s->Inst->NDS->TouchScreen(std::min(x, 255), std::min(y, 191));
-    return 0;
+    return OnEmu(s, [&](Instance& inst, std::string&) {
+        if (x < 0 || y < 0)
+            inst.NDS->ReleaseScreen();
+        else
+            inst.NDS->TouchScreen(std::min(x, 255), std::min(y, 191));
+        return 0;
+    });
 }
 
 int mds_set_lid(int id, int closed)
@@ -405,8 +429,10 @@ int mds_set_lid(int id, int closed)
     Slot* s = Find(id);
     if (!s)
         return -1;
-    s->Inst->NDS->SetLidClosed(closed != 0);
-    return 0;
+    return OnEmu(s, [&](Instance& inst, std::string&) {
+        inst.NDS->SetLidClosed(closed != 0);
+        return 0;
+    });
 }
 
 int mds_read(int id, int cpu, uint32_t addr, uint32_t len, uint8_t* out)
@@ -414,31 +440,38 @@ int mds_read(int id, int cpu, uint32_t addr, uint32_t len, uint8_t* out)
     Slot* s = Find(id);
     if (!s)
         return -1;
-    melonDS::NDS& nds = *s->Inst->NDS;
-    int n = cpu == 7 || cpu == 1;
-    ARMv5& arm9 = *nds.ARM9;
-    for (u32 i = 0; i < len; i++)
-    {
-        u32 a = addr + i;
-        bool tcm = !n && (a < arm9.ITCMSize || (a & arm9.DTCMMask) == arm9.DTCMBase);
-        if ((a >> 24) == 0x02 && !tcm)
-            out[i] = nds.MainRAM[a & nds.MainRAMMask];
-        else
-            out[i] = nds.Debugger.Peek(n, a, 1);
-    }
-    return 0;
+    return OnEmu(s, [&](Instance& inst, std::string&) {
+        melonDS::NDS& nds = *inst.NDS;
+        int n = cpu == 7 || cpu == 1;
+        ARMv5& arm9 = *nds.ARM9;
+        for (u32 i = 0; i < len; i++)
+        {
+            u32 a = addr + i;
+            bool tcm = !n && (a < arm9.ITCMSize || (a & arm9.DTCMMask) == arm9.DTCMBase);
+            if ((a >> 24) == 0x02 && !tcm)
+                out[i] = nds.MainRAM[a & nds.MainRAMMask];
+            else
+                out[i] = nds.Debugger.Peek(n, a, 1);
+        }
+        return 0;
+    });
 }
 
+// Applied by the emulator thread at the next frame boundary (or at once when idle or parked).
 int mds_write(int id, int cpu, uint32_t addr, uint32_t len, const uint8_t* data)
 {
-    Slot* s = Stopped(id);
+    Slot* s = Find(id);
     if (!s)
         return -1;
-    melonDS::NDS& nds = *s->Inst->NDS;
-    for (u32 i = 0; i < len; i++)
-        if (!nds.Debugger.Poke(cpu == 7 || cpu == 1, addr + i, 1, data[i]))
-            return Fail("address not writable");
-    return 0;
+    return OnEmu(s, [&](Instance& inst, std::string& error) {
+        for (u32 i = 0; i < len; i++)
+            if (!inst.NDS->Debugger.Poke(cpu == 7 || cpu == 1, addr + i, 1, data[i]))
+            {
+                error = "address not writable";
+                return -1;
+            }
+        return 0;
+    });
 }
 
 int mds_get_regs(int id, int cpu, uint32_t* out)
@@ -446,16 +479,18 @@ int mds_get_regs(int id, int cpu, uint32_t* out)
     Slot* s = Stopped(id);
     if (!s)
         return -1;
-    int n = cpu == 7 || cpu == 1;
-    ARM& arm = CPU(*s->Inst, n);
-    for (int i = 0; i < 15; i++)
-        out[i] = arm.R[i];
-    out[15] = s->Inst->GetState() == RunState::Parked ? s->Inst->NDS->Debugger.CurPC[n]
-        : arm.R[15] - ((arm.CPSR & 0x20) ? 2 : 4);
-    out[16] = arm.CPSR;
-    out[17] = SPSR(arm);
-    out[18] = arm.R[15];
-    return 0;
+    return OnEmu(s, [&](Instance& inst, std::string&) {
+        int n = cpu == 7 || cpu == 1;
+        ARM& arm = CPU(inst, n);
+        for (int i = 0; i < 15; i++)
+            out[i] = arm.R[i];
+        out[15] = inst.GetState() == RunState::Parked ? inst.NDS->Debugger.CurPC[n]
+            : arm.R[15] - ((arm.CPSR & 0x20) ? 2 : 4);
+        out[16] = arm.CPSR;
+        out[17] = SPSR(arm);
+        out[18] = arm.R[15];
+        return 0;
+    });
 }
 
 int mds_set_reg(int id, int cpu, int reg, uint32_t value)
@@ -463,14 +498,19 @@ int mds_set_reg(int id, int cpu, int reg, uint32_t value)
     Slot* s = Stopped(id);
     if (!s)
         return -1;
-    ARM& arm = CPU(*s->Inst, cpu == 7 || cpu == 1);
-    if (reg < 0 || reg > 15)
-        return Fail("register out of range");
-    if (reg == 15)
-        arm.JumpTo(value | ((arm.CPSR & 0x20) ? 1 : 0));
-    else
-        arm.R[reg] = value;
-    return 0;
+    return OnEmu(s, [&](Instance& inst, std::string& error) {
+        ARM& arm = CPU(inst, cpu == 7 || cpu == 1);
+        if (reg < 0 || reg > 15)
+        {
+            error = "register out of range";
+            return -1;
+        }
+        if (reg == 15)
+            arm.JumpTo(value | ((arm.CPSR & 0x20) ? 1 : 0));
+        else
+            arm.R[reg] = value;
+        return 0;
+    });
 }
 
 int mds_bp_add(int id, uint32_t cpumask, uint32_t addr)
@@ -478,7 +518,9 @@ int mds_bp_add(int id, uint32_t cpumask, uint32_t addr)
     Slot* s = Stopped(id);
     if (!s)
         return -1;
-    return s->Inst->NDS->Debugger.AddBreakpoint(cpumask & 3, addr);
+    return OnEmu(s, [&](Instance& inst, std::string&) {
+        return inst.NDS->Debugger.AddBreakpoint(cpumask & 3, addr);
+    });
 }
 
 int mds_wp_add(int id, uint32_t cpumask, uint32_t addr, uint32_t size, uint32_t flags)
@@ -486,8 +528,12 @@ int mds_wp_add(int id, uint32_t cpumask, uint32_t addr, uint32_t size, uint32_t 
     Slot* s = Stopped(id);
     if (!s)
         return -1;
-    int r = s->Inst->NDS->Debugger.AddWatchpoint(cpumask & 3, addr, size, flags & 3);
-    return r < 0 ? Fail("bad watchpoint") : r;
+    return OnEmu(s, [&](Instance& inst, std::string& error) {
+        int r = inst.NDS->Debugger.AddWatchpoint(cpumask & 3, addr, size, flags & 3);
+        if (r < 0)
+            error = "bad watchpoint";
+        return r;
+    });
 }
 
 int mds_point_remove(int id, int point)
@@ -495,7 +541,12 @@ int mds_point_remove(int id, int point)
     Slot* s = Stopped(id);
     if (!s)
         return -1;
-    return s->Inst->NDS->Debugger.Remove(point) ? 0 : Fail("no such point");
+    return OnEmu(s, [&](Instance& inst, std::string& error) {
+        if (inst.NDS->Debugger.Remove(point))
+            return 0;
+        error = "no such point";
+        return -1;
+    });
 }
 
 int mds_point_enable(int id, int point, int enabled)
@@ -503,7 +554,12 @@ int mds_point_enable(int id, int point, int enabled)
     Slot* s = Stopped(id);
     if (!s)
         return -1;
-    return s->Inst->NDS->Debugger.SetEnabled(point, enabled != 0) ? 0 : Fail("no such point");
+    return OnEmu(s, [&](Instance& inst, std::string& error) {
+        if (inst.NDS->Debugger.SetEnabled(point, enabled != 0))
+            return 0;
+        error = "no such point";
+        return -1;
+    });
 }
 
 int mds_point_list(int id, mds_point* out, int max)
@@ -511,15 +567,17 @@ int mds_point_list(int id, mds_point* out, int max)
     Slot* s = Stopped(id);
     if (!s)
         return -1;
-    auto& dbg = s->Inst->NDS->Debugger;
-    int n = 0;
-    for (auto& b : dbg.GetBreakpoints())
-        if (n < max)
-            out[n++] = {b.ID, 0, b.CPUMask, 0, b.Enabled, b.Addr, b.Addr, b.Hits};
-    for (auto& w : dbg.GetWatchpoints())
-        if (n < max)
-            out[n++] = {w.ID, 1, w.CPUMask, w.Flags, w.Enabled, w.Start, w.End, w.Hits};
-    return n;
+    return OnEmu(s, [&](Instance& inst, std::string&) {
+        auto& dbg = inst.NDS->Debugger;
+        int n = 0;
+        for (auto& b : dbg.GetBreakpoints())
+            if (n < max)
+                out[n++] = {b.ID, 0, b.CPUMask, 0, b.Enabled, b.Addr, b.Addr, b.Hits};
+        for (auto& w : dbg.GetWatchpoints())
+            if (n < max)
+                out[n++] = {w.ID, 1, w.CPUMask, w.Flags, w.Enabled, w.Start, w.End, w.Hits};
+        return n;
+    });
 }
 
 int mds_step(int id, int cpu, uint32_t count)
@@ -527,8 +585,10 @@ int mds_step(int id, int cpu, uint32_t count)
     Slot* s = Stopped(id);
     if (!s)
         return -1;
-    s->Inst->NDS->Debugger.Step(cpu == 7 || cpu == 1, count);
-    return 0;
+    return OnEmu(s, [&](Instance& inst, std::string&) {
+        inst.NDS->Debugger.Step(cpu == 7 || cpu == 1, count);
+        return 0;
+    });
 }
 
 int mds_trace(int id, uint32_t cpumask, uint32_t start, uint32_t end, uint32_t capacity)
@@ -537,8 +597,10 @@ int mds_trace(int id, uint32_t cpumask, uint32_t start, uint32_t end, uint32_t c
     if (!s)
         return -1;
     s->Trace.clear();
-    s->Inst->NDS->Debugger.SetTrace(cpumask & 3, start, end, capacity);
-    return 0;
+    return OnEmu(s, [&](Instance& inst, std::string&) {
+        inst.NDS->Debugger.SetTrace(cpumask & 3, start, end, capacity);
+        return 0;
+    });
 }
 
 int mds_trace_take(int id, mds_trace_entry* out, int max)
@@ -547,7 +609,11 @@ int mds_trace_take(int id, mds_trace_entry* out, int max)
     if (!s)
         return -1;
     std::vector<TraceEntry> buf(max);
-    int n = Take(s->Trace, [s] { return s->Inst->NDS->Debugger.DrainTrace(); }, buf.data(), max);
+    int n = Take(s->Trace, [s] {
+        std::vector<TraceEntry> drained;
+        s->Inst->Call([&](Instance& inst) { drained = inst.NDS->Debugger.DrainTrace(); });
+        return drained;
+    }, buf.data(), max);
     for (int i = 0; i < n; i++)
         out[i] = {buf[i].Timestamp, buf[i].PC, buf[i].Instr, buf[i].CPSR, buf[i].CPU ? 7u : 9u};
     return n;
@@ -558,8 +624,10 @@ int mds_calls(int id, int enabled)
     Slot* s = Stopped(id);
     if (!s)
         return -1;
-    s->Inst->NDS->Debugger.SetCallTracking(enabled != 0);
-    return 0;
+    return OnEmu(s, [&](Instance& inst, std::string&) {
+        inst.NDS->Debugger.SetCallTracking(enabled != 0);
+        return 0;
+    });
 }
 
 int mds_callstack(int id, int cpu, mds_frame* out, int max)
@@ -567,14 +635,16 @@ int mds_callstack(int id, int cpu, mds_frame* out, int max)
     Slot* s = Stopped(id);
     if (!s)
         return -1;
-    auto stack = s->Inst->NDS->Debugger.GetCallStack(cpu == 7 || cpu == 1);
-    int n = std::min<int>(max, stack.size());
-    for (int i = 0; i < n; i++)
-    {
-        const CallFrame& f = stack[stack.size() - 1 - i];
-        out[i] = {f.Site, f.Entry, f.Return, f.SP, f.Mode, f.Exception};
-    }
-    return n;
+    return OnEmu(s, [&](Instance& inst, std::string&) {
+        auto stack = inst.NDS->Debugger.GetCallStack(cpu == 7 || cpu == 1);
+        int n = std::min<int>(max, stack.size());
+        for (int i = 0; i < n; i++)
+        {
+            const CallFrame& f = stack[stack.size() - 1 - i];
+            out[i] = {f.Site, f.Entry, f.Return, f.SP, f.Mode, f.Exception};
+        }
+        return n;
+    });
 }
 
 int mds_callcounts_take(int id, int cpu, uint32_t* entries, uint64_t* counts, int max)
@@ -585,8 +655,12 @@ int mds_callcounts_take(int id, int cpu, uint32_t* entries, uint64_t* counts, in
     int n = cpu == 7 || cpu == 1;
     std::vector<std::pair<u32, u64>> buf(max);
     int got = Take(s->Calls[n], [s, n] {
-        auto map = s->Inst->NDS->Debugger.DrainCallCounts(n);
-        return std::vector<std::pair<u32, u64>>(map.begin(), map.end());
+        std::vector<std::pair<u32, u64>> drained;
+        s->Inst->Call([&](Instance& inst) {
+            auto map = inst.NDS->Debugger.DrainCallCounts(n);
+            drained.assign(map.begin(), map.end());
+        });
+        return drained;
     }, buf.data(), max);
     for (int i = 0; i < got; i++)
     {
@@ -601,8 +675,10 @@ int mds_coverage(int id, int enabled)
     Slot* s = Stopped(id);
     if (!s)
         return -1;
-    s->Inst->NDS->Debugger.SetCoverage(enabled != 0);
-    return 0;
+    return OnEmu(s, [&](Instance& inst, std::string&) {
+        inst.NDS->Debugger.SetCoverage(enabled != 0);
+        return 0;
+    });
 }
 
 int mds_coverage_take(int id, int cpu, uint32_t* out, int max)
@@ -611,7 +687,11 @@ int mds_coverage_take(int id, int cpu, uint32_t* out, int max)
     if (!s)
         return -1;
     int n = cpu == 7 || cpu == 1;
-    return Take(s->Coverage[n], [s, n] { return s->Inst->NDS->Debugger.DrainCoverage(n); }, out, max);
+    return Take(s->Coverage[n], [s, n] {
+        std::vector<u32> drained;
+        s->Inst->Call([&](Instance& inst) { drained = inst.NDS->Debugger.DrainCoverage(n); });
+        return drained;
+    }, out, max);
 }
 
 int mds_lastwriter(int id, int enabled)
@@ -619,14 +699,20 @@ int mds_lastwriter(int id, int enabled)
     Slot* s = Stopped(id);
     if (!s)
         return -1;
-    s->Inst->NDS->Debugger.SetLastWriter(enabled != 0);
-    return 0;
+    return OnEmu(s, [&](Instance& inst, std::string&) {
+        inst.NDS->Debugger.SetLastWriter(enabled != 0);
+        return 0;
+    });
 }
 
 uint32_t mds_lastwriter_get(int id, uint32_t addr)
 {
     Slot* s = Stopped(id);
-    return s ? s->Inst->NDS->Debugger.GetLastWriter(addr) : 0;
+    if (!s)
+        return 0;
+    uint32_t writer = 0;
+    s->Inst->Call([&](Instance& inst) { writer = inst.NDS->Debugger.GetLastWriter(addr); });
+    return writer;
 }
 
 int mds_savestate(int id, const char* path)
@@ -634,8 +720,9 @@ int mds_savestate(int id, const char* path)
     Slot* s = Find(id);
     if (!s)
         return -1;
-    std::string error;
-    return s->Inst->SaveState(path, error) ? 0 : Fail(error);
+    return OnEmu(s, [&](Instance& inst, std::string& error) {
+        return inst.SaveState(path, error) ? 0 : -1;
+    });
 }
 
 int mds_loadstate(int id, const char* path)
@@ -643,8 +730,9 @@ int mds_loadstate(int id, const char* path)
     Slot* s = Find(id);
     if (!s)
         return -1;
-    std::string error;
-    return s->Inst->LoadState(path, error) ? 0 : Fail(error);
+    return OnEmu(s, [&](Instance& inst, std::string& error) {
+        return inst.LoadState(path, error) ? 0 : -1;
+    });
 }
 
 int mds_lua_run(int id, const char* source, int is_file)
