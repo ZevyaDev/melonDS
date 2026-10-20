@@ -100,6 +100,9 @@ MDS_API int mds_create(const char* bios9, const char* bios7, const char* firmwar
 MDS_API void mds_destroy(int id);
 MDS_API int mds_load_rom(int id, const char* rom, const char* save);
 MDS_API int mds_reset(int id);
+// Clock as year (2000-2099), month, day, hour, minute, second. Needs a stopped console.
+MDS_API int mds_set_rtc(int id, int year, int month, int day, int hour, int minute, int second);
+MDS_API int mds_get_rtc(int id, int* out);
 
 MDS_API int mds_run(const int* ids, int count, uint32_t frames, int timeout_ms, int* states);
 MDS_API int mds_wait(const int* ids, int count, int timeout_ms, int* states);

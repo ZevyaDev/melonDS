@@ -47,7 +47,11 @@ struct Slot
 };
 
 std::mutex SlotsLock;
-std::map<int, Slot> Slots;
+// Deliberately never destroyed. At process exit Windows kills the emulator threads first, then
+// runs static destructors under the loader lock; ~Instance would then wait forever in
+// ~condition_variable for a thread that no longer exists. Consoles are torn down by mds_destroy;
+// anything left at exit is reclaimed by the OS (saves are written through immediately).
+std::map<int, Slot>& Slots = *new std::map<int, Slot>;
 thread_local std::string LastError;
 bool MPReady = false;
 
@@ -227,6 +231,26 @@ int mds_reset(int id)
     if (s->Inst->GetState() != RunState::Idle)
         return Fail("reset needs an idle console");
     s->Inst->Reset();
+    return 0;
+}
+
+int mds_set_rtc(int id, int year, int month, int day, int hour, int minute, int second)
+{
+    Slot* s = Stopped(id);
+    if (!s)
+        return -1;
+    if (year < 2000 || year > 2099)
+        return Fail("RTC year must be 2000-2099");
+    s->Inst->NDS->RTC.SetDateTime(year, month, day, hour, minute, second);
+    return 0;
+}
+
+int mds_get_rtc(int id, int* out)
+{
+    Slot* s = Stopped(id);
+    if (!s)
+        return -1;
+    s->Inst->NDS->RTC.GetDateTime(out[0], out[1], out[2], out[3], out[4], out[5]);
     return 0;
 }
 
