@@ -28,15 +28,27 @@ by every tool.
 | F6 | break on the selected CPU |
 | F5 | continue (also unpauses) |
 | F11, F10, Shift+F11 | step into, step over, step out |
+| Ctrl+F10 | run to the next branch or return in this function, stepping over calls |
+| Ctrl+F11 | run until a branch, call or return actually jumps; stop at its target |
 | F4 | run to the selected line |
 | F9, click in the margin | toggle a breakpoint |
 | Ctrl+G | go to address or symbol |
 | Enter, double-click | follow a branch or literal |
 | Backspace | back |
 
+Step over (F10) steps over BL, BLX, SWI and calls made through `mov lr, pc` with `bx` or `ldr pc`,
+and steps through every other branch. Instructions are coloured by kind, in the disassembly and the
+trace: calls orange, returns red, branches purple, loads cyan, stores green, compares yellow,
+system and coprocessor blue, literal data dimmed, everything else plain.
+
 Double-click a register to change it while stopped. The docks hold both CPUs' registers,
 breakpoints and watchpoints (CPU and DMA writes, enable, hits, owner) and the call stack. A Lua
 hook that returns true opens the window at the stop.
+
+The call stack is tracked in the core, per thread: BL/BLX, calls through `mov lr, pc`, tail calls,
+interrupts and SWIs, and thread switches (by stack pointer, including NitroSDK's context loads).
+Threads that are not running are listed under the current one. Frames that were already on the
+stack when tracking started or a savestate loaded are read back from stack memory at the next call.
 
 ## Tools
 
@@ -79,7 +91,7 @@ with JIT off when you rerecord.
 
 The Qt console has #1671's API plus the debugger tables from the headless build: `event.onmemoryexecute`,
 `onmemoryread`, `onmemorywrite`, `onframeend`, `emu.getregister`, `setregister`, `getregisters` and
-`debugger.*` (`callstack`, `trackcalls`, `callcounts`, `coverage`, `trace`, `trackwriters`,
+`debugger.*` (`callstack`, `threadstacks`, `trackcalls`, `callcounts`, `coverage`, `trace`, `trackwriters`,
 `lastwriter`, `pause`, `step`, `resume`, `peek`).
 
 Memory hooks run on the emulator thread at the instruction that hit them, so `emu.getregister`

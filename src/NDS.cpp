@@ -788,6 +788,7 @@ bool NDS::DoSavestate(Savestate* file)
 #ifdef JIT_ENABLED
         JIT.Reset();
 #endif
+        Debugger.OnStateLoaded();
     }
 
     file->Finish();

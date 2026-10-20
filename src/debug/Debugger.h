@@ -24,6 +24,7 @@
 #include <functional>
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "../types.h"
@@ -41,6 +42,13 @@ enum class BreakKind : u8
     Step,
     Request,
     Fault,
+};
+
+enum class StepMode : u8
+{
+    None,
+    Branch,
+    TakenBranch,
 };
 
 enum WatchFlags : u8
@@ -125,12 +133,16 @@ public:
     void RequestBreak(u8 cpuMask);
     void CancelBreakRequests();
     void Step(u8 cpu, u32 count);
+    void StepTo(u8 cpu, StepMode mode);
+    u32 CallReturn(u8 cpu, u32 pc, bool thumb, u32 lr) const;
 
     void SetTrace(u8 cpuMask, u32 start, u32 end, u32 capacity);
     std::vector<TraceEntry> DrainTrace();
 
     void SetCallTracking(bool enabled);
+    void OnStateLoaded();
     std::vector<CallFrame> GetCallStack(u8 cpu) const;
+    std::vector<std::pair<u32, std::vector<CallFrame>>> GetThreadStacks(u8 cpu) const;
     std::unordered_map<u32, u64> DrainCallCounts(u8 cpu);
 
     void SetCoverage(bool enabled);
@@ -186,6 +198,13 @@ private:
     std::array<std::array<u32, 16>, 2> LastSP {};
     std::array<u8, 2> LastMode {};
     std::array<u32, 2> PrevInstr {};
+    std::array<u32, 2> JumpTarget {};
+    std::array<StepMode, 2> StepModes {};
+    std::array<size_t, 2> StepDepth {};
+    std::array<CallFrame, 2> StepFrame {};
+    std::array<size_t, 2> StepExceptions {};
+    std::array<bool, 2> SeedPending {};
+    std::array<std::unordered_set<u32>, 2> KnownEntries;
     std::array<bool, 2> PrevThumb {};
 
     struct Interrupted
@@ -210,6 +229,13 @@ private:
     void UnwindCalls(ARM& cpu, u32 pc);
     void WatchHit(u8 n, u32 addr, u8 size, u32 value, bool write, u8 dma);
     void SwitchStacks(u8 n, u32 oldSP, u32 newSP);
+    void PushFrame(u8 n, const CallFrame& frame);
+    bool StepDone(ARM& cpu, u32 pc, bool jumped) const;
+    void TrackEntry(ARM& cpu, u32 pc, u32 prev);
+    void SeedBelow(u8 n);
+    bool ScanPrologue(u8 n, u32 pc, bool thumb, u32& start, u32& depth, u32& lrBelow) const;
+    int CallBefore(u8 n, u32 ret, u32& site, u32& target) const;
+    bool UnwindFrame(u8 n, u32 pc, bool thumb, u32 sp, u8 mode, CallFrame& frame, u32& ret) const;
 };
 
 }

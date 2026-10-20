@@ -125,12 +125,14 @@ void TraceWindow::drain()
         });
 }
 
-static QString Decode(Disassembler& dis, DebugSymbols& syms, const TraceEntry& e)
+static QString Decode(Disassembler& dis, DebugSymbols& syms, const TraceEntry& e, InstrKind* kind = nullptr)
 {
     bool thumb = e.CPSR & 0x20;
     u8 bytes[4];
     memcpy(bytes, &e.Instr, 4);
     DisasmLine line = dis.decode(e.PC, bytes, thumb ? 2 : 4, thumb);
+    if (kind)
+        *kind = line.Kind;
     if (line.HasTarget && !line.IsLiteral)
     {
         QString name = syms.describe(line.Target, false);
@@ -155,7 +157,10 @@ void TraceWindow::showEntries(const std::vector<TraceEntry>& entries)
         Table->setItem(r, 1, new QTableWidgetItem(e.CPU ? "7" : "9"));
         Table->setItem(r, 2, new QTableWidgetItem(Hex(e.PC)));
         Table->setItem(r, 3, new QTableWidgetItem(syms.describe(e.PC)));
-        Table->setItem(r, 4, new QTableWidgetItem(Decode(dis, syms, e)));
+        InstrKind kind;
+        auto* item = new QTableWidgetItem(Decode(dis, syms, e, &kind));
+        item->setForeground(InstrColor(kind, Table->palette()));
+        Table->setItem(r, 4, item);
     }
     Table->resizeColumnsToContents();
     Info->setText(first ? QString("Showing the last %1 of %2 entries; Save writes all of them").arg(MaxShownTrace).arg(entries.size())

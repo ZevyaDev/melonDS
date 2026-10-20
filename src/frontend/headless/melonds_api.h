@@ -132,6 +132,7 @@ MDS_API int mds_trace(int id, uint32_t cpumask, uint32_t start, uint32_t end, ui
 MDS_API int mds_trace_take(int id, mds_trace_entry* out, int max);
 MDS_API int mds_calls(int id, int enabled);
 MDS_API int mds_callstack(int id, int cpu, mds_frame* out, int max);
+MDS_API int mds_threadstacks(int id, int cpu, uint32_t* sps, uint32_t* depths, int max_stacks, mds_frame* out, int max_frames);
 MDS_API int mds_callcounts_take(int id, int cpu, uint32_t* entries, uint64_t* counts, int max);
 MDS_API int mds_coverage(int id, int enabled);
 MDS_API int mds_coverage_take(int id, int cpu, uint32_t* out, int max);

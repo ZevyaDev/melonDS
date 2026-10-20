@@ -577,6 +577,30 @@ int mds_callstack(int id, int cpu, mds_frame* out, int max)
     return n;
 }
 
+int mds_threadstacks(int id, int cpu, uint32_t* sps, uint32_t* depths, int max_stacks, mds_frame* out, int max_frames)
+{
+    Slot* s = Stopped(id);
+    if (!s)
+        return -1;
+    auto threads = s->Inst->NDS->Debugger.GetThreadStacks(cpu == 7 || cpu == 1);
+    int count = std::min<int>(max_stacks, threads.size());
+    int used = 0;
+    for (int t = 0; t < count; t++)
+    {
+        const auto& stack = threads[t].second;
+        int n = std::min<int>(max_frames - used, stack.size());
+        for (int i = 0; i < n; i++)
+        {
+            const CallFrame& f = stack[stack.size() - 1 - i];
+            out[used + i] = {f.Site, f.Entry, f.Return, f.SP, f.Mode, f.Exception};
+        }
+        sps[t] = threads[t].first;
+        depths[t] = n;
+        used += n;
+    }
+    return count;
+}
+
 int mds_callcounts_take(int id, int cpu, uint32_t* entries, uint64_t* counts, int max)
 {
     Slot* s = Stopped(id);

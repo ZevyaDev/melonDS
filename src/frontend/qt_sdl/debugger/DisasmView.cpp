@@ -216,6 +216,7 @@ DisasmLine DisasmView::decodeAt(u32 a, const QSet<u32>& pool)
         line.Addr = a;
         line.Size = 4;
         line.Mnemonic = ".word";
+        line.Kind = InstrKind::Data;
         if (avail >= 4)
         {
             memcpy(&line.Opcode, ptr, 4);
@@ -370,7 +371,7 @@ void DisasmView::paintEvent(QPaintEvent*)
         p.setPen(dim);
         p.drawText(xAddr, y + fm.ascent(), Hex(row.Addr));
         p.drawText(xOp, y + fm.ascent(), l.Size == 2 ? Hex(l.Opcode, 4) : Hex(l.Opcode));
-        p.setPen(pal.text().color());
+        p.setPen(InstrColor(l.Kind, pal));
         p.drawText(xMn, y + fm.ascent(), l.Mnemonic);
         QString args = operands(l);
         p.drawText(xArgs, y + fm.ascent(), args);

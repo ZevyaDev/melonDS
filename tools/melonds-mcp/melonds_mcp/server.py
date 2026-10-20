@@ -290,13 +290,22 @@ def disassemble_at(address: str = "pc", count: int = 16, cpu: int = 9, mode: str
 
 
 @server.tool()
-def callstack(cpu: int = 9, console: int = 0) -> list[str]:
-    """Shadow call stack (innermost first). Needs calls_track(true) before the calls happened."""
+def callstack(cpu: int = 9, threads: bool = False, console: int = 0) -> list[str]:
+    """Shadow call stack (innermost first); needs calls_track(true). threads=true adds every thread that is not running."""
     c = con(console)
-    out = []
-    for f in c.callstack(cpu):
-        kind = "exception" if f["exception"] else f"called from {describe(f['site'], c)}"
-        out.append(f"{describe(f['entry'], c)}  ({kind}, returns to {f['ret']:08x})")
+
+    def lines(frames):
+        out = []
+        for f in frames:
+            kind = "exception" if f["exception"] else f"called from {describe(f['site'], c)}"
+            out.append(f"{describe(f['entry'], c)}  ({kind}, returns to {f['ret']:08x})")
+        return out
+
+    out = lines(c.callstack(cpu))
+    if threads:
+        for t in c.thread_stacks(cpu):
+            out.append(f"thread, SP {t['sp']:08x}:")
+            out.extend("  " + line for line in lines(t["frames"]))
     return out
 
 

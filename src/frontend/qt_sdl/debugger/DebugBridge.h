@@ -83,6 +83,7 @@ public:
     void resume();
     void step(int cpu, melonDS::u32 count = 1);
     void stepOver(int cpu);
+    void stepTo(int cpu, melonDS::StepMode mode);
     void stepOut(int cpu);
     void runTo(int cpu, melonDS::u32 addr);
 

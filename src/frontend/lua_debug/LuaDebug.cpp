@@ -347,20 +347,43 @@ static int SetRegister(lua_State* L)
     return 0;
 }
 
+static void PushFrames(lua_State* L, const std::vector<CallFrame>& stack)
+{
+    lua_createtable(L, stack.size(), 0);
+    for (size_t i = 0; i < stack.size(); i++)
+    {
+        const CallFrame& f = stack[stack.size() - 1 - i];
+        lua_createtable(L, 0, 6);
+        lua_pushinteger(L, f.Entry); lua_setfield(L, -2, "entry");
+        lua_pushinteger(L, f.Site); lua_setfield(L, -2, "site");
+        lua_pushinteger(L, f.Return); lua_setfield(L, -2, "ret");
+        lua_pushinteger(L, f.SP); lua_setfield(L, -2, "sp");
+        lua_pushinteger(L, f.Mode); lua_setfield(L, -2, "mode");
+        lua_pushboolean(L, f.Exception); lua_setfield(L, -2, "exception");
+        lua_rawseti(L, -2, i + 1);
+    }
+}
+
 static int CallStack(lua_State* L)
 {
     int cpu = CPUArg(L, 1, 0);
     std::vector<CallFrame> stack;
     Exec(L, [&](melonDS::NDS& nds) { stack = nds.Debugger.GetCallStack(cpu); });
-    lua_createtable(L, stack.size(), 0);
-    for (size_t i = 0; i < stack.size(); i++)
+    PushFrames(L, stack);
+    return 1;
+}
+
+static int ThreadStacks(lua_State* L)
+{
+    int cpu = CPUArg(L, 1, 0);
+    std::vector<std::pair<u32, std::vector<CallFrame>>> threads;
+    Exec(L, [&](melonDS::NDS& nds) { threads = nds.Debugger.GetThreadStacks(cpu); });
+    lua_createtable(L, threads.size(), 0);
+    for (size_t i = 0; i < threads.size(); i++)
     {
-        const CallFrame& f = stack[stack.size() - 1 - i];
-        lua_createtable(L, 0, 4);
-        lua_pushinteger(L, f.Entry); lua_setfield(L, -2, "entry");
-        lua_pushinteger(L, f.Site); lua_setfield(L, -2, "site");
-        lua_pushinteger(L, f.Return); lua_setfield(L, -2, "ret");
-        lua_pushboolean(L, f.Exception); lua_setfield(L, -2, "exception");
+        lua_createtable(L, 0, 2);
+        lua_pushinteger(L, threads[i].first); lua_setfield(L, -2, "sp");
+        PushFrames(L, threads[i].second); lua_setfield(L, -2, "frames");
         lua_rawseti(L, -2, i + 1);
     }
     return 1;
@@ -531,6 +554,7 @@ void Register(lua_State* L, Host host)
     };
     static const luaL_Reg debugFuncs[] = {
         {"callstack", CallStack},
+        {"threadstacks", ThreadStacks},
         {"trackcalls", TrackCalls},
         {"callcounts", CallCounts},
         {"coverage", Coverage},

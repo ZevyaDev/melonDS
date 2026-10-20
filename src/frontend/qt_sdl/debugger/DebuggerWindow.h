@@ -65,6 +65,7 @@ struct DebugSnapshot
     std::array<CPUSnapshot, 2> CPU;
     std::vector<PointInfo> Points;
     std::array<std::vector<melonDS::CallFrame>, 2> Stack;
+    std::array<std::vector<std::pair<melonDS::u32, std::vector<melonDS::CallFrame>>>, 2> Threads;
     std::vector<int> Overlays;
     melonDS::u64 Frame;
     bool Debug;
@@ -115,6 +116,8 @@ private:
     QAction* ActStep;
     QAction* ActOver;
     QAction* ActOut;
+    QAction* ActBranch;
+    QAction* ActTaken;
 
     void buildToolbar();
     void buildViewToolbar();

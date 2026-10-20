@@ -397,6 +397,11 @@ QString Automation::run(const QStringList& args)
         bridge->stepOut(args.size() > 1 ? args[1].toInt() : 0);
         return "ok";
     }
+    if (c == "stepbranch" || c == "steptaken")
+    {
+        bridge->stepTo(args.size() > 1 ? args[1].toInt() : 0, c == "stepbranch" ? StepMode::Branch : StepMode::TakenBranch);
+        return "ok";
+    }
     if (c == "runto" && args.size() > 1)
     {
         u32 addr;

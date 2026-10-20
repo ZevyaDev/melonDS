@@ -19,9 +19,25 @@
 #ifndef DISASSEMBLER_H
 #define DISASSEMBLER_H
 
+#include <QColor>
 #include <QString>
 
 #include "types.h"
+
+class QPalette;
+
+enum class InstrKind : melonDS::u8
+{
+    Other,
+    Call,
+    Return,
+    Branch,
+    Load,
+    Store,
+    Compare,
+    System,
+    Data,
+};
 
 struct DisasmLine
 {
@@ -34,7 +50,10 @@ struct DisasmLine
     bool HasTarget;
     bool IsCall;
     bool IsLiteral;
+    InstrKind Kind;
 };
+
+QColor InstrColor(InstrKind kind, const QPalette& pal);
 
 class Disassembler
 {

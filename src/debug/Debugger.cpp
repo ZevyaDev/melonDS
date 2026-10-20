@@ -28,9 +28,14 @@ namespace melonDS
 constexpr u32 PageShift = 12;
 constexpr u32 PageCount = 1u << (32 - PageShift);
 constexpr size_t MaxCallDepth = 4096;
-constexpr u32 StackSwitchDistance = 0x400;
 constexpr u32 StackMatchWindow = 0x200;
 constexpr size_t MaxParkedStacks = 64;
+constexpr size_t MaxSeedDepth = 64;
+constexpr u32 MaxPrologueScan = 0x1000;
+constexpr u32 MaxPrologueOffset = 0x20;
+
+static bool IsIndirectJump(u32 instr, bool thumb);
+static bool WritesPC(u32 instr, bool thumb);
 constexpr u32 MainRAMWords = 0x400000 >> 2;
 constexpr u32 DMAWriterTag = 0xFFFFFFF0;
 
@@ -44,12 +49,15 @@ void Debugger::Reset()
     {
         BreakRequested[i] = false;
         StepRemaining[i] = 0;
+        StepModes[i] = StepMode::None;
         PendingValid[i] = false;
         CallStack[i].clear();
         ParkedStacks[i].clear();
         Exceptions[i].clear();
+        KnownEntries[i].clear();
         LastSP[i] = {};
         CurPC[i] = 0;
+        SeedPending[i] = false;
     }
     TraceHead = 0;
     TraceWrapped = false;
@@ -153,6 +161,48 @@ void Debugger::Step(u8 cpu, u32 count)
     Rearm();
 }
 
+void Debugger::StepTo(u8 cpu, StepMode mode)
+{
+    u8 n = cpu & 1;
+    StepModes[n] = mode;
+    StepDepth[n] = CallStack[n].size();
+    StepFrame[n] = CallStack[n].empty() ? CallFrame {} : CallStack[n].back();
+    StepExceptions[n] = Exceptions[n].size();
+    Rearm();
+}
+
+bool Debugger::StepDone(ARM& cpu, u32 pc, bool jumped) const
+{
+    u8 n = cpu.Num;
+    if (StepModes[n] == StepMode::TakenBranch)
+        return jumped;
+    bool thumb = cpu.CPSR & 0x20;
+    if (!WritesPC(cpu.NextInstr[0], thumb) || CallReturn(n, pc, thumb, cpu.R[14]))
+        return false;
+    const auto& stack = CallStack[n];
+    if (Exceptions[n].size() != StepExceptions[n] || stack.size() > StepDepth[n])
+        return false;
+    return stack.size() < StepDepth[n] || StepDepth[n] == 0
+        || (stack.back().Return == StepFrame[n].Return && stack.back().SP == StepFrame[n].SP);
+}
+
+u32 Debugger::CallReturn(u8 cpu, u32 pc, bool thumb, u32 lr) const
+{
+    u32 next = pc + (thumb ? 2 : 4);
+    u32 instr = Peek(cpu, pc, thumb ? 2 : 4);
+    if (thumb)
+    {
+        if ((instr & 0xF800) == 0xF000 && (Peek(cpu, pc + 2, 2) & 0xE800) == 0xE800)
+            return pc + 4;
+        if ((instr & 0xFF87) == 0x4780 || (instr & 0xFF00) == 0xDF00)
+            return next;
+    }
+    else if ((instr & 0xFE000000) == 0xFA000000 || ((instr >> 28) != 0xF && ((instr & 0x0F000000) == 0x0B000000
+        || (instr & 0x0F000000) == 0x0F000000 || (instr & 0x0FFFFFF0) == 0x012FFF30)))
+        return next;
+    return IsIndirectJump(instr, thumb) && (lr & ~1u) == next ? next : 0;
+}
+
 void Debugger::SetTrace(u8 cpuMask, u32 start, u32 end, u32 capacity)
 {
     TraceMask = capacity ? cpuMask : 0;
@@ -182,15 +232,31 @@ std::vector<TraceEntry> Debugger::DrainTrace()
 void Debugger::SetCallTracking(bool enabled)
 {
     CallTracking = enabled;
-    if (!enabled)
-        for (int i = 0; i < 2; i++)
+    for (int i = 0; i < 2; i++)
+    {
+        if (!enabled)
         {
             CallStack[i].clear();
             ParkedStacks[i].clear();
             Exceptions[i].clear();
+            KnownEntries[i].clear();
             LastSP[i] = {};
         }
+        SeedPending[i] = enabled;
+    }
     Rearm();
+}
+
+void Debugger::OnStateLoaded()
+{
+    for (int i = 0; i < 2; i++)
+    {
+        CallStack[i].clear();
+        ParkedStacks[i].clear();
+        Exceptions[i].clear();
+        LastSP[i] = {};
+        SeedPending[i] = CallTracking;
+    }
 }
 
 std::vector<CallFrame> Debugger::GetCallStack(u8 cpu) const
@@ -200,6 +266,11 @@ std::vector<CallFrame> Debugger::GetCallStack(u8 cpu) const
         out.insert(out.end(), ex.Stack.begin(), ex.Stack.end());
     out.insert(out.end(), CallStack[cpu & 1].begin(), CallStack[cpu & 1].end());
     return out;
+}
+
+std::vector<std::pair<u32, std::vector<CallFrame>>> Debugger::GetThreadStacks(u8 cpu) const
+{
+    return {ParkedStacks[cpu & 1].begin(), ParkedStacks[cpu & 1].end()};
 }
 
 std::unordered_map<u32, u64> Debugger::DrainCallCounts(u8 cpu)
@@ -324,7 +395,7 @@ void Debugger::Rearm()
             data |= w.Enabled && (w.CPUMask & (1 << i));
         DataArmed[i] = data;
         Armed[i] = exec || data || CallTracking || Coverage || (TraceMask & (1 << i))
-            || StepRemaining[i] || PendingValid[i] || BreakRequested[i] || ServiceRequested;
+            || StepRemaining[i] || StepModes[i] != StepMode::None || PendingValid[i] || BreakRequested[i] || ServiceRequested;
     }
 }
 
@@ -359,6 +430,7 @@ void Debugger::Raise(const BreakEvent& ev)
 {
     if (!Handler || InBreak)
         return;
+    StepModes[ev.CPU & 1] = StepMode::None;
     InBreak = true;
     Handler(ev);
     InBreak = false;
@@ -387,6 +459,7 @@ void Debugger::SwitchStacks(u8 n, u32 oldSP, u32 newSP)
             bestDist = dist;
         }
     }
+    SeedPending[n] = best == parked.end();
     if (best != parked.end())
     {
         CallStack[n] = std::move(best->second);
@@ -397,6 +470,288 @@ void Debugger::SwitchStacks(u8 n, u32 oldSP, u32 newSP)
 static bool IsExceptionMode(u8 mode)
 {
     return mode != 0x10 && mode != 0x1F;
+}
+
+static u32 ThreadSP(const ARM& cpu)
+{
+    switch (cpu.CPSR & 0x1F)
+    {
+    case 0x11: return cpu.R_FIQ[5];
+    case 0x12: return cpu.R_IRQ[0];
+    case 0x13: return cpu.R_SVC[0];
+    case 0x17: return cpu.R_ABT[0];
+    case 0x1B: return cpu.R_UND[0];
+    default: return cpu.R[13];
+    }
+}
+
+static u32 Ror(u32 v, u32 r)
+{
+    return r ? (v >> r) | (v << (32 - r)) : v;
+}
+
+static u32 SignExtend(u32 v, int bits)
+{
+    return (u32)((s32)(v << (32 - bits)) >> (32 - bits));
+}
+
+static bool IsPushLR(u32 instr, bool thumb)
+{
+    if (thumb)
+        return (instr & 0xFF00) == 0xB500;
+    return (instr & 0xFFFF4000) == 0xE92D4000 || instr == 0xE52DE004;
+}
+
+static bool IsIndirectJump(u32 instr, bool thumb)
+{
+    if (thumb)
+    {
+        u16 t = instr & 0xFFFF;
+        return ((t & 0xFF87) == 0x4700 || (t & 0xFF87) == 0x4687) && ((t >> 3) & 0xF) != 14;
+    }
+    u32 rn = (instr >> 16) & 0xF;
+    if ((instr & 0x0FFFFFF0) == 0x012FFF10 || (instr & 0x0FEFFFF0) == 0x01A0F000)
+        return (instr & 0xF) != 14;
+    return (instr & 0x0C10F000) == 0x0410F000 && rn != 13 && rn != 15;
+}
+
+static bool WritesPC(u32 instr, bool thumb)
+{
+    if (thumb)
+    {
+        u16 t = instr & 0xFFFF;
+        return (t & 0xF000) == 0xD000 || (t & 0xE000) == 0xE000 || (t & 0xFF00) == 0x4700
+            || (t & 0xFF00) == 0xBD00 || (t & 0xFF87) == 0x4687 || (t & 0xFF87) == 0x4487;
+    }
+    if ((instr & 0x0E000000) == 0x0A000000 || (instr & 0x0FFFFFD0) == 0x012FFF10)
+        return true;
+    if ((instr >> 28) == 0xF)
+        return false;
+    if ((instr & 0x0F000000) == 0x0F000000 || (instr & 0x0E108000) == 0x08108000 || (instr & 0x0C10F000) == 0x0410F000)
+        return true;
+    bool misc = (instr & 0x0F900000) == 0x01000000 && !(instr & (1 << 20));
+    bool multiply = (instr & 0x02000090) == 0x90;
+    return (instr & 0x0C00F000) == 0x0000F000 && !misc && !multiply;
+}
+
+static bool EndsPrologue(u32 instr, bool thumb)
+{
+    if (thumb)
+    {
+        u16 t = instr & 0xFFFF;
+        return (t & 0xF000) == 0xD000 || (t & 0xE000) == 0xE000 || (t & 0xFF00) == 0x4700
+            || (t & 0xFF00) == 0xBD00 || (t & 0xFF80) == 0xB000;
+    }
+    return (instr & 0x0E000000) == 0x0A000000 || (instr & 0x0FFFFFD0) == 0x012FFF10
+        || (instr & 0x0FFF0000) == 0x08BD0000 || (instr & 0x0FFFF000) == 0x028DD000;
+}
+
+bool Debugger::ScanPrologue(u8 n, u32 pc, bool thumb, u32& start, u32& depth, u32& lrBelow) const
+{
+    u32 step = thumb ? 2 : 4;
+    u32 a = pc & ~(step - 1);
+    u32 i = 0;
+    while (i < MaxPrologueScan && !IsPushLR(Peek(n, a, step), thumb))
+    {
+        a -= step;
+        i++;
+    }
+    if (i == MaxPrologueScan)
+        return false;
+    start = a;
+    depth = 0;
+    lrBelow = 0;
+    std::array<u32, 16> lit {};
+    u32 known = 0;
+    for (; a < pc; a += step)
+    {
+        u32 instr = Peek(n, a, step);
+        if (thumb)
+        {
+            if ((instr & 0xFE00) == 0xB400)
+            {
+                if (instr & 0x100)
+                    lrBelow = depth + 4;
+                depth += 4 * __builtin_popcount(instr & 0x1FF);
+            }
+            else if ((instr & 0xFF80) == 0xB080)
+                depth += (instr & 0x7F) << 2;
+            else if ((instr & 0xF800) == 0x4800)
+            {
+                lit[(instr >> 8) & 7] = Peek(n, ((a + 4) & ~3u) + ((instr & 0xFF) << 2), 4);
+                known |= 1u << ((instr >> 8) & 7);
+            }
+            else if ((instr & 0xFF87) == 0x4485 && (known & (1u << ((instr >> 3) & 0xF))))
+                depth -= lit[(instr >> 3) & 0xF];
+            else if (EndsPrologue(instr, true))
+                break;
+        }
+        else
+        {
+            if ((instr & 0xFFFF0000) == 0xE92D0000)
+            {
+                depth += 4 * __builtin_popcount(instr & 0xFFFF);
+                if (instr & 0x4000)
+                    lrBelow = depth - 4 * __builtin_popcount(instr & 0x3FFF);
+            }
+            else if ((instr & 0xFFFF0FFF) == 0xE52D0004)
+            {
+                depth += 4;
+                if (((instr >> 12) & 0xF) == 14)
+                    lrBelow = depth;
+            }
+            else if ((instr & 0xFFFFF000) == 0xE24DD000)
+                depth += Ror(instr & 0xFF, ((instr >> 8) & 0xF) * 2);
+            else if ((instr & 0xFFFF0000) == 0xE59F0000)
+            {
+                lit[(instr >> 12) & 0xF] = Peek(n, a + 8 + (instr & 0xFFF), 4);
+                known |= 1u << ((instr >> 12) & 0xF);
+            }
+            else if ((instr & 0xFFFFFFF0) == 0xE04DD000 && (known & (1u << (instr & 0xF))))
+                depth += lit[instr & 0xF];
+            else if (EndsPrologue(instr, false))
+                break;
+        }
+    }
+    return lrBelow != 0;
+}
+
+int Debugger::CallBefore(u8 n, u32 ret, u32& site, u32& target) const
+{
+    if (ret & 1)
+    {
+        u32 r = ret & ~1u;
+        u32 lo = Peek(n, r - 2, 2);
+        site = r - 2;
+        if ((lo & 0xFF87) == 0x4780)
+            return 2;
+        u32 hi = Peek(n, r - 4, 2);
+        if ((hi & 0xF800) != 0xF000)
+            return 0;
+        u32 dest = r + (SignExtend(hi & 0x7FF, 11) << 12) + ((lo & 0x7FF) << 1);
+        if ((lo & 0xF800) == 0xF800)
+            target = dest;
+        else if ((lo & 0xF800) == 0xE800)
+            target = dest & ~3u;
+        else
+            return 0;
+        return 1;
+    }
+    u32 instr = Peek(n, ret - 4, 4);
+    site = ret - 4;
+    if ((instr >> 28) != 0xF && (instr & 0x0F000000) == 0x0B000000)
+    {
+        target = ret + 4 + (SignExtend(instr & 0xFFFFFF, 24) << 2);
+        return 1;
+    }
+    if ((instr & 0xFE000000) == 0xFA000000)
+    {
+        target = ret + 4 + (SignExtend(instr & 0xFFFFFF, 24) << 2) + ((instr >> 23) & 2);
+        return 1;
+    }
+    if ((instr & 0x0FFFFFF0) == 0x012FFF30 || (Peek(n, ret - 8, 4) & 0x0FFFFFFF) == 0x01A0E00F)
+        return 2;
+    return 0;
+}
+
+bool Debugger::UnwindFrame(u8 n, u32 pc, bool thumb, u32 sp, u8 mode, CallFrame& frame, u32& ret) const
+{
+    u32 start, depth, lrBelow, site, target;
+    if (!ScanPrologue(n, pc, thumb, start, depth, lrBelow))
+        return false;
+    u32 cfa = sp + depth;
+    ret = Peek(n, cfa - lrBelow, 4);
+    int kind = CallBefore(n, ret, site, target);
+    if (kind == 0)
+        return false;
+    if (kind == 1)
+    {
+        target &= ~1u;
+        if (target > start || start - target > MaxPrologueOffset)
+            return false;
+        start = target;
+    }
+    frame = {site, start, ret & ~1u, cfa, mode, false};
+    return true;
+}
+
+void Debugger::SeedBelow(u8 n)
+{
+    auto& stack = CallStack[n];
+    const CallFrame& bottom = stack.front();
+    bool thumb = bottom.Return - bottom.Site == 2;
+    u32 site, target;
+    if (bottom.Exception || IsExceptionMode(bottom.Mode) || !CallBefore(n, bottom.Return | thumb, site, target))
+        return;
+    std::vector<CallFrame> found;
+    u32 pc = bottom.Site, sp = bottom.SP, ret;
+    CallFrame frame;
+    while (found.size() < MaxSeedDepth && UnwindFrame(n, pc, thumb, sp, bottom.Mode, frame, ret) && frame.SP > sp)
+    {
+        found.push_back(frame);
+        KnownEntries[n].insert(frame.Entry);
+        pc = frame.Site;
+        sp = frame.SP;
+        thumb = ret & 1;
+    }
+    stack.insert(stack.begin(), found.rbegin(), found.rend());
+    if (stack.size() > MaxCallDepth)
+        stack.erase(stack.begin(), stack.begin() + (stack.size() - MaxCallDepth));
+}
+
+void Debugger::PushFrame(u8 n, const CallFrame& frame)
+{
+    auto& stack = CallStack[n];
+    if (stack.size() >= MaxCallDepth)
+        stack.erase(stack.begin());
+    stack.push_back(frame);
+    CallCounts[n][frame.Entry]++;
+    KnownEntries[n].insert(frame.Entry);
+    if (SeedPending[n] && Exceptions[n].empty() && !IsExceptionMode(frame.Mode))
+    {
+        SeedPending[n] = false;
+        SeedBelow(n);
+    }
+}
+
+void Debugger::TrackEntry(ARM& cpu, u32 pc, u32 prev)
+{
+    u8 n = cpu.Num;
+    auto& stack = CallStack[n];
+    u8 mode = cpu.CPSR & 0x1F;
+    u32 next = prev + (PrevThumb[n] ? 2 : 4);
+    u32 lr = cpu.R[14] & ~1u;
+    u32 sp = cpu.R[13];
+    if (pc != next)
+        JumpTarget[n] = pc;
+    if (!stack.empty() && stack.back().Entry == pc)
+        return;
+    if (pc != next && lr == next && pc != lr)
+    {
+        PushFrame(n, {prev, pc, lr, sp, mode, false});
+        return;
+    }
+    if (!stack.empty())
+    {
+        CallFrame& top = stack.back();
+        if (top.SP == sp && top.Return == lr && top.Mode == mode && !top.Exception
+            && ((pc != next && IsIndirectJump(PrevInstr[n], PrevThumb[n])) || KnownEntries[n].count(pc)))
+        {
+            top.Entry = pc;
+            CallCounts[n][pc]++;
+            return;
+        }
+    }
+    if (!IsPushLR(cpu.NextInstr[0], cpu.CPSR & 0x20))
+        return;
+    for (size_t k = 0; k < std::min<size_t>(stack.size(), 8); k++)
+    {
+        const CallFrame& f = stack[stack.size() - 1 - k];
+        if (f.Return == lr || (f.Exception && f.Return + 4 == lr))
+            return;
+    }
+    u32 entry = pc - JumpTarget[n] <= MaxPrologueOffset ? JumpTarget[n] : pc;
+    PushFrame(n, {lr - ((cpu.R[14] & 1) ? 2 : 4), entry, lr, sp, mode, false});
 }
 
 static bool IsExceptionReturn(u32 instr, bool thumb)
@@ -454,11 +809,11 @@ void Debugger::UnwindCalls(ARM& cpu, u32 pc)
     }
 
     u32& last = LastSP[n][(mode == 0x1F ? 0x10 : mode) & 0xF];
-    if (last && sp != last && Exceptions[n].empty())
+    if (last && sp != last && Exceptions[n].empty() && !IsExceptionMode(mode))
     {
-        bool sameBank = mode == LastMode[n];
-        u32 delta = sp > last ? sp - last : last - sp;
-        if ((sameBank && !IsStackAdjust(PrevInstr[n], PrevThumb[n])) || delta >= StackSwitchDistance)
+        bool loaded = IsExceptionMode(LastMode[n]);
+        bool unwound = sp > last && !stack.empty() && sp <= stack.front().SP;
+        if (loaded || (!IsStackAdjust(PrevInstr[n], PrevThumb[n]) && !unwound))
             SwitchStacks(n, last, sp);
     }
     last = sp;
@@ -486,6 +841,7 @@ void Debugger::UnwindCalls(ARM& cpu, u32 pc)
 void Debugger::OnInstr(ARM& cpu, u32 pc)
 {
     u8 n = cpu.Num;
+    u32 prev = CurPC[n];
     CurPC[n] = pc;
 
     if (ServiceRequested.load(std::memory_order_relaxed) && ServiceRequested.exchange(false))
@@ -498,9 +854,12 @@ void Debugger::OnInstr(ARM& cpu, u32 pc)
     if (CallTracking)
     {
         UnwindCalls(cpu, pc);
-        PrevInstr[n] = cpu.NextInstr[0];
-        PrevThumb[n] = cpu.CPSR & 0x20;
+        TrackEntry(cpu, pc, prev);
     }
+    bool vector = IsExceptionMode(cpu.CPSR & 0x1F) && pc - cpu.ExceptionBase < 0x20;
+    bool jumped = !vector && pc != prev + (PrevThumb[n] ? 2 : 4) && WritesPC(PrevInstr[n], PrevThumb[n]);
+    PrevInstr[n] = cpu.NextInstr[0];
+    PrevThumb[n] = cpu.CPSR & 0x20;
 
     if (Coverage)
     {
@@ -541,6 +900,12 @@ void Debugger::OnInstr(ARM& cpu, u32 pc)
     }
     if (StepRemaining[n] && --StepRemaining[n] == 0 && !raise)
     {
+        ev.Kind = BreakKind::Step;
+        raise = true;
+    }
+    if (StepModes[n] != StepMode::None && !raise && StepDone(cpu, pc, jumped))
+    {
+        StepModes[n] = StepMode::None;
         ev.Kind = BreakKind::Step;
         raise = true;
     }
@@ -627,22 +992,16 @@ void Debugger::OnCall(ARM& cpu)
 {
     u8 n = cpu.Num;
     u32 entry = cpu.R[15] - ((cpu.CPSR & 0x20) ? 2 : 4);
-    auto& stack = CallStack[n];
-    if (stack.size() >= MaxCallDepth)
-        stack.erase(stack.begin());
-    stack.push_back({CurPC[n], entry, cpu.R[14] & ~1u, cpu.R[13], (u8)(cpu.CPSR & 0x1F), false});
-    CallCounts[n][entry]++;
+    PushFrame(n, {CurPC[n], entry, cpu.R[14] & ~1u, cpu.R[13], (u8)(cpu.CPSR & 0x1F), false});
 }
 
 void Debugger::OnException(ARM& cpu, u32 ret)
 {
     u8 n = cpu.Num;
     u32 entry = cpu.R[15] - ((cpu.CPSR & 0x20) ? 2 : 4);
-    u8 from = LastMode[n];
-    u32 fromSP = LastSP[n][(from == 0x1F ? 0x10 : from) & 0xF];
     if (Exceptions[n].size() >= 16)
         Exceptions[n].erase(Exceptions[n].begin());
-    Exceptions[n].push_back({ret, fromSP, std::move(CallStack[n])});
+    Exceptions[n].push_back({ret, ThreadSP(cpu), std::move(CallStack[n])});
     CallStack[n] = {{ret, entry, ret, cpu.R[13], (u8)(cpu.CPSR & 0x1F), true}};
 }
 
