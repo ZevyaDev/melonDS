@@ -44,6 +44,12 @@ std::vector<int> ConsoleIds();
 // (its emulator thread is gone). Either may be empty. Called on the creating/destroying thread.
 void SetConsoleHooks(std::function<void(Instance&)> created, std::function<void(int)> destroyed);
 
+// The clearing reads (mds_trace_take and friends) stage what they drained, so a read that stops at its
+// maximum leaves the rest for the next one. True while that staging still holds something, i.e. the last
+// read was cut short. cpu is 9 or 7 for the call counts and coverage.
+enum class Staged { Trace, CallCounts, Coverage, Packets };
+bool MoreStaged(int id, Staged what, int cpu);
+
 // Copy guest memory as the given CPU sees it (cpu 0/9 = ARM9, 1/7 = ARM7). Must run on the
 // console's emulator thread (Instance::Call).
 void ReadGuest(Instance& inst, int cpu, uint32_t addr, uint32_t len, uint8_t* out);

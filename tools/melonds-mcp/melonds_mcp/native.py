@@ -1,6 +1,8 @@
+import atexit
 import ctypes
 import os
 import sys
+import weakref
 from ctypes import (POINTER, Structure, c_char, c_char_p, c_int, c_int16, c_int32, c_uint8, c_uint16, c_uint32,
                     c_uint64)
 from dataclasses import dataclass
@@ -259,10 +261,30 @@ def wait_group(consoles, timeout_ms):
     return ret == 1, list(states)
 
 
+_live = weakref.WeakSet()
+
+
+def _shutdown():
+    """At interpreter exit: stop the server and destroy the consoles still open, from a normal thread
+    context (the library also survives a process that skips this, see Api.cpp)."""
+    if _lib is None:
+        return
+    try:
+        _lib.mds_serve_stop()
+        for con in list(_live):
+            con.close()
+    except Exception:
+        pass
+
+
+atexit.register(_shutdown)
+
+
 class Console:
     def __init__(self, bios9=None, bios7=None, firmware=None, nickname=None, debug=True):
         self.id = _check(lib().mds_create(_b(bios9), _b(bios7), _b(firmware), _b(nickname), int(debug)))
         self.rom = None
+        _live.add(self)
 
     def close(self):
         if self.id is not None:

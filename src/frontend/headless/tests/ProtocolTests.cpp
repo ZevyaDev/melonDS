@@ -559,6 +559,100 @@ TEST(proto_analysis_roundtrips)
     CHECK(cvd.Addrs == cv.Addrs);
 }
 
+TEST(proto_with_symbols_flag_is_optional_and_trailing)
+{
+    // An older client's request has no flag: it decodes with WithSymbols = 0.
+    Writer w;
+    w.U32(9); w.U8(9); w.U32(100);                 // coverage_read: seq, cpu, max
+    CoverageRead cr;
+    CHECK(Decode(w.Buf, cr));
+    CHECK_EQ(cr.WithSymbols, 0);
+    CHECK_EQ(cr.Max, 100u);
+    w.U8(1);
+    CHECK(Decode(w.Buf, cr));
+    CHECK_EQ(cr.WithSymbols, 1);
+    // Our own encoding always carries it.
+    CHECK_EQ(Encode(cr).size(), size_t(4 + 1 + 4 + 1));
+
+    TraceRead tr; tr.Seq = 1; tr.Max = 7; tr.WithSymbols = 1;
+    TraceRead trd;
+    CHECK(Decode(Encode(tr), trd));
+    CHECK_EQ(trd.WithSymbols, 1);
+
+    MemorySearch ms; ms.Seq = 2; ms.Size = 4; ms.Needle = {1, 2, 3, 4}; ms.WithSymbols = 1;
+    MemorySearch msd;
+    CHECK(Decode(Encode(ms), msd));
+    CHECK_EQ(msd.WithSymbols, 1);
+    TextFind tf; tf.Seq = 3; tf.Text = "abc"; tf.WithSymbols = 1;
+    TextFind tfd;
+    CHECK(Decode(Encode(tf), tfd));
+    CHECK_EQ(tfd.WithSymbols, 1);
+    CallStackReq cs; cs.Seq = 4; cs.Cpu = 7; cs.WithSymbols = 1;
+    CallStackReq csd;
+    CHECK(Decode(Encode(cs), csd));
+    CHECK_EQ(csd.WithSymbols, 1);
+    CallCountsRead cc; cc.Seq = 5; cc.Cpu = 9; cc.Max = 3; cc.WithSymbols = 1;
+    CallCountsRead ccd;
+    CHECK(Decode(Encode(cc), ccd));
+    CHECK_EQ(ccd.Max, 3u);
+}
+
+TEST(proto_symbol_names_section)
+{
+    // Without names the reply keeps its old layout; with them a names section follows the list.
+    CoverageReadReply plain;
+    plain.Seq = 1; plain.Addrs = {0x02000000, 0x02000004};
+    CHECK_EQ(Encode(plain).size(), size_t(4 + 1 + 4 + 8));
+    CoverageReadReply plainDecoded;
+    CHECK(Decode(Encode(plain), plainDecoded));
+    CHECK_EQ(plainDecoded.HasNames, 0);
+
+    CoverageReadReply named = plain;
+    named.HasNames = 1;
+    named.Names = {"main", ""};
+    CoverageReadReply namedDecoded;
+    CHECK(Decode(Encode(named), namedDecoded));
+    CHECK_EQ(namedDecoded.HasNames, 1);
+    CHECK(namedDecoded.Names == named.Names);
+
+    CallStackReply stack;
+    stack.Seq = 2;
+    stack.Frames.push_back({0x100, 0x200, 0x104, 0x03000000, 0x1F, 0});
+    stack.HasNames = 1;
+    stack.Names = {"callee"};
+    stack.SiteNames = {"caller+0x4"};
+    CallStackReply stackDecoded;
+    CHECK(Decode(Encode(stack), stackDecoded));
+    CHECK(stackDecoded.Names == stack.Names);
+    CHECK(stackDecoded.SiteNames == stack.SiteNames);
+
+    TraceReadReply trace;
+    trace.Seq = 3;
+    trace.Entries.push_back({1, 9, 0x02000000, 0xE1A00000, 0x60000010});
+    trace.HasNames = 1;
+    trace.Names = {"start"};
+    TraceReadReply traceDecoded;
+    CHECK(Decode(Encode(trace), traceDecoded));
+    CHECK(traceDecoded.Names == trace.Names);
+}
+
+TEST(proto_symbols_load_and_read_max)
+{
+    CHECK_EQ(uint16_t(MsgType::symbols_load), 0x0716);
+    CHECK(IsKnownType(0x0716));
+    SymbolsLoad sl; sl.Seq = 1; sl.Text = "game.sym";
+    SymbolsLoad sld;
+    CHECK(Decode(Encode(sl), sld));
+    CHECK(sld.Text == "game.sym");
+    SymbolsLoadReply r; r.Seq = 1; r.Symbols = 12; r.Modules = 3;
+    SymbolsLoadReply rd;
+    CHECK(Decode(Encode(r), rd));
+    CHECK_EQ(rd.Symbols, 12u);
+    CHECK_EQ(ResolveReadMax(0), DefaultReadMax);
+    CHECK_EQ(ResolveReadMax(5), 5u);
+    CHECK_EQ(ResolveReadMax(1u << 30), MaxReadMax);
+}
+
 TEST(proto_request_roundtrips)
 {
     Run r; r.Seq = 1; r.Frames = 60; r.Consoles = {0, 2};

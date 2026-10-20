@@ -41,6 +41,7 @@ constexpr size_t InputMaxTouchPoints = 16;
 constexpr uint32_t InputFrameCycles = 560190;   // touch offsets are below this
 constexpr size_t InputMaxMicSamples = 796;
 constexpr size_t InputLogCapacity = 216000;     // one hour at 60 fps
+constexpr size_t InputLogMaxBytes = 32u << 20;  // and at most this much touch/mic payload data; the oldest go first
 constexpr int InputDefaultStallFrames = 15;
 
 enum class InputSource : uint8_t
@@ -108,6 +109,8 @@ struct InputLogEntry
     uint8_t TouchCount = 0;
     uint8_t MicKind = 0;
     uint16_t MicLevel = 0;
+    std::vector<TouchPoint> Touch;  // the payload as submitted: empty = "no change"
+    std::vector<int16_t> Mic;
 };
 
 // Per-console input FIFO. Submit() may be called from any thread; Next() belongs to the
@@ -155,6 +158,7 @@ private:
     InputSource LastSource = InputSource::Local;
     int EmptyFrames = 0;
     std::deque<InputLogEntry> Log;
+    size_t LogBytes = 0;                // touch and mic data held by Log
     std::function<void()> Wake;
 
     static std::string Validate(const InputPayload& p);

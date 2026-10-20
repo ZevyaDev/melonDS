@@ -91,6 +91,13 @@ constexpr uint8_t EncUtf16le = 2;
 constexpr uint8_t EncUtf8 = 4;
 constexpr uint8_t EncAll = 7;
 
+// Clearing reads (trace_read, call_counts_read, coverage_read, packets_read, input_log_read): max 0 selects the
+// default; above MaxReadMax is clamped. Replies are also cut short at about 8 MiB.
+constexpr uint32_t DefaultReadMax = 4096;
+constexpr uint32_t MaxReadMax = 65536;
+constexpr size_t MaxReplyBytes = 8u * 1024 * 1024;
+inline uint32_t ResolveReadMax(uint32_t max) { return max == 0 ? DefaultReadMax : (max > MaxReadMax ? MaxReadMax : max); }
+
 // set_option keys
 constexpr uint16_t OptEmptyQueue = 1;          // value 0 repeat, 1 neutral, 2 wait
 constexpr uint16_t OptStallTimeoutFrames = 2;  // repeat mode; 0 = never
@@ -159,6 +166,7 @@ enum class MsgType : uint16_t
     last_writer = 0x0713,
     packets_track = 0x0714,
     packets_read = 0x0715,
+    symbols_load = 0x0716,
 
     // 0x08xx process-wide
     pacing = 0x0801,
@@ -190,7 +198,7 @@ enum class ErrorCode : uint16_t
     input_queue_full = 6,
     bad_payload = 7,       // body does not decode or fails validation
     bad_option = 8,
-    jit_on = 9,
+    jit_on = 9,            // reserved: headless consoles never run the JIT, so the server never sends it
     not_supported = 10,
     internal = 11,
     failed = 12,           // the underlying call failed; the text says why
@@ -282,6 +290,8 @@ public:
     void IoBytes(std::vector<uint8_t>& v) { U32(uint32_t(v.size())); Bytes(v.data(), v.size()); } // u32 length + bytes
     void Rest(std::vector<uint8_t>& v) { Bytes(v.data(), v.size()); }                           // raw to end of body
     void Pad(size_t n) { Buf.insert(Buf.end(), n, 0); }
+    // Trailing optional field: always written; a Reader at the end of the body reads it as 0.
+    void OptU8(uint8_t& v) { U8(v); }
 
     // Elements of an already-counted list (the count was written separately).
     template <class T, class F>
@@ -365,6 +375,8 @@ public:
         if (Need(n))
             Pos += n;
     }
+    // Trailing optional field: 0 when the body ends before it, so older clients still decode.
+    void OptU8(uint8_t& v) { v = AtEnd() ? 0 : U8(); }
 
     template <class T, class F>
     void Items(std::vector<T>& v, size_t n, size_t minElem, F fn)
@@ -449,6 +461,25 @@ template <class S>
 std::vector<uint8_t> Pack(uint16_t console, const S& s)
 {
     return BuildMessage(S::Type, console, Encode(s));
+}
+
+// Symbol names (with_symbols): a reply to a request with with_symbols set ends with an optional section
+// {u32 count, count x string}: one name per entry of the list it annotates, in order, empty when the address has
+// no symbol. The section is absent when with_symbols was not set (hasNames = 0), so replies keep their old layout.
+template <class A>
+inline void IoNames(A& a, uint8_t& hasNames, std::vector<std::string>& names)
+{
+    auto item = [](auto& x, std::string& n) { x.Io(n); };
+    if constexpr (A::Writing)
+    {
+        if (hasNames)
+            a.template List<uint32_t>(names, 4, item);
+    }
+    else if (a.Remaining())
+    {
+        hasNames = 1;
+        a.template List<uint32_t>(names, 4, item);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -960,9 +991,11 @@ struct MemorySearch
     uint8_t Size = 0;
     uint32_t Limit = 0;
     std::vector<uint8_t> Needle;
+    uint8_t WithSymbols = 0;    // trailing optional u8: 1 = add symbol names to the reply (see IoNames)
     template <class A> void Visit(A& a)
     {
         a.Io(Seq); a.Io(Cpu); a.Io(Start); a.Io(Length); a.Io(Size); a.Io(Limit); a.IoBytes(Needle);
+        a.OptU8(WithSymbols);
     }
 };
 bool ValidateSearch(const MemorySearch& s);
@@ -973,10 +1006,13 @@ struct MemorySearchReply
     uint32_t Seq = 0;
     uint8_t Truncated = 0;
     std::vector<uint32_t> Addrs;
+    uint8_t HasNames = 0;
+    std::vector<std::string> Names;     // one per address when HasNames
     template <class A> void Visit(A& a)
     {
         a.Io(Seq); a.Io(Truncated);
         a.template List<uint32_t>(Addrs, 4, [](auto& x, uint32_t& v) { x.Io(v); });
+        IoNames(a, HasNames, Names);
     }
 };
 
@@ -984,6 +1020,7 @@ struct MemorySearchReply
 //   Reply data: {u32 seq, u8 truncated, u32 count, count x {u32 address, u8 encoding}}
 //   where encoding is one of EncAscii, EncUtf16le, EncUtf8. Hits ascend by address then encoding. Pure ASCII text
 //   has the same bytes in ASCII and UTF-8: it is reported once, as EncAscii when that is selected.
+//   The request may end with an optional u8 withSymbols; the reply then ends with the names section (IoNames).
 struct TextFind
 {
     static constexpr MsgType Type = MsgType::text_find;
@@ -994,9 +1031,11 @@ struct TextFind
     std::string Text;
     uint8_t Encodings = 0;
     uint32_t Limit = 0;
+    uint8_t WithSymbols = 0;
     template <class A> void Visit(A& a)
     {
         a.Io(Seq); a.Io(Cpu); a.Io(Start); a.Io(Length); a.Io(Text); a.Io(Encodings); a.Io(Limit);
+        a.OptU8(WithSymbols);
     }
 };
 template <> inline bool CheckBody(const TextFind& t) { return !t.Text.empty(); }
@@ -1013,10 +1052,13 @@ struct TextFindReply
     uint32_t Seq = 0;
     uint8_t Truncated = 0;
     std::vector<TextHit> Hits;
+    uint8_t HasNames = 0;
+    std::vector<std::string> Names;     // one per hit when HasNames
     template <class A> void Visit(A& a)
     {
         a.Io(Seq); a.Io(Truncated);
         a.template List<uint32_t>(Hits, 5, [](auto& x, TextHit& h) { x.Io(h.Addr); x.Io(h.Encoding); });
+        IoNames(a, HasNames, Names);
     }
 };
 
@@ -1226,9 +1268,18 @@ struct TraceConfig
     template <class A> void Visit(A& a) { a.Io(Seq); a.Io(CpuMask); a.Io(Start); a.Io(End); a.Io(Capacity); }
 };
 
-// trace_read: {u32 seq, u32 max}; clearing. Reply data: {u32 seq, u8 truncated, u32 count,
-// count x {u64 cycle, u8 cpu, u32 pc, u32 opcode, u32 cpsr}} oldest first (21 bytes each)
-typedef MaxMsg<MsgType::trace_read> TraceRead;
+// trace_read: {u32 seq, u32 max, [u8 withSymbols]}; clearing (max 0 = DefaultReadMax); when it stops at max the
+// rest stays for the next read and truncated is 1. Reply data: {u32 seq, u8 truncated, u32 count,
+// count x {u64 cycle, u8 cpu, u32 pc, u32 opcode, u32 cpsr}} oldest first (21 bytes each), then with_symbols
+// names (one per pc).
+struct TraceRead
+{
+    static constexpr MsgType Type = MsgType::trace_read;
+    uint32_t Seq = 0;
+    uint32_t Max = 0;
+    uint8_t WithSymbols = 0;
+    template <class A> void Visit(A& a) { a.Io(Seq); a.Io(Max); a.OptU8(WithSymbols); }
+};
 
 struct TraceItem
 {
@@ -1245,12 +1296,15 @@ struct TraceReadReply
     uint32_t Seq = 0;
     uint8_t Truncated = 0;
     std::vector<TraceItem> Entries;
+    uint8_t HasNames = 0;
+    std::vector<std::string> Names;     // one per entry (its pc) when HasNames
     template <class A> void Visit(A& a)
     {
         a.Io(Seq); a.Io(Truncated);
         a.template List<uint32_t>(Entries, 21, [](auto& x, TraceItem& e) {
             x.Io(e.Cycle); x.Io(e.Cpu); x.Io(e.Pc); x.Io(e.Opcode); x.Io(e.Cpsr);
         });
+        IoNames(a, HasNames, Names);
     }
 };
 
@@ -1259,14 +1313,16 @@ typedef EnabledMsg<MsgType::calls_track> CallsTrack;
 typedef EnabledMsg<MsgType::coverage_track> CoverageTrack;
 typedef EnabledMsg<MsgType::writers_track> WritersTrack;
 
-// callstack: {u32 seq, u8 cpu}. Reply data: {u32 seq, u32 count, count x CallFrame}, innermost
-// first, CallFrame = {u32 site, u32 entry, u32 ret, u32 sp, u32 mode, u8 exception} (mds_frame)
+// callstack: {u32 seq, u8 cpu, [u8 withSymbols]}. Reply data: {u32 seq, u32 count, count x CallFrame}, innermost
+// first, CallFrame = {u32 site, u32 entry, u32 ret, u32 sp, u32 mode, u8 exception} (mds_frame), then with_symbols
+// names: the entry names (one per frame), then the call-site names (one per frame) in a second names section.
 struct CallStackReq
 {
     static constexpr MsgType Type = MsgType::callstack;
     uint32_t Seq = 0;
     uint8_t Cpu = 0;
-    template <class A> void Visit(A& a) { a.Io(Seq); a.Io(Cpu); }
+    uint8_t WithSymbols = 0;
+    template <class A> void Visit(A& a) { a.Io(Seq); a.Io(Cpu); a.OptU8(WithSymbols); }
 };
 
 struct CallFrame
@@ -1284,18 +1340,35 @@ struct CallStackReply
     static constexpr MsgType Type = MsgType::data;
     uint32_t Seq = 0;
     std::vector<CallFrame> Frames;
+    uint8_t HasNames = 0;
+    std::vector<std::string> Names;         // entry name per frame when HasNames
+    std::vector<std::string> SiteNames;     // call-site name per frame when HasNames
     template <class A> void Visit(A& a)
     {
         a.Io(Seq);
         a.template List<uint32_t>(Frames, 21, [](auto& x, CallFrame& f) {
             x.Io(f.Site); x.Io(f.Entry); x.Io(f.Ret); x.Io(f.Sp); x.Io(f.Mode); x.Io(f.Exception);
         });
+        IoNames(a, HasNames, Names);
+        if (HasNames)
+        {
+            uint8_t again = 1;
+            IoNames(a, again, SiteNames);
+        }
     }
 };
 
-// call_counts_read: {u32 seq, u8 cpu, u32 max}; clearing. Reply data: {u32 seq, u8 truncated,
-// u32 count, count x {u32 entry, u64 count}}
-typedef CpuMaxMsg<MsgType::call_counts_read> CallCountsRead;
+// call_counts_read: {u32 seq, u8 cpu, u32 max, [u8 withSymbols]}; clearing (as trace_read). Reply data: {u32 seq,
+// u8 truncated, u32 count, count x {u32 entry, u64 count}}, then names (one per entry).
+struct CallCountsRead
+{
+    static constexpr MsgType Type = MsgType::call_counts_read;
+    uint32_t Seq = 0;
+    uint8_t Cpu = 0;
+    uint32_t Max = 0;
+    uint8_t WithSymbols = 0;
+    template <class A> void Visit(A& a) { a.Io(Seq); a.Io(Cpu); a.Io(Max); a.OptU8(WithSymbols); }
+};
 
 struct CallCount
 {
@@ -1309,16 +1382,27 @@ struct CallCountsReply
     uint32_t Seq = 0;
     uint8_t Truncated = 0;
     std::vector<CallCount> Counts;
+    uint8_t HasNames = 0;
+    std::vector<std::string> Names;
     template <class A> void Visit(A& a)
     {
         a.Io(Seq); a.Io(Truncated);
         a.template List<uint32_t>(Counts, 12, [](auto& x, CallCount& c) { x.Io(c.Entry); x.Io(c.Count); });
+        IoNames(a, HasNames, Names);
     }
 };
 
-// coverage_read: {u32 seq, u8 cpu, u32 max}; clearing. Reply data: {u32 seq, u8 truncated,
-// u32 count, u32 addrs[count]}
-typedef CpuMaxMsg<MsgType::coverage_read> CoverageRead;
+// coverage_read: {u32 seq, u8 cpu, u32 max, [u8 withSymbols]}; clearing (as trace_read). Reply data: {u32 seq,
+// u8 truncated, u32 count, u32 addrs[count]}, then names (one per address).
+struct CoverageRead
+{
+    static constexpr MsgType Type = MsgType::coverage_read;
+    uint32_t Seq = 0;
+    uint8_t Cpu = 0;
+    uint32_t Max = 0;
+    uint8_t WithSymbols = 0;
+    template <class A> void Visit(A& a) { a.Io(Seq); a.Io(Cpu); a.Io(Max); a.OptU8(WithSymbols); }
+};
 
 struct CoverageReadReply
 {
@@ -1326,16 +1410,20 @@ struct CoverageReadReply
     uint32_t Seq = 0;
     uint8_t Truncated = 0;
     std::vector<uint32_t> Addrs;
+    uint8_t HasNames = 0;
+    std::vector<std::string> Names;
     template <class A> void Visit(A& a)
     {
         a.Io(Seq); a.Io(Truncated);
         a.template List<uint32_t>(Addrs, 4, [](auto& x, uint32_t& v) { x.Io(v); });
+        IoNames(a, HasNames, Names);
     }
 };
 
-// last_writer: {u32 seq, u32 addr} (main RAM). Reply data: {u32 seq, u8 kind (0 none, 1 CPU
-// instruction, 2 DMA), u8 cpu, u8 channel (DMA only), u8 reserved, u32 pc (CPU only), u32 raw
-// (the value mds_lastwriter_get returned)}
+// last_writer: {u32 seq, u32 addr} (main RAM; writers_track must have been on when the write happened).
+// Reply data: {u32 seq, u8 kind (0 none, 1 CPU instruction, 2 DMA), u8 cpu (9 or 7), u8 channel (DMA only, 0-3),
+// u8 reserved, u32 pc (CPU only, the storing instruction), u32 raw (the packed value mds_lastwriter_get returned)}.
+// The packed value is: 0 = none; 0xFFFFFFF0 | channel << 1 | cpu7 = DMA; else pc | cpu7 (pc is halfword aligned).
 typedef U32Msg<MsgType::last_writer> LastWriter;
 
 struct LastWriterReply
@@ -1364,7 +1452,7 @@ struct PacketsTrack
     template <class A> void Visit(A& a) { a.Io(Seq); a.Io(Enabled); a.Io(Capacity); }
 };
 
-// packets_read: {u32 seq, u32 max}; clearing, works while running. Reply data: {u32 seq,
+// packets_read: {u32 seq, u32 max}; clearing (as trace_read), works while running. Reply data: {u32 seq,
 // u8 truncated, u32 count, count x {u64 timestamp, u8 sent, u8 type (0 data, 1 cmd, 2 reply,
 // 3 ack), bytes data (u32 length + bytes)}}
 typedef MaxMsg<MsgType::packets_read> PacketsRead;
@@ -1390,6 +1478,21 @@ struct PacketsReadReply
             x.Io(p.Timestamp); x.Io(p.Sent); x.Io(p.Type); x.IoBytes(p.Data);
         });
     }
+};
+
+// symbols_load: {u32 seq, string path}: loads a symbol file (a plain "ADDR name [size]" list, a dsd .yaml config, or a
+// directory holding config.yaml) into the header console's own symbol table, replacing the old one; an empty path
+// clears it. Reply data: {u32 seq, u32 symbolCount, u32 moduleCount}; failure is error(failed, text).
+// Names requested with with_symbols are resolved against this table and the overlays resident at that moment.
+typedef StringMsg<MsgType::symbols_load> SymbolsLoad;
+
+struct SymbolsLoadReply
+{
+    static constexpr MsgType Type = MsgType::data;
+    uint32_t Seq = 0;
+    uint32_t Symbols = 0;
+    uint32_t Modules = 0;
+    template <class A> void Visit(A& a) { a.Io(Seq); a.Io(Symbols); a.Io(Modules); }
 };
 
 // ---------------------------------------------------------------------------

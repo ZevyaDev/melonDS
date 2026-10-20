@@ -115,7 +115,7 @@ class SessionTests(ServerTest):
 
     def test_unimplemented_messages_not_supported(self):
         cl = self.connect()
-        for t in (T.lua_exec, T.savestate_save, T.point_list, T.pacing, T.input_multi, T.packets_read):
+        for t in (T.input_multi,):          # plan step 7
             self.expect_error("not_supported", cl.request, t, b"")
 
     def test_malformed_body(self):

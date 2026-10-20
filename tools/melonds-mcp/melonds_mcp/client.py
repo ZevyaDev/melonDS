@@ -82,6 +82,7 @@ class T:
     last_writer = 0x0713
     packets_track = 0x0714
     packets_read = 0x0715
+    symbols_load = 0x0716
     pacing = 0x0801
     mp_timeout = 0x0802
     ok = 0x8001
@@ -221,6 +222,12 @@ def _ids(ids):
     return _u16(len(ids)) + b"".join(_u16(i) for i in ids)
 
 
+def _cpu_mask(cpu):
+    if cpu in ("both", 3):
+        return 3
+    return 2 if _cpu(cpu) == 7 else 1
+
+
 def _cpu(cpu):
     if cpu in (7, 1, "arm7", "ARM7"):
         return 7
@@ -306,6 +313,18 @@ def decode_event(mtype, console, body):
     if mtype == T.lua_output:
         return LuaOutputEvent(console, r.string())
     raise ProtocolError(f"unknown event {mtype:#x}")
+
+
+def _names(r):
+    """The optional names section of a with_symbols reply: u32 count + strings."""
+    return [r.string() for _ in range(r.take("<I"))]
+
+
+def _with_names(r, items):
+    names = _names(r)
+    if len(names) != len(items):
+        raise ProtocolError("symbol names do not match the entries")
+    return list(zip(items, names))
 
 
 class Pending:
@@ -582,22 +601,30 @@ class Client:
 
     # ----------------------------------------------------------------- search
 
-    def memory_search(self, needle, size=0, start=0, length=0, limit=0, cpu=9, console=DEFAULT_CONSOLE):
+    def memory_search(self, needle, size=0, start=0, length=0, limit=0, cpu=9, console=DEFAULT_CONSOLE,
+                      with_symbols=False):
         """size 1/2/4: needle is an int, matched at aligned addresses; size 0: needle is bytes matched
-        anywhere. start/length 0 = main RAM. Returns (addresses, truncated)."""
+        anywhere. start/length 0 = main RAM. Returns (addresses, truncated); with with_symbols each address
+        becomes (address, symbol name)."""
         if size:
             needle = int(needle).to_bytes(size, "little")
-        body = (_u8(_cpu(cpu)) + _u32(start) + _u32(length) + _u8(size) + _u32(limit) + _bytes(needle))
+        body = (_u8(_cpu(cpu)) + _u32(start) + _u32(length) + _u8(size) + _u32(limit) + _bytes(needle)
+                + _u8(int(with_symbols)))
         r = _R(self.request(T.memory_search, body, console).body)
         truncated = bool(r.take("<B"))
-        return [r.take("<I") for _ in range(r.take("<I"))], truncated
+        addrs = [r.take("<I") for _ in range(r.take("<I"))]
+        return (_with_names(r, addrs) if with_symbols else addrs), truncated
 
-    def text_find(self, text, encodings=0, start=0, length=0, limit=0, cpu=9, console=DEFAULT_CONSOLE):
-        """Returns ([(address, encoding)], truncated); encoding is ENC_ASCII, ENC_UTF16LE or ENC_UTF8."""
-        body = (_u8(_cpu(cpu)) + _u32(start) + _u32(length) + _str(text) + _u8(encodings) + _u32(limit))
+    def text_find(self, text, encodings=0, start=0, length=0, limit=0, cpu=9, console=DEFAULT_CONSOLE,
+                  with_symbols=False):
+        """Returns ([(address, encoding)], truncated); encoding is ENC_ASCII, ENC_UTF16LE or ENC_UTF8.
+        With with_symbols each hit becomes ((address, encoding), symbol name)."""
+        body = (_u8(_cpu(cpu)) + _u32(start) + _u32(length) + _str(text) + _u8(encodings) + _u32(limit)
+                + _u8(int(with_symbols)))
         r = _R(self.request(T.text_find, body, console).body)
         truncated = bool(r.take("<B"))
-        return [r.take("<IB") for _ in range(r.take("<I"))], truncated
+        hits = [r.take("<IB") for _ in range(r.take("<I"))]
+        return (_with_names(r, hits) if with_symbols else hits), truncated
 
     # ----------------------------------------------------------------- subscriptions
 
@@ -610,3 +637,175 @@ class Client:
 
     def unsubscribe(self, sub_id, console=DEFAULT_CONSOLE):
         self.request(T.unsubscribe, _u32(sub_id), console)
+
+    # ----------------------------------------------------------------- input log
+
+    def input_log_read(self, from_frame=0, max=0, console=DEFAULT_CONSOLE):
+        """The applied-input log from from_frame. Returns (entries, truncated); each entry is a dict with
+        frame, seq, buttons, lid, touch [(offset, x, y, down)], mic_kind, mic [s16], mic_level."""
+        r = _R(self.request(T.input_log_read, _u64(from_frame) + _u32(max), console).body)
+        truncated = bool(r.take("<B"))
+        entries = []
+        for _ in range(r.take("<I")):
+            frame = r.take("<Q")
+            seq, buttons, lid, ntouch, kind, _res, nmic, level = r.take("<IHBBBBHH")
+            touch = [r.take("<IHHB3x") for _ in range(ntouch)]
+            mic = [r.take("<h") for _ in range(nmic)]
+            entries.append({"frame": frame, "seq": seq, "buttons": buttons, "lid": lid, "touch": touch,
+                            "mic_kind": kind, "mic": mic, "mic_level": level})
+        return entries, truncated
+
+    # ----------------------------------------------------------------- points
+
+    def breakpoint_add(self, addr, cpu=9, console=DEFAULT_CONSOLE):
+        """Returns the point id. cpu: 9, 7 or "both"."""
+        r = self.request(T.breakpoint_add, _u32(_cpu_mask(cpu)) + _u32(addr), console)
+        return _R(r.body).take("<i")
+
+    def watchpoint_add(self, addr, size, read=False, write=True, cpu=9, console=DEFAULT_CONSOLE):
+        flags = (1 if read else 0) | (2 if write else 0)
+        body = _u32(_cpu_mask(cpu)) + _u32(addr) + _u32(size) + _u32(flags)
+        return _R(self.request(T.watchpoint_add, body, console).body).take("<i")
+
+    def point_remove(self, point, console=DEFAULT_CONSOLE):
+        self.request(T.point_remove, struct.pack("<i", point), console)
+
+    def point_enable(self, point, enabled, console=DEFAULT_CONSOLE):
+        self.request(T.point_enable, struct.pack("<iB", point, int(enabled)), console)
+
+    def point_list(self, console=DEFAULT_CONSOLE):
+        r = _R(self.request(T.point_list, b"", console).body)
+        out = []
+        for _ in range(r.take("<I")):
+            pid, watch, enabled, mask, flags, start, end, hits = r.take("<iBBIIIIQ")
+            out.append({"id": pid, "kind": "watch" if watch else "exec", "enabled": bool(enabled),
+                        "cpu": {1: 9, 2: 7, 3: "both"}.get(mask, mask), "read": bool(flags & 1),
+                        "write": bool(flags & 2), "start": start, "end": end, "hits": hits})
+        return out
+
+    # ----------------------------------------------------------------- savestates, Lua
+
+    def savestate_save(self, path, console=DEFAULT_CONSOLE):
+        self.request(T.savestate_save, _str(str(path)), console)
+
+    def savestate_load(self, path, console=DEFAULT_CONSOLE):
+        """Loads the state; the console's input queue is cleared and an input_queue(0) event follows."""
+        self.request(T.savestate_load, _str(str(path)), console)
+
+    def lua_run(self, source, is_file=False, console=DEFAULT_CONSOLE):
+        self.request(T.lua_run, _u8(int(is_file)) + _str(str(source)), console)
+
+    def lua_exec(self, code, console=DEFAULT_CONSOLE):
+        self.request(T.lua_exec, _str(code), console)
+
+    def lua_stop(self, console=DEFAULT_CONSOLE):
+        self.request(T.lua_stop, b"", console)
+
+    def lua_text(self, console=None, timeout=0.2):
+        """Join the lua_output events queued so far (for one console, or all)."""
+        self.pump(timeout)
+        return "".join(e.text for e in self.take_events("lua_output") if console is None or e.console == console)
+
+    # ----------------------------------------------------------------- analysis
+
+    def trace_config(self, capacity, cpu="both", start=0, end=0xFFFFFFFF, console=DEFAULT_CONSOLE):
+        """capacity 0 turns the trace off."""
+        self.request(T.trace_config, _u32(_cpu_mask(cpu)) + _u32(start) + _u32(end) + _u32(capacity), console)
+
+    def trace_read(self, max=0, with_symbols=False, console=DEFAULT_CONSOLE):
+        """Clearing. Returns (entries, truncated), oldest first; each entry is a dict with cycle, cpu, pc,
+        opcode, cpsr (and name with with_symbols). When truncated, the rest stays for the next read."""
+        r = _R(self.request(T.trace_read, _u32(max) + _u8(int(with_symbols)), console).body)
+        truncated = bool(r.take("<B"))
+        entries = []
+        for _ in range(r.take("<I")):
+            cycle, cpu, pc, opcode, cpsr = r.take("<QBIII")
+            entries.append({"cycle": cycle, "cpu": cpu, "pc": pc, "opcode": opcode, "cpsr": cpsr})
+        if with_symbols:
+            for e, n in zip(entries, _names(r)):
+                e["name"] = n
+        return entries, truncated
+
+    def calls_track(self, enabled=True, console=DEFAULT_CONSOLE):
+        self.request(T.calls_track, _u8(int(enabled)), console)
+
+    def callstack(self, cpu=9, with_symbols=False, console=DEFAULT_CONSOLE):
+        """Frames, innermost first: dicts with site, entry, ret, sp, mode, exception (and name, site_name)."""
+        r = _R(self.request(T.callstack, _u8(_cpu(cpu)) + _u8(int(with_symbols)), console).body)
+        frames = []
+        for _ in range(r.take("<I")):
+            site, entry, ret, sp, mode, exc = r.take("<IIIIIB")
+            frames.append({"site": site, "entry": entry, "ret": ret, "sp": sp, "mode": mode,
+                           "exception": bool(exc)})
+        if with_symbols:
+            for f, n in zip(frames, _names(r)):
+                f["name"] = n
+            for f, n in zip(frames, _names(r)):
+                f["site_name"] = n
+        return frames
+
+    def call_counts_read(self, cpu=9, max=0, with_symbols=False, console=DEFAULT_CONSOLE):
+        """Clearing. Returns (list of {entry, count[, name]}, truncated)."""
+        body = _u8(_cpu(cpu)) + _u32(max) + _u8(int(with_symbols))
+        r = _R(self.request(T.call_counts_read, body, console).body)
+        truncated = bool(r.take("<B"))
+        out = []
+        for _ in range(r.take("<I")):
+            entry, count = r.take("<IQ")
+            out.append({"entry": entry, "count": count})
+        if with_symbols:
+            for e, n in zip(out, _names(r)):
+                e["name"] = n
+        return out, truncated
+
+    def coverage_track(self, enabled=True, console=DEFAULT_CONSOLE):
+        self.request(T.coverage_track, _u8(int(enabled)), console)
+
+    def coverage_read(self, cpu=9, max=0, with_symbols=False, console=DEFAULT_CONSOLE):
+        """Clearing. Returns (addresses, truncated); with with_symbols each becomes (address, name)."""
+        body = _u8(_cpu(cpu)) + _u32(max) + _u8(int(with_symbols))
+        r = _R(self.request(T.coverage_read, body, console).body)
+        truncated = bool(r.take("<B"))
+        addrs = [r.take("<I") for _ in range(r.take("<I"))]
+        return (_with_names(r, addrs) if with_symbols else addrs), truncated
+
+    def writers_track(self, enabled=True, console=DEFAULT_CONSOLE):
+        self.request(T.writers_track, _u8(int(enabled)), console)
+
+    def last_writer(self, addr, console=DEFAULT_CONSOLE):
+        """None, {"kind": "cpu", "cpu", "pc"} or {"kind": "dma", "cpu", "channel"}."""
+        r = _R(self.request(T.last_writer, _u32(addr), console).body)
+        kind, cpu, channel, _res, pc, raw = r.take("<BBBBII")
+        if kind == 0:
+            return None
+        if kind == 1:
+            return {"kind": "cpu", "cpu": cpu, "pc": pc, "raw": raw}
+        return {"kind": "dma", "cpu": cpu, "channel": channel, "raw": raw}
+
+    def packets_track(self, enabled=True, capacity=4096, console=DEFAULT_CONSOLE):
+        self.request(T.packets_track, _u8(int(enabled)) + _u32(capacity), console)
+
+    def packets_read(self, max=0, console=DEFAULT_CONSOLE):
+        """Clearing; works while running. Returns (list of {timestamp, sent, type, data}, truncated)."""
+        r = _R(self.request(T.packets_read, _u32(max), console).body)
+        truncated = bool(r.take("<B"))
+        out = []
+        for _ in range(r.take("<I")):
+            ts, sent, ptype = r.take("<QBB")
+            out.append({"timestamp": ts, "sent": bool(sent), "type": ptype, "data": r.bytes(r.take("<I"))})
+        return out, truncated
+
+    def symbols_load(self, path, console=DEFAULT_CONSOLE):
+        """Load a symbol file into the console's table ("" clears it). Returns (symbols, modules)."""
+        r = _R(self.request(T.symbols_load, _str(str(path)), console).body)
+        return r.take("<I"), r.take("<I")
+
+    # ----------------------------------------------------------------- process-wide
+
+    def pacing(self, fps):
+        """Frame pacing for every console: fps frames per second, 0 = unlimited."""
+        self.request(T.pacing, _u32(fps))
+
+    def mp_timeout(self, ms):
+        """Wireless receive timeout in milliseconds (all consoles)."""
+        self.request(T.mp_timeout, _u32(ms))

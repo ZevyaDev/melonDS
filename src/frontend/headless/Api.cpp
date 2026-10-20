@@ -49,7 +49,9 @@ struct Slot
 };
 
 std::mutex SlotsLock;
-std::map<int, Slot> Slots;
+// Never destroyed: at process exit the loader lock is held and the emulator threads are already gone, so
+// running ~Instance (which joins its thread) from a static destructor would hang the exit.
+std::map<int, Slot>& Slots = *new std::map<int, Slot>();
 thread_local std::string LastError;
 bool MPReady = false;
 
@@ -982,6 +984,24 @@ std::vector<int> ConsoleIds()
         if (slot.Inst)
             ids.push_back(id);
     return ids;
+}
+
+bool MoreStaged(int id, Staged what, int cpu)
+{
+    std::lock_guard lock(SlotsLock);
+    auto it = Slots.find(id);
+    if (it == Slots.end())
+        return false;
+    Slot& s = it->second;
+    int n = cpu == 7 || cpu == 1;
+    switch (what)
+    {
+    case Staged::Trace: return !s.Trace.empty();
+    case Staged::CallCounts: return !s.Calls[n].empty();
+    case Staged::Coverage: return !s.Coverage[n].empty();
+    case Staged::Packets: return !s.Packets.empty();
+    }
+    return false;
 }
 
 void SetConsoleHooks(std::function<void(Instance&)> created, std::function<void(int)> destroyed)

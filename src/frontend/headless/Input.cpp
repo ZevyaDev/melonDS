@@ -149,6 +149,7 @@ void InputQueue::Reset()
         std::lock_guard lock(Lock);
         Queue.clear();
         Log.clear();
+        LogBytes = 0;
         Last = {};
         LastSource = InputSource::Local;
         EmptyFrames = 0;
@@ -202,6 +203,9 @@ bool InputQueue::Next(uint64_t frame, AppliedInput& out)
         out.Source = p.Source;
         out.Buttons = p.Buttons;
         out.Lid = p.Lid;
+        InputLogEntry e;
+        e.Touch = p.Touch;
+        e.Mic = p.Mic;
         out.Touch = std::move(p.Touch);
         if (out.Touch.empty())
             out.Touch.push_back({0, Last.TouchX, Last.TouchY, Last.TouchDown});
@@ -209,7 +213,6 @@ bool InputQueue::Next(uint64_t frame, AppliedInput& out)
         out.Mic = std::move(p.Mic);
         out.MicLevel = p.MicLevel;
 
-        InputLogEntry e;
         e.Frame = frame;
         e.Seq = out.Source == InputSource::Client ? out.Seq : 0;
         e.Buttons = out.Buttons;
@@ -217,9 +220,14 @@ bool InputQueue::Next(uint64_t frame, AppliedInput& out)
         e.TouchCount = (uint8_t)std::min<size_t>(out.Touch.size(), 255);
         e.MicKind = out.MicKind;
         e.MicLevel = out.MicLevel;
-        if (Log.size() >= InputLogCapacity)
+        LogBytes += e.Touch.size() * sizeof(TouchPoint) + e.Mic.size() * sizeof(int16_t);
+        Log.push_back(std::move(e));
+        while (Log.size() > InputLogCapacity || LogBytes > InputLogMaxBytes)
+        {
+            const InputLogEntry& old = Log.front();
+            LogBytes -= old.Touch.size() * sizeof(TouchPoint) + old.Mic.size() * sizeof(int16_t);
             Log.pop_front();
-        Log.push_back(e);
+        }
         return true;
     }
 

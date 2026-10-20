@@ -27,6 +27,7 @@
 #include <mutex>
 #include <set>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #ifdef _WIN32
@@ -39,6 +40,7 @@
 
 #include "ApiInternal.h"
 #include "Instance.h"
+#include "LuaHost.h"
 #include "Outbox.h"
 #include "Protocol.h"
 #include "Search.h"
@@ -101,6 +103,46 @@ P::ErrorCode MapError(const std::string& e)
     return P::ErrorCode::failed;
 }
 
+// Symbol names for the addresses of one reply. The console's overlays are refreshed once, on its emulator thread,
+// before the first name is resolved.
+class Namer
+{
+public:
+    Namer(Instance& inst, bool on) : Syms(inst.Symbols), On(on)
+    {
+        if (!On)
+            return;
+        std::shared_ptr<const DebugSymbols::Set> set = Syms.set();
+        if (set && !set->Modules.empty())
+            inst.Call([&](Instance& i) { i.Symbols.setLoaded(DebugSymbols::detect(*set, *i.NDS)); });
+    }
+
+    bool On;
+
+    const std::string& Name(uint32_t addr)
+    {
+        auto it = Cache.find(addr);
+        if (it == Cache.end())
+            it = Cache.emplace(addr, Syms.describe(addr)).first;
+        return it->second;
+    }
+
+    template <class V>
+    void Fill(const V& addrs, uint8_t& has, std::vector<std::string>& names)
+    {
+        has = On;
+        if (!On)
+            return;
+        names.reserve(addrs.size());
+        for (uint32_t a : addrs)
+            names.push_back(Name(a));
+    }
+
+private:
+    DebugSymbols& Syms;
+    std::unordered_map<uint32_t, std::string> Cache;
+};
+
 class Server
 {
 public:
@@ -158,6 +200,8 @@ private:
 
     void ServiceBreaks();
     void SendBreaks(int id);
+    void ServiceLua();
+    void SendLuaOutput(int id);
     void ServicePending();
 
     // ---- replies
@@ -223,6 +267,34 @@ private:
     void DoTextFind(const P::Message& m);
     void DoSubscribe(const P::Message& m);
     void DoUnsubscribe(const P::Message& m);
+
+    bool RequireStopped(Instance& inst, int id, uint32_t seq);
+    bool RequireBoundary(Instance& inst, int id, uint32_t seq);
+    void DoBreakpointAdd(const P::Message& m);
+    void DoWatchpointAdd(const P::Message& m);
+    void DoPointRemove(const P::Message& m);
+    void DoPointEnable(const P::Message& m);
+    void DoPointList(const P::Message& m);
+    void DoSavestateSave(const P::Message& m);
+    void DoSavestateLoad(const P::Message& m);
+    void DoLuaRun(const P::Message& m);
+    void DoLuaExec(const P::Message& m);
+    void DoLuaStop(const P::Message& m);
+    void DoTraceConfig(const P::Message& m);
+    void DoTraceRead(const P::Message& m);
+    void DoCallsTrack(const P::Message& m);
+    void DoCallStack(const P::Message& m);
+    void DoCallCountsRead(const P::Message& m);
+    void DoCoverageTrack(const P::Message& m);
+    void DoCoverageRead(const P::Message& m);
+    void DoWritersTrack(const P::Message& m);
+    void DoLastWriter(const P::Message& m);
+    void DoPacketsTrack(const P::Message& m);
+    void DoPacketsRead(const P::Message& m);
+    void DoInputLogRead(const P::Message& m);
+    void DoSymbolsLoad(const P::Message& m);
+    void DoPacing(const P::Message& m);
+    void DoMpTimeout(const P::Message& m);
 };
 
 Server* TheServer = nullptr;
@@ -346,6 +418,7 @@ void Server::Main()
             continue;
         }
         ServiceBreaks();
+        ServiceLua();
         ServicePending();
         if (!Flush())
         {
@@ -401,6 +474,9 @@ void Server::BeginClient(Net::Socket s)
     {
         mds_break stale;
         mds_take_break(id, &stale);
+        if (Instance* inst = Api::FindInstance(id))
+            if (inst->Lua)
+                inst->Lua->TakeOutput();
     }
     Connected = true;
 }
@@ -540,7 +616,10 @@ void Server::ServicePending()
             continue;
         }
         for (int id : op.Ids)
+        {
             SendBreaks(id);
+            SendLuaOutput(id);
+        }
         Ok(op.Console, op.Seq);
         Pending.erase(Pending.begin() + i);
     }
@@ -1001,6 +1080,7 @@ void Server::DoMemorySearch(const P::Message& m)
     r.Seq = s.Seq;
     r.Truncated = hits.Truncated;
     r.Addrs = std::move(hits.Addrs);
+    Namer(*inst, s.WithSymbols).Fill(r.Addrs, r.HasNames, r.Names);
     Reply(uint16_t(id), r);
 }
 
@@ -1030,6 +1110,10 @@ void Server::DoTextFind(const P::Message& m)
         for (const Search::TextHit& h : hits.Hits)
             r.Hits.push_back({h.Addr, h.Encoding});
     }
+    std::vector<uint32_t> hitAddrs;
+    for (const P::TextHit& h : r.Hits)
+        hitAddrs.push_back(h.Addr);
+    Namer(*inst, t.WithSymbols).Fill(hitAddrs, r.HasNames, r.Names);
     Reply(uint16_t(id), r);
 }
 
@@ -1062,6 +1146,529 @@ void Server::DoUnsubscribe(const P::Message& m)
     if (!inst->Subs.Remove(u.Value))
         return Error(uint16_t(id), u.Seq, P::ErrorCode::failed, "no such subscription");
     Ok(uint16_t(id), u.Seq);
+}
+
+// ----------------------------------------------------------------------------
+// Debug and analysis messages
+
+constexpr int MaxListedPoints = 4096;
+constexpr int MaxCallFrames = 16384;
+constexpr uint32_t MaxTraceCapacity = 1u << 24;
+constexpr uint32_t MaxPacketCapacity = 1u << 20;
+constexpr int MaxPacketBytes = 4 << 20;
+
+// The state check for messages the C API cannot answer by itself (it reports a console it cannot use as an error).
+bool Server::RequireStopped(Instance& inst, int id, uint32_t seq)
+{
+    if (inst.GetState() != RunState::Running)
+        return true;
+    Error(uint16_t(id), seq, P::ErrorCode::console_running, "console " + std::to_string(id) + " is running");
+    return false;
+}
+
+void Server::DoBreakpointAdd(const P::Message& m)
+{
+    P::BreakpointAdd b;
+    int id;
+    Instance* inst;
+    if (!Parse(m, b) || !Resolve(m, id, inst))
+        return;
+    if (b.CpuMask == 0 || (b.CpuMask & ~3u))
+        return Error(uint16_t(id), b.Seq, P::ErrorCode::bad_payload, "cpuMask must be 1 (ARM9), 2 (ARM7) or 3");
+    int point = mds_bp_add(id, b.CpuMask, b.Addr);
+    if (point < 0)
+        return FailFromApi(uint16_t(id), b.Seq);
+    P::IdReply r;
+    r.Seq = b.Seq;
+    r.Id = point;
+    Reply(uint16_t(id), r);
+}
+
+void Server::DoWatchpointAdd(const P::Message& m)
+{
+    P::WatchpointAdd w;
+    int id;
+    Instance* inst;
+    if (!Parse(m, w) || !Resolve(m, id, inst))
+        return;
+    if (w.CpuMask == 0 || (w.CpuMask & ~3u) || w.Size == 0 || w.Flags == 0 || (w.Flags & ~3u))
+        return Error(uint16_t(id), w.Seq, P::ErrorCode::bad_payload,
+                     "watchpoint needs cpuMask 1-3, a size, and flags 1 (read), 2 (write) or 3");
+    int point = mds_wp_add(id, w.CpuMask, w.Addr, w.Size, w.Flags);
+    if (point < 0)
+        return FailFromApi(uint16_t(id), w.Seq);
+    P::IdReply r;
+    r.Seq = w.Seq;
+    r.Id = point;
+    Reply(uint16_t(id), r);
+}
+
+void Server::DoPointRemove(const P::Message& m)
+{
+    P::PointRemove p;
+    int id;
+    Instance* inst;
+    if (!Parse(m, p) || !Resolve(m, id, inst))
+        return;
+    if (mds_point_remove(id, p.Id) < 0)
+        return FailFromApi(uint16_t(id), p.Seq);
+    Ok(uint16_t(id), p.Seq);
+}
+
+void Server::DoPointEnable(const P::Message& m)
+{
+    P::PointEnable p;
+    int id;
+    Instance* inst;
+    if (!Parse(m, p) || !Resolve(m, id, inst))
+        return;
+    if (mds_point_enable(id, p.Id, p.Enabled) < 0)
+        return FailFromApi(uint16_t(id), p.Seq);
+    Ok(uint16_t(id), p.Seq);
+}
+
+void Server::DoPointList(const P::Message& m)
+{
+    P::PointList p;
+    int id;
+    Instance* inst;
+    if (!Parse(m, p) || !Resolve(m, id, inst))
+        return;
+    std::vector<mds_point> points(MaxListedPoints);
+    int n = mds_point_list(id, points.data(), MaxListedPoints);
+    if (n < 0)
+        return FailFromApi(uint16_t(id), p.Seq);
+    P::PointListReply r;
+    r.Seq = p.Seq;
+    for (int i = 0; i < n; i++)
+    {
+        const mds_point& q = points[i];
+        r.Points.push_back({q.id, uint8_t(q.watch ? 1 : 0), uint8_t(q.enabled ? 1 : 0), q.cpumask, q.flags, q.start,
+                            q.end, q.hits});
+    }
+    Reply(uint16_t(id), r);
+}
+
+// Savestates need a frame boundary. A running console reaches one by itself but the C API refuses it; a console
+// parked mid-frame would have to resume first. Both get console_running; waiting for the boundary on the
+// client's behalf (as the Qt DebugBridge does) would silently run guest code and could hit further breaks.
+bool Server::RequireBoundary(Instance& inst, int id, uint32_t seq)
+{
+    switch (inst.GetState())
+    {
+    case RunState::Idle:
+        return true;
+    case RunState::Running:
+        Error(uint16_t(id), seq, P::ErrorCode::console_running,
+              "console " + std::to_string(id) + " is running: stop it first (live_stop or pause)");
+        return false;
+    case RunState::Parked:
+        Error(uint16_t(id), seq, P::ErrorCode::console_running,
+              "console " + std::to_string(id) + " is stopped inside a frame (at a break or step); savestates need a "
+              "frame boundary: resume it and let the frame finish first");
+        return false;
+    }
+    return false;
+}
+
+void Server::DoSavestateSave(const P::Message& m)
+{
+    P::SavestateSave s;
+    int id;
+    Instance* inst;
+    if (!Parse(m, s) || !Resolve(m, id, inst) || !RequireBoundary(*inst, id, s.Seq))
+        return;
+    if (mds_savestate(id, s.Text.c_str()) < 0)
+        return FailFromApi(uint16_t(id), s.Seq);
+    Ok(uint16_t(id), s.Seq);
+}
+
+void Server::DoSavestateLoad(const P::Message& m)
+{
+    P::SavestateLoad s;
+    int id;
+    Instance* inst;
+    if (!Parse(m, s) || !Resolve(m, id, inst) || !RequireBoundary(*inst, id, s.Seq))
+        return;
+    if (mds_loadstate(id, s.Text.c_str()) < 0)
+        return FailFromApi(uint16_t(id), s.Seq);
+    SendInputQueue(id, inst->Input.Depth());      // the load cleared the input queue
+    Ok(uint16_t(id), s.Seq);
+}
+
+// ---- Lua. The script's print output reaches the client as lua_output events, ahead of the reply.
+
+void Server::SendLuaOutput(int id)
+{
+    Instance* inst = Api::FindInstance(id);
+    if (!inst || !inst->Lua)
+        return;
+    std::string text = inst->Lua->TakeOutput();
+    for (size_t pos = 0; pos < text.size();)
+    {
+        size_t end = text.find('\n', pos);
+        end = end == std::string::npos ? text.size() : end + 1;
+        P::LuaOutputEvent e;
+        e.Text = text.substr(pos, end - pos);
+        Reply(uint16_t(id), e);
+        pos = end;
+    }
+}
+
+void Server::ServiceLua()
+{
+    for (int id : Api::ConsoleIds())
+        SendLuaOutput(id);
+}
+
+void Server::DoLuaRun(const P::Message& m)
+{
+    P::LuaRun l;
+    int id;
+    Instance* inst;
+    if (!Parse(m, l) || !Resolve(m, id, inst))
+        return;
+    int rc = mds_lua_run(id, l.Source.c_str(), l.IsFile);
+    SendLuaOutput(id);
+    if (rc < 0)
+        return FailFromApi(uint16_t(id), l.Seq);
+    Ok(uint16_t(id), l.Seq);
+}
+
+void Server::DoLuaExec(const P::Message& m)
+{
+    P::LuaExec l;
+    int id;
+    Instance* inst;
+    if (!Parse(m, l) || !Resolve(m, id, inst))
+        return;
+    int rc = mds_lua_exec(id, l.Text.c_str());
+    SendLuaOutput(id);
+    if (rc < 0)
+        return FailFromApi(uint16_t(id), l.Seq);
+    Ok(uint16_t(id), l.Seq);
+}
+
+void Server::DoLuaStop(const P::Message& m)
+{
+    P::LuaStop l;
+    int id;
+    Instance* inst;
+    if (!Parse(m, l) || !Resolve(m, id, inst))
+        return;
+    if (mds_lua_stop(id) < 0)
+        return FailFromApi(uint16_t(id), l.Seq);
+    Ok(uint16_t(id), l.Seq);
+}
+
+// ---- trace, calls, coverage, writers
+
+void Server::DoTraceConfig(const P::Message& m)
+{
+    P::TraceConfig t;
+    int id;
+    Instance* inst;
+    if (!Parse(m, t) || !Resolve(m, id, inst))
+        return;
+    if ((t.CpuMask & ~3u) || (t.Capacity && t.CpuMask == 0) || t.Capacity > MaxTraceCapacity)
+        return Error(uint16_t(id), t.Seq, P::ErrorCode::bad_payload, "bad trace cpuMask or capacity");
+    if (mds_trace(id, t.CpuMask, t.Start, t.End, t.Capacity) < 0)
+        return FailFromApi(uint16_t(id), t.Seq);
+    Ok(uint16_t(id), t.Seq);
+}
+
+void Server::DoTraceRead(const P::Message& m)
+{
+    P::TraceRead t;
+    int id;
+    Instance* inst;
+    if (!Parse(m, t) || !Resolve(m, id, inst))
+        return;
+    int max = int(P::ResolveReadMax(t.Max));
+    std::vector<mds_trace_entry> buf(max);
+    int n = mds_trace_take(id, buf.data(), max);
+    if (n < 0)
+        return FailFromApi(uint16_t(id), t.Seq);
+    P::TraceReadReply r;
+    r.Seq = t.Seq;
+    r.Truncated = Api::MoreStaged(id, Api::Staged::Trace, 9);
+    std::vector<uint32_t> pcs;
+    for (int i = 0; i < n; i++)
+    {
+        r.Entries.push_back({buf[i].cycle, uint8_t(buf[i].cpu), buf[i].pc, buf[i].instr, buf[i].cpsr});
+        pcs.push_back(buf[i].pc);
+    }
+    Namer(*inst, t.WithSymbols).Fill(pcs, r.HasNames, r.Names);
+    Reply(uint16_t(id), r);
+}
+
+void Server::DoCallsTrack(const P::Message& m)
+{
+    P::CallsTrack t;
+    int id;
+    Instance* inst;
+    if (!Parse(m, t) || !Resolve(m, id, inst))
+        return;
+    if (mds_calls(id, t.Enabled) < 0)
+        return FailFromApi(uint16_t(id), t.Seq);
+    Ok(uint16_t(id), t.Seq);
+}
+
+void Server::DoCallStack(const P::Message& m)
+{
+    P::CallStackReq c;
+    int id;
+    Instance* inst;
+    if (!Parse(m, c) || !Resolve(m, id, inst))
+        return;
+    if (!CpuOk(c.Cpu))
+        return Error(uint16_t(id), c.Seq, P::ErrorCode::bad_payload, "cpu must be 9 or 7");
+    std::vector<mds_frame> frames(MaxCallFrames);
+    int n = mds_callstack(id, c.Cpu, frames.data(), MaxCallFrames);
+    if (n < 0)
+        return FailFromApi(uint16_t(id), c.Seq);
+    P::CallStackReply r;
+    r.Seq = c.Seq;
+    std::vector<uint32_t> entries, sites;
+    for (int i = 0; i < n; i++)
+    {
+        const mds_frame& f = frames[i];
+        r.Frames.push_back({f.site, f.entry, f.ret, f.sp, f.mode, uint8_t(f.exception ? 1 : 0)});
+        entries.push_back(f.entry);
+        sites.push_back(f.site);
+    }
+    Namer namer(*inst, c.WithSymbols);
+    namer.Fill(entries, r.HasNames, r.Names);
+    uint8_t has;
+    namer.Fill(sites, has, r.SiteNames);
+    Reply(uint16_t(id), r);
+}
+
+void Server::DoCallCountsRead(const P::Message& m)
+{
+    P::CallCountsRead c;
+    int id;
+    Instance* inst;
+    if (!Parse(m, c) || !Resolve(m, id, inst))
+        return;
+    if (!CpuOk(c.Cpu))
+        return Error(uint16_t(id), c.Seq, P::ErrorCode::bad_payload, "cpu must be 9 or 7");
+    int max = int(P::ResolveReadMax(c.Max));
+    std::vector<uint32_t> entries(max);
+    std::vector<uint64_t> counts(max);
+    int n = mds_callcounts_take(id, c.Cpu, entries.data(), counts.data(), max);
+    if (n < 0)
+        return FailFromApi(uint16_t(id), c.Seq);
+    entries.resize(n);
+    P::CallCountsReply r;
+    r.Seq = c.Seq;
+    r.Truncated = Api::MoreStaged(id, Api::Staged::CallCounts, c.Cpu);
+    for (int i = 0; i < n; i++)
+        r.Counts.push_back({entries[i], counts[i]});
+    Namer(*inst, c.WithSymbols).Fill(entries, r.HasNames, r.Names);
+    Reply(uint16_t(id), r);
+}
+
+void Server::DoCoverageTrack(const P::Message& m)
+{
+    P::CoverageTrack t;
+    int id;
+    Instance* inst;
+    if (!Parse(m, t) || !Resolve(m, id, inst))
+        return;
+    if (mds_coverage(id, t.Enabled) < 0)
+        return FailFromApi(uint16_t(id), t.Seq);
+    Ok(uint16_t(id), t.Seq);
+}
+
+void Server::DoCoverageRead(const P::Message& m)
+{
+    P::CoverageRead c;
+    int id;
+    Instance* inst;
+    if (!Parse(m, c) || !Resolve(m, id, inst))
+        return;
+    if (!CpuOk(c.Cpu))
+        return Error(uint16_t(id), c.Seq, P::ErrorCode::bad_payload, "cpu must be 9 or 7");
+    int max = int(P::ResolveReadMax(c.Max));
+    P::CoverageReadReply r;
+    r.Seq = c.Seq;
+    r.Addrs.resize(max);
+    int n = mds_coverage_take(id, c.Cpu, r.Addrs.data(), max);
+    if (n < 0)
+        return FailFromApi(uint16_t(id), c.Seq);
+    r.Addrs.resize(n);
+    r.Truncated = Api::MoreStaged(id, Api::Staged::Coverage, c.Cpu);
+    Namer(*inst, c.WithSymbols).Fill(r.Addrs, r.HasNames, r.Names);
+    Reply(uint16_t(id), r);
+}
+
+void Server::DoWritersTrack(const P::Message& m)
+{
+    P::WritersTrack t;
+    int id;
+    Instance* inst;
+    if (!Parse(m, t) || !Resolve(m, id, inst))
+        return;
+    if (mds_lastwriter(id, t.Enabled) < 0)
+        return FailFromApi(uint16_t(id), t.Seq);
+    Ok(uint16_t(id), t.Seq);
+}
+
+void Server::DoLastWriter(const P::Message& m)
+{
+    P::LastWriter l;
+    int id;
+    Instance* inst;
+    if (!Parse(m, l) || !Resolve(m, id, inst) || !RequireStopped(*inst, id, l.Seq))
+        return;
+    // Debugger::GetLastWriter packs a CPU writer as pc | (arm7 ? 1 : 0), a DMA writer as
+    // 0xFFFFFFF0 | channel << 1 | (arm7 ? 1 : 0), and no writer as 0.
+    uint32_t raw = mds_lastwriter_get(id, l.Value);
+    P::LastWriterReply r;
+    r.Seq = l.Seq;
+    r.Raw = raw;
+    if (raw >= 0xFFFFFFF0u)
+    {
+        r.Kind = 2;
+        r.Channel = uint8_t((raw >> 1) & 3);
+        r.Cpu = (raw & 1) ? 7 : 9;
+    }
+    else if (raw)
+    {
+        r.Kind = 1;
+        r.Pc = raw & ~1u;
+        r.Cpu = (raw & 1) ? 7 : 9;
+    }
+    Reply(uint16_t(id), r);
+}
+
+// ---- packets (work while the console runs)
+
+void Server::DoPacketsTrack(const P::Message& m)
+{
+    P::PacketsTrack p;
+    int id;
+    Instance* inst;
+    if (!Parse(m, p) || !Resolve(m, id, inst))
+        return;
+    if (p.Capacity > MaxPacketCapacity)
+        return Error(uint16_t(id), p.Seq, P::ErrorCode::bad_payload, "packet capacity too large");
+    if (mds_packets(id, p.Enabled, int(p.Capacity)) < 0)
+        return FailFromApi(uint16_t(id), p.Seq);
+    Ok(uint16_t(id), p.Seq);
+}
+
+void Server::DoPacketsRead(const P::Message& m)
+{
+    P::PacketsRead p;
+    int id;
+    Instance* inst;
+    if (!Parse(m, p) || !Resolve(m, id, inst))
+        return;
+    int max = int(P::ResolveReadMax(p.Max));
+    std::vector<mds_packet> headers(max);
+    std::vector<uint8_t> data(MaxPacketBytes);
+    int n = mds_packets_take(id, headers.data(), data.data(), max, MaxPacketBytes);
+    if (n < 0)
+        return FailFromApi(uint16_t(id), p.Seq);
+    P::PacketsReadReply r;
+    r.Seq = p.Seq;
+    r.Truncated = Api::MoreStaged(id, Api::Staged::Packets, 9);
+    size_t off = 0;
+    for (int i = 0; i < n; i++)
+    {
+        P::PacketItem item;
+        item.Timestamp = headers[i].timestamp;
+        item.Sent = headers[i].sent ? 1 : 0;
+        item.Type = uint8_t(headers[i].type);
+        item.Data.assign(data.begin() + off, data.begin() + off + headers[i].length);
+        off += headers[i].length;
+        r.Packets.push_back(std::move(item));
+    }
+    Reply(uint16_t(id), r);
+}
+
+// ---- input log, symbols, process-wide
+
+void Server::DoInputLogRead(const P::Message& m)
+{
+    P::InputLogRead l;
+    int id;
+    Instance* inst;
+    if (!Parse(m, l) || !Resolve(m, id, inst))
+        return;
+    size_t max = P::ResolveReadMax(l.Max);
+    std::vector<InputLogEntry> log = inst->Input.ReadLog(l.FromFrame, max + 1);
+    P::InputLogReply r;
+    r.Seq = l.Seq;
+    size_t bytes = 0;
+    for (const InputLogEntry& e : log)
+    {
+        size_t size = 22 + e.Touch.size() * 12 + e.Mic.size() * 2;
+        if (r.Entries.size() >= max || bytes + size > P::MaxReplyBytes)
+        {
+            r.Truncated = 1;
+            break;
+        }
+        bytes += size;
+        P::InputLogEntry out;
+        out.Frame = e.Frame;
+        out.Payload.Seq = e.Seq;
+        out.Payload.Buttons = e.Buttons;
+        out.Payload.Lid = e.Lid;
+        out.Payload.MicKind = e.MicKind;
+        out.Payload.MicLevel = e.MicLevel;
+        for (const TouchPoint& t : e.Touch)
+            out.Payload.Touch.push_back({t.Offset, t.X, t.Y, t.Down});
+        out.Payload.Mic = e.Mic;
+        r.Entries.push_back(std::move(out));
+    }
+    Reply(uint16_t(id), r);
+}
+
+void Server::DoSymbolsLoad(const P::Message& m)
+{
+    P::SymbolsLoad s;
+    int id;
+    Instance* inst;
+    if (!Parse(m, s) || !Resolve(m, id, inst))
+        return;
+    P::SymbolsLoadReply r;
+    r.Seq = s.Seq;
+    if (s.Text.empty())
+        inst->Symbols.clear();
+    else
+    {
+        std::string error;
+        if (!inst->Symbols.load(s.Text, error))
+            return Error(uint16_t(id), s.Seq, P::ErrorCode::failed, error);
+        if (auto set = inst->Symbols.set())
+        {
+            r.Symbols = uint32_t(set->SymbolCount);
+            r.Modules = uint32_t(set->Modules.size());
+        }
+    }
+    Reply(uint16_t(id), r);
+}
+
+void Server::DoPacing(const P::Message& m)
+{
+    P::Pacing p;
+    if (!Parse(m, p))
+        return;
+    mds_set_pacing(int(std::min<uint32_t>(p.Value, 1000000)));
+    Ok(m.Head.Console, p.Seq);
+}
+
+void Server::DoMpTimeout(const P::Message& m)
+{
+    P::MpTimeout p;
+    if (!Parse(m, p))
+        return;
+    if (mds_mp_timeout(int(std::min<uint32_t>(p.Value, 3600000))) < 0)
+        return FailFromApi(m.Head.Console, p.Seq);
+    Ok(m.Head.Console, p.Seq);
 }
 
 void Server::Handle(const P::Message& m)
@@ -1097,6 +1704,31 @@ void Server::Handle(const P::Message& m)
     case P::MsgType::text_find: DoTextFind(m); return;
     case P::MsgType::subscribe: DoSubscribe(m); return;
     case P::MsgType::unsubscribe: DoUnsubscribe(m); return;
+    case P::MsgType::input_log_read: DoInputLogRead(m); return;
+    case P::MsgType::breakpoint_add: DoBreakpointAdd(m); return;
+    case P::MsgType::watchpoint_add: DoWatchpointAdd(m); return;
+    case P::MsgType::point_remove: DoPointRemove(m); return;
+    case P::MsgType::point_list: DoPointList(m); return;
+    case P::MsgType::point_enable: DoPointEnable(m); return;
+    case P::MsgType::savestate_save: DoSavestateSave(m); return;
+    case P::MsgType::savestate_load: DoSavestateLoad(m); return;
+    case P::MsgType::lua_run: DoLuaRun(m); return;
+    case P::MsgType::lua_exec: DoLuaExec(m); return;
+    case P::MsgType::lua_stop: DoLuaStop(m); return;
+    case P::MsgType::trace_config: DoTraceConfig(m); return;
+    case P::MsgType::trace_read: DoTraceRead(m); return;
+    case P::MsgType::calls_track: DoCallsTrack(m); return;
+    case P::MsgType::callstack: DoCallStack(m); return;
+    case P::MsgType::call_counts_read: DoCallCountsRead(m); return;
+    case P::MsgType::coverage_track: DoCoverageTrack(m); return;
+    case P::MsgType::coverage_read: DoCoverageRead(m); return;
+    case P::MsgType::writers_track: DoWritersTrack(m); return;
+    case P::MsgType::last_writer: DoLastWriter(m); return;
+    case P::MsgType::packets_track: DoPacketsTrack(m); return;
+    case P::MsgType::packets_read: DoPacketsRead(m); return;
+    case P::MsgType::symbols_load: DoSymbolsLoad(m); return;
+    case P::MsgType::pacing: DoPacing(m); return;
+    case P::MsgType::mp_timeout: DoMpTimeout(m); return;
     default: break;
     }
 

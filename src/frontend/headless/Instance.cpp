@@ -535,7 +535,7 @@ void Instance::WriteSave(const u8* data, u32 len)
         WriteFile(SavePath, data, len);
 }
 
-static Net NetInstance;
+static Net& NetInstance = *new Net();      // never destroyed, as the console registry: see Api.cpp
 static std::once_flag NetInit;
 
 Net& Network()

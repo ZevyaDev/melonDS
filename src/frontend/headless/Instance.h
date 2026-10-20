@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "Commands.h"
+#include "DebugSymbols.h"
 #include "Input.h"
 #include "MicFifo.h"
 #include "NDS.h"
@@ -110,6 +111,7 @@ public:
     Subscriptions Subs;     // frame events for the socket server's subscriptions
     TouchTimeline TouchLine;
     MicFifo Mic;
+    DebugSymbols Symbols;   // this console's symbol table; the server thread only
 
 private:
     std::string SavePath;

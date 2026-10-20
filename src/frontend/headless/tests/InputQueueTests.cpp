@@ -291,6 +291,57 @@ TEST(InputLogRecordsFrameAndSeq)
     CHECK_EQ(q.ReadLog(500, 10).size(), (size_t)0);
 }
 
+TEST(InputLogKeepsFullPayloads)
+{
+    InputQueue q;
+    std::string err;
+    InputPayload p;
+    p.Seq = 5;
+    p.Buttons = 0x81;
+    p.Lid = 1;
+    p.Touch = {{0, 10, 20, 1}, {1000, 11, 21, 0}};
+    p.MicKind = 1;
+    p.Mic = {1, -2, 3};
+    CHECK(q.Submit(p, err) >= 0);
+    InputPayload quiet;
+    quiet.Seq = 6;
+    quiet.MicKind = 2;
+    quiet.MicLevel = 900;
+    CHECK(q.Submit(quiet, err) >= 0);
+    AppliedInput a;
+    q.Next(0, a);
+    q.Next(1, a);
+    auto log = q.ReadLog(0, 10);
+    CHECK_EQ(log.size(), (size_t)2);
+    CHECK_EQ(log[0].Touch.size(), (size_t)2);
+    CHECK_EQ(log[0].Touch[1].Offset, 1000u);
+    CHECK_EQ(log[0].Touch[1].Down, (uint8_t)0);
+    CHECK_EQ(log[0].Mic.size(), (size_t)3);
+    CHECK_EQ(log[0].Mic[1], (int16_t)-2);
+    CHECK_EQ(log[1].Touch.size(), (size_t)0);       // "no change" stays "no change" in the log
+    CHECK_EQ(log[1].MicLevel, (uint16_t)900);
+}
+
+TEST(InputLogMemoryIsBounded)
+{
+    InputQueue q;
+    AppliedInput a;
+    std::string err;
+    for (uint64_t f = 0; f < 30000; f++)
+    {
+        InputPayload p;
+        p.Seq = (uint32_t)f + 1;
+        p.MicKind = 1;
+        p.Mic.assign(InputMaxMicSamples, 7);
+        CHECK(q.Submit(p, err) >= 0);
+        q.Next(f, a);
+    }
+    auto log = q.ReadLog(0, 100000);
+    CHECK(log.size() < 30000);                      // 30000 x ~1.6 KB is over the log byte budget
+    CHECK(log.size() > 1000);
+    CHECK_EQ(log.back().Frame, (uint64_t)29999);    // the most recent entries are the ones kept
+}
+
 TEST(InputLogKeepsMostRecent)
 {
     InputQueue q;
