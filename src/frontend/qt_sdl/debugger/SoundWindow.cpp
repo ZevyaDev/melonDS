@@ -21,8 +21,11 @@
 #include <cstring>
 #include <vector>
 
+#include <QCheckBox>
+#include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
+#include <QPushButton>
 #include <QProgressBar>
 #include <QTableWidget>
 #include <QVBoxLayout>
@@ -46,6 +49,7 @@ constexpr u32 SPUSectionSize = SectionHeaderSize + MasterStateSize + 16 * Channe
 
 enum ChannelColumn
 {
+    chan_Mute,
     chan_On,
     chan_Format,
     chan_Volume,
@@ -355,9 +359,38 @@ SoundWindow::SoundWindow(DebugBridge* bridge, QWidget* parent) : DebugTool(bridg
     Master->setTextInteractionFlags(Qt::TextSelectableByMouse);
     layout->addWidget(Master);
 
-    Channels = MakeTable(this, 16, {"On", "Format", "Volume", "Pan", "Rate", "Source", "Loop start", "Length", "Position", "Repeat", "Hold", "Level"});
+    QHBoxLayout* mutes = new QHBoxLayout();
+    QPushButton* solo = new QPushButton("Solo selected", this);
+    solo->setObjectName("solo");
+    QPushButton* unmute = new QPushButton("Unmute all", this);
+    unmute->setObjectName("unmuteAll");
+    QPushButton* analyze = new QPushButton("Analyze capture", this);
+    analyze->setObjectName("analyzeCapture");
+    analyze->setToolTip("Mute everything but channels 1 and 3, keep muted channels in the capture units");
+    CaptureMuted = new QCheckBox("Capture muted channels", this);
+    CaptureMuted->setObjectName("captureMuted");
+    CaptureMuted->setToolTip("Muted channels still reach the capture units, so the game hears them; only the speakers do not");
+    mutes->addWidget(solo);
+    mutes->addWidget(unmute);
+    mutes->addWidget(analyze);
+    mutes->addWidget(CaptureMuted);
+    mutes->addStretch();
+    layout->addLayout(mutes);
+
+    Channels = MakeTable(this, 16, {"Mute", "On", "Format", "Volume", "Pan", "Rate", "Source", "Loop start", "Length", "Position", "Repeat", "Hold", "Level"});
     for (int i = 0; i < 16; i++)
     {
+        MuteBoxes[i] = new QCheckBox(Channels);
+        MuteBoxes[i]->setObjectName(QString("mute%1").arg(i));
+        connect(MuteBoxes[i], &QCheckBox::toggled, this, [this, i](bool on) {
+            Bridge->post([i, on](NDS& nds) {
+                if (on)
+                    nds.SPU.DebugMute |= 1 << i;
+                else
+                    nds.SPU.DebugMute &= ~(1 << i);
+            });
+        });
+        Channels->setCellWidget(i, chan_Mute, MuteBoxes[i]);
         Levels[i] = new QProgressBar(Channels);
         Levels[i]->setRange(0, LevelScale);
         Levels[i]->setTextVisible(false);
@@ -373,12 +406,41 @@ SoundWindow::SoundWindow(DebugBridge* bridge, QWidget* parent) : DebugTool(bridg
 
     Info = new QLabel("Level: peak of the next 512 samples, scaled by channel volume and divider.", this);
     layout->addWidget(Info);
+
+    connect(solo, &QPushButton::clicked, this, [this] {
+        u16 keep = 0;
+        for (const QModelIndex& index : Channels->selectionModel()->selectedRows())
+            keep |= 1 << index.row();
+        if (!keep && Channels->currentRow() >= 0)
+            keep = 1 << Channels->currentRow();
+        setMute(~keep & 0xFFFF, -1);
+    });
+    connect(unmute, &QPushButton::clicked, this, [this] { setMute(0, -1); });
+    connect(analyze, &QPushButton::clicked, this, [this] { setMute(0xFFFF & ~((1 << 1) | (1 << 3)), 1); });
+    connect(CaptureMuted, &QCheckBox::toggled, this, [this](bool on) {
+        Bridge->post([on](NDS& nds) { nds.SPU.DebugCaptureMuted = on; });
+    });
     setInterval(100);
+}
+
+void SoundWindow::setMute(u16 mask, int captureMuted)
+{
+    Bridge->post([mask, captureMuted](NDS& nds) {
+        nds.SPU.DebugMute = mask;
+        if (captureMuted >= 0)
+            nds.SPU.DebugCaptureMuted = captureMuted;
+    });
+    requestRefresh();
 }
 
 void SoundWindow::refresh()
 {
-    fetch([](NDS& nds) { return ReadSPUThroughSavestate(nds); }, [this](const SoundState& state) { showState(state); });
+    fetch([](NDS& nds) {
+        SoundState state = ReadSPUThroughSavestate(nds);
+        state.DebugMute = nds.SPU.DebugMute;
+        state.CaptureMuted = nds.SPU.DebugCaptureMuted;
+        return state;
+    }, [this](const SoundState& state) { showState(state); });
 }
 
 void SoundWindow::showState(const SoundState& state)
@@ -390,6 +452,15 @@ void SoundWindow::showState(const SoundState& state)
     }
     DebugSymbols& syms = Bridge->symbols();
     Master->setText(MasterText(state));
+    for (int i = 0; i < 16; i++)
+    {
+        QSignalBlocker block(MuteBoxes[i]);
+        MuteBoxes[i]->setChecked(state.DebugMute & (1 << i));
+    }
+    {
+        QSignalBlocker block(CaptureMuted);
+        CaptureMuted->setChecked(state.CaptureMuted);
+    }
     for (int i = 0; i < 16; i++)
     {
         const SoundChannelState& ch = state.Channels[i];

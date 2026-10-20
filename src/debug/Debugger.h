@@ -156,6 +156,7 @@ public:
     void OnFault(ARM& cpu, u32 pc, u32 addr);
 
     std::array<u32, 2> CurPC {};
+    std::function<void(u32 cpu, const char* text, bool newline)> PrintHandler;
 
 private:
     melonDS::NDS& NDS;

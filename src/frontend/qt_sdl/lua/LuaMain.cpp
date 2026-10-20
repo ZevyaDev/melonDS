@@ -1,9 +1,18 @@
 #include "lua/LuaMain.h"
+#include "lua/LuaDesmume.h"
 #include "LuaDebug.h"
 #include "debugger/DebugBridge.h"
+#include "debugger/FrameTools.h"
+#include "Config.h"
 #include <QApplication>
 #include <QBoxLayout>
+#include <QCheckBox>
+#include <QDesktopServices>
+#include <QFileSystemWatcher>
+#include <QMenu>
 #include <QThread>
+#include <QTimer>
+#include <QUrl>
 #include <QFileDialog>
 #include <QPushButton>
 #include <QScrollBar>
@@ -39,16 +48,62 @@ LuaConsoleDialog::LuaConsoleDialog(QWidget* parent) : QDialog(parent)
     commandLine->setObjectName("command");
     commandLine->setPlaceholderText("Lua command, e.g. print(emu.getregister(\"pc\"))");
 
+    QPushButton* buttonRestart = new QPushButton("Restart", this);
+    buttonRestart->setObjectName("restart");
+    QPushButton* buttonEdit = new QPushButton("Edit", this);
+    buttonEdit->setObjectName("edit");
+    QPushButton* buttonRecent = new QPushButton("Recent", this);
+    buttonRecent->setObjectName("recent");
+    QMenu* recentMenu = new QMenu(buttonRecent);
+    buttonRecent->setMenu(recentMenu);
+    QCheckBox* autoReload = new QCheckBox("Reload on change", this);
+    autoReload->setObjectName("autoReload");
+    watcher = new QFileSystemWatcher(this);
+
     QVBoxLayout* layout = new QVBoxLayout(this);
     QHBoxLayout* buttons = new QHBoxLayout();
     buttons->addWidget(buttonPausePlay);
     buttons->addWidget(buttonStartStop);
     buttons->addWidget(buttonOpenScript);
+    buttons->addWidget(buttonRestart);
+    buttons->addWidget(buttonEdit);
+    buttons->addWidget(buttonRecent);
+    buttons->addWidget(autoReload);
     buttons->addStretch();
     layout->addLayout(buttons);
     layout->addWidget(console);
     layout->addWidget(commandLine);
-    resize(560, 360);
+    resize(640, 360);
+
+    connect(buttonRestart, &QPushButton::clicked, this, [this] {
+        if (currentScript.exists())
+            loadScript(currentScript.absoluteFilePath());
+    });
+    connect(buttonEdit, &QPushButton::clicked, this, [this] {
+        if (currentScript.exists())
+            QDesktopServices::openUrl(QUrl::fromLocalFile(currentScript.absoluteFilePath()));
+    });
+    connect(recentMenu, &QMenu::aboutToShow, this, [this, recentMenu] {
+        recentMenu->clear();
+        QStringList recent = recentScripts();
+        for (const QString& path : recent)
+            recentMenu->addAction(path, this, [this, path] { loadScript(path); });
+        if (recent.isEmpty())
+            recentMenu->addAction("(none)")->setEnabled(false);
+        else
+        {
+            recentMenu->addSeparator();
+            recentMenu->addAction("Clear", this, [this] {
+                Config::Table& cfg = bundle->getEmuInstance()->getGlobalConfig();
+                cfg.SetString("Lua.RecentScripts", "");
+                Config::Save();
+            });
+        }
+    });
+    connect(watcher, &QFileSystemWatcher::fileChanged, this, [this, autoReload](const QString& path) {
+        if (autoReload->isChecked() && QFileInfo(path) == currentScript)
+            QTimer::singleShot(200, this, [this, path] { loadScript(path); });
+    });
 
     connect(buttonOpenScript,&QPushButton::clicked,this,&LuaConsoleDialog::onOpenScript);
     connect(buttonStartStop,&QPushButton::clicked,this,&LuaConsoleDialog::onStop);
@@ -60,6 +115,7 @@ LuaConsoleDialog::LuaConsoleDialog(QWidget* parent) : QDialog(parent)
         commandLine->clear();
         bundle->runLine(line);
     });
+    flagClosed = false;
     this->setWindowTitle("Lua Script");
 }
 
@@ -75,10 +131,35 @@ void LuaConsoleDialog::closeEvent(QCloseEvent *event)
 
 void LuaConsoleDialog::onOpenScript()
 {
-    QFileInfo file = QFileInfo(QFileDialog::getOpenFileName(this, "Load Lua Script",QDir::currentPath()));
+    QString path = QFileDialog::getOpenFileName(this, "Load Lua Script", QDir::currentPath(), "Lua scripts (*.lua);;All files (*)");
+    if (!QFileInfo::exists(path)) return;
+    loadScript(path);
+}
+
+QStringList LuaConsoleDialog::recentScripts()
+{
+    Config::Table& cfg = bundle->getEmuInstance()->getGlobalConfig();
+    return QString::fromStdString(cfg.GetString("Lua.RecentScripts")).split('\n', Qt::SkipEmptyParts);
+}
+
+void LuaConsoleDialog::loadScript(const QString& path)
+{
+    QFileInfo file(path);
     if (!file.exists()) return;
     currentScript = file;
     bundle->flagNewLua = true;
+    setWindowTitle("Lua Script - " + file.fileName());
+    if (!watcher->files().isEmpty())
+        watcher->removePaths(watcher->files());
+    watcher->addPath(file.absoluteFilePath());
+    QStringList recent = recentScripts();
+    recent.removeAll(file.absoluteFilePath());
+    recent.prepend(file.absoluteFilePath());
+    while (recent.size() > 10)
+        recent.removeLast();
+    Config::Table& cfg = bundle->getEmuInstance()->getGlobalConfig();
+    cfg.SetString("Lua.RecentScripts", recent.join('\n').toStdString());
+    Config::Save();
 }
 
 LuaConsole::LuaConsole(QWidget* parent)
@@ -146,8 +227,10 @@ void LuaBundle::closeState()
     if (!L)
         return;
     luaState = nullptr;
+    emuInstance->getDebugBridge()->frames().setLuaHook(this, nullptr);
     {
         LuaDebug::Guard guard(L);
+        LuaDesmume::Close(L);
         LuaDebug::Unregister(L);
     }
     lua_close(L);
@@ -216,9 +299,10 @@ void LuaBundle::createLuaState()
     bool loaded;
     {
         LuaDebug::Guard guard(L);
-        loaded = luaL_dofile(L,fileName.data())==LUA_OK;
-        if (!loaded)
-            printText(lua_tostring(L,-1));
+        QString error;
+        loaded = LuaDesmume::Start(L, fileName.data(), error);
+        if (!error.isEmpty())
+            printText(error);
     }
     luaState = L;
     if (!loaded)
@@ -294,6 +378,8 @@ lua_State* LuaBundle::newState()
         [bridge] { bridge->idle(1); },
         [bridge] { bridge->resume(); },
     });
+    LuaDesmume::Register(L);
+    bridge->frames().setLuaHook(this, LuaDebug::FrameHook(L, &LuaDesmume::Frame));
 
     lua_sethook(L,&luaHookFunction,LUA_MASKCOUNT,MELON_LUA_HOOK_INSTRUCTION_COUNT);
     return L;
@@ -320,6 +406,7 @@ void LuaConsoleDialog::onLuaUpdate()
 void LuaBundle::luaUpdate()
 {
     if (!luaState) return;
+    LuaDesmume::UpdateHostInput(emuInstance);
     if (flagStop)
     {
         closeState();

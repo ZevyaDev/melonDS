@@ -35,6 +35,8 @@
 
 #include "Automation.h"
 #include "DebugBridge.h"
+#include "FrameTools.h"
+#include "SPU.h"
 #include "DebugSymbols.h"
 #include "DebugTools.h"
 #include "EmuInstance.h"
@@ -448,6 +450,101 @@ QString Automation::run(const QStringList& args)
             }
         });
         return ok ? s.trimmed() : "error: timeout";
+    }
+    FrameTools& frames = bridge->frames();
+    if (c == "movie" && args.size() > 1)
+    {
+        Movie& movie = frames.movie();
+        if (args[1] == "record" && args.size() > 3)
+            movie.requestRecord(args[2], args.size() > 4 ? args[4] : QString(), args[3] == "poweron");
+        else if (args[1] == "play" && args.size() > 2)
+            movie.requestPlay(args[2], !(args.size() > 3 && args[3] == "rw"));
+        else if (args[1] == "stop")
+            movie.requestStop();
+        else if (args[1] == "readonly" && args.size() > 2)
+            movie.setReadOnly(args[2] != "0");
+        Movie::Status s = movie.status();
+        return QString("state=%1 frame=%2 length=%3 rerecords=%4 lag=%5 readonly=%6 msg=%7")
+            .arg((int)s.State).arg(s.Frame).arg(s.Length).arg(s.Rerecords).arg(s.Lag).arg(s.ReadOnly).arg(s.Message);
+    }
+    if (c == "avi" && args.size() > 1)
+    {
+        if (args[1] == "stop")
+        {
+            frames.stopAVI();
+            return "ok";
+        }
+        QString error;
+        AVICodec codec = args.size() > 2 && args[2] == "raw" ? AVICodec::Uncompressed : AVICodec::MJPEG;
+        return frames.startAVI(args[1], codec, error) ? "ok" : "error: " + error;
+    }
+    if (c == "wav" && args.size() > 1)
+    {
+        if (args[1] == "stop")
+        {
+            frames.stopWAV();
+            return "ok";
+        }
+        QString error;
+        return frames.startWAV(args[1], error) ? "ok" : "error: " + error;
+    }
+    if (c == "shot" && args.size() > 1)
+    {
+        frames.requestScreenshot(rest);
+        return "ok";
+    }
+    if (c == "layers" && args.size() > 2)
+    {
+        frames.setHiddenLayers(Num(args[1]), Num(args[2]));
+        return "ok";
+    }
+    if (c == "hud" && args.size() > 1)
+    {
+        HudFlags flags;
+        QStringList on = args[1].split(',');
+        flags.FPS = on.contains("fps");
+        flags.Input = on.contains("input");
+        flags.GraphicalInput = on.contains("pad");
+        flags.FrameCounter = on.contains("frame");
+        flags.LagCounter = on.contains("lag");
+        flags.RTC = on.contains("rtc");
+        flags.Mic = on.contains("mic");
+        frames.setHud(flags);
+        return "ok";
+    }
+    if (c == "mute" && args.size() > 1)
+    {
+        u16 mask = Num(args[1]);
+        int capture = args.size() > 2 ? (int)Num(args[2]) : -1;
+        bridge->post([mask, capture](NDS& nds) {
+            nds.SPU.DebugMute = mask;
+            if (capture >= 0)
+                nds.SPU.DebugCaptureMuted = capture;
+        });
+        return "ok";
+    }
+    if (c == "nitrooverride" && args.size() > 1)
+    {
+        frames.bootWithOverrides(rest);
+        return "ok";
+    }
+    if (c == "frames")
+        return QString("frame=%1 lag=%2 lagged=%3").arg(frames.frameCount()).arg(frames.lagCount()).arg(frames.lagged());
+    if (c == "press" && args.size() > 1)
+    {
+        InputPatch patch;
+        patch.Press = Num(args[1]);
+        frames.patchInput(patch);
+        return "ok";
+    }
+    if (c == "luawin" && args.size() > 1)
+    {
+        win->openLuaWindow();
+        std::vector<LuaConsoleDialog*> dialogs = win->getLuaDialogs();
+        if (dialogs.empty())
+            return "error: no lua dialog";
+        dialogs.back()->loadScript(rest);
+        return QString("ok windows=%1").arg(dialogs.size());
     }
     if (c == "quit")
     {

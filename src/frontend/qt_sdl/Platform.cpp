@@ -40,6 +40,7 @@
 #include "Net.h"
 #include "MPInterface.h"
 #include "SPI_Firmware.h"
+#include "debugger/LogWindow.h"
 
 extern CameraManager* camManager[2];
 
@@ -297,10 +298,15 @@ void Log(LogLevel level, const char* fmt, ...)
     if (fmt == nullptr)
         return;
 
-    va_list args;
+    va_list args, copy;
     va_start(args, fmt);
+    va_copy(copy, args);
     vprintf(fmt, args);
+    char text[1024];
+    vsnprintf(text, sizeof(text), fmt, copy);
+    va_end(copy);
     va_end(args);
+    DebugLog::append(-1, DebugLog::source_Emulator, text, false);
 }
 
 Thread* Thread_Create(std::function<void()> func)

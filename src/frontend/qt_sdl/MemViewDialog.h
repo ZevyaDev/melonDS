@@ -324,6 +324,9 @@ public:
         this->ScrollBar->setValue(newStart);
     }
 
+    void SetSpace(int space);
+    int GetSpace() const { return this->Space; }
+
 private:
     void UpdateText(int addrIndex, int index);
     void UpdateAddress(int index);
@@ -332,6 +335,18 @@ private:
     DebugBridge* GetBridge();
     void UpdateInfo();
     void AddWatch(melonDS::u8 flags);
+    void RequestCache();
+    void FillRegions();
+    void DumpSpace(bool text);
+    void PokeSpace(uint32_t address, melonDS::u8 size, melonDS::u32 value);
+    melonDS::u8 SpaceCPU() const { return this->Space == 1 ? 1 : 0; }
+
+    QComboBox* SpaceBox;
+    int Space = 0;
+    uint32_t CacheBase = 0;
+    uint8_t Cache[256];
+    bool CacheValid = false;
+    bool CachePending = false;
 
 private slots:
     void done(int r);

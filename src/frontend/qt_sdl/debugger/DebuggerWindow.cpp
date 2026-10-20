@@ -16,6 +16,7 @@
     with melonDS. If not, see http://www.gnu.org/licenses/.
 */
 
+#include <QActionGroup>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -30,12 +31,15 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMap>
+#include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QStatusBar>
 #include <QTableWidget>
 #include <QTimer>
 #include <QToolBar>
+#include <QToolButton>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
@@ -52,6 +56,10 @@
 using namespace melonDS;
 
 static QMap<DebugBridge*, DebuggerWindow*> OpenWindows;
+
+constexpr int MaxStepCount = 1000000;
+constexpr int MaxUpdateMs = 10000;
+constexpr int UpdateStepMs = 50;
 
 static const char* const RegNames[16] = {
     "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
@@ -129,6 +137,7 @@ DebuggerWindow::DebuggerWindow(DebugBridge* bridge, QWidget* parent) : QMainWind
     connect(Disasm, &DisasmView::setPCRequested, this, &DebuggerWindow::setPC);
 
     buildToolbar();
+    buildViewToolbar();
     buildDocks();
 
     Status = new QLabel(this);
@@ -139,7 +148,10 @@ DebuggerWindow::DebuggerWindow(DebugBridge* bridge, QWidget* parent) : QMainWind
     Timer = new QTimer(this);
     connect(Timer, &QTimer::timeout, this, [this] {
         if (Bridge->isRunning())
+        {
             refresh();
+            Disasm->reload();
+        }
     });
 
     connect(bridge, &DebugBridge::broke, this, [this](BreakEvent ev) {
@@ -185,7 +197,8 @@ DebuggerWindow::~DebuggerWindow()
 void DebuggerWindow::showEvent(QShowEvent* event)
 {
     QMainWindow::showEvent(event);
-    Timer->start(Interval);
+    if (Interval > 0)
+        Timer->start(Interval);
     FollowPC = true;
     refresh();
 }
@@ -221,7 +234,7 @@ void DebuggerWindow::buildToolbar()
     ActBreak->setShortcut(Qt::Key_F6);
     ActContinue = bar->addAction("Continue", this, [this] { Bridge->resume(); });
     ActContinue->setShortcut(Qt::Key_F5);
-    ActStep = bar->addAction("Step into", this, [this] { Bridge->step(cpu()); });
+    ActStep = bar->addAction("Step into", this, [this] { Bridge->step(cpu(), (u32)StepCount->value()); });
     ActStep->setShortcut(Qt::Key_F11);
     ActOver = bar->addAction("Step over", this, [this] { Bridge->stepOver(cpu()); });
     ActOver->setShortcut(Qt::Key_F10);
@@ -231,6 +244,12 @@ void DebuggerWindow::buildToolbar()
     runTo->setShortcut(Qt::Key_F4);
     for (QAction* a : {ActBreak, ActContinue, ActStep, ActOver, ActOut, runTo})
         a->setToolTip(a->text() + " (" + a->shortcut().toString() + ")");
+    bar->addWidget(new QLabel(" Steps ", this));
+    StepCount = new QSpinBox(this);
+    StepCount->setObjectName("StepCount");
+    StepCount->setRange(1, MaxStepCount);
+    StepCount->setToolTip("Step into runs this many instructions");
+    bar->addWidget(StepCount);
     bar->addSeparator();
 
     CPUBox = new QComboBox(this);
@@ -275,6 +294,75 @@ void DebuggerWindow::buildToolbar()
         emit Bridge->symbolsChanged();
         applySnapshot(Snap);
     });
+}
+
+void DebuggerWindow::buildViewToolbar()
+{
+    QToolBar* bar = addToolBar("View");
+    bar->setObjectName("ViewToolbar");
+
+    DecodeButton = new QToolButton(this);
+    DecodeButton->setPopupMode(QToolButton::InstantPopup);
+    DecodeButton->setToolTip("Decode the listing as ARM or Thumb, or per symbol and CPSR");
+    QMenu* menu = new QMenu(DecodeButton);
+    QActionGroup* group = new QActionGroup(menu);
+    const char* names[3] = {"Auto (symbols, CPSR)", "ARM", "Thumb"};
+    for (int m = 0; m < 3; m++)
+    {
+        QAction* act = menu->addAction(names[m]);
+        act->setCheckable(true);
+        group->addAction(act);
+        connect(act, &QAction::triggered, this, [this, m] { Disasm->setMode((DisasmView::Mode)m); });
+        DecodeActions[m] = act;
+    }
+    DecodeButton->setMenu(menu);
+    bar->addWidget(DecodeButton);
+    connect(Disasm, &DisasmView::modeChanged, this, &DebuggerWindow::showDecodeMode);
+    showDecodeMode(Disasm->mode());
+    bar->addSeparator();
+
+    bar->addWidget(new QLabel(" Update every ", this));
+    UpdateEvery = new QSpinBox(this);
+    UpdateEvery->setObjectName("UpdateInterval");
+    UpdateEvery->setRange(0, MaxUpdateMs);
+    UpdateEvery->setSingleStep(UpdateStepMs);
+    UpdateEvery->setSuffix(" ms");
+    UpdateEvery->setSpecialValueText("off");
+    UpdateEvery->setKeyboardTracking(false);
+    UpdateEvery->setValue(Interval);
+    UpdateEvery->setToolTip("How often registers, breakpoints and the listing refresh while the game runs");
+    bar->addWidget(UpdateEvery);
+    connect(UpdateEvery, &QSpinBox::valueChanged, this, &DebuggerWindow::setUpdateInterval);
+
+    QAction* follow = bar->addAction("Follow PC");
+    follow->setCheckable(true);
+    follow->setToolTip("While the game runs, keep the current instruction in view on every update");
+    connect(follow, &QAction::toggled, this, [this](bool on) {
+        FollowLive = on;
+        refresh();
+    });
+    bar->addAction("Refresh", this, [this] {
+        refresh();
+        Disasm->reload();
+    })->setToolTip("Read registers, breakpoints and the listing again now");
+}
+
+void DebuggerWindow::setUpdateInterval(int ms)
+{
+    Interval = ms;
+    if (ms <= 0)
+        Timer->stop();
+    else if (isVisible())
+        Timer->start(ms);
+}
+
+void DebuggerWindow::showDecodeMode(int mode)
+{
+    static const char* const labels[3] = {"Decode: auto", "Decode: ARM", "Decode: Thumb"};
+    if (mode < 0 || mode > 2)
+        return;
+    DecodeActions[mode]->setChecked(true);
+    DecodeButton->setText(labels[mode]);
 }
 
 void DebuggerWindow::buildDocks()
@@ -441,7 +529,8 @@ void DebuggerWindow::applySnapshot(const DebugSnapshot& s)
     Snap = s;
     Bridge->symbols().setLoaded(s.Overlays);
     int c = cpu();
-    Disasm->setPC(s.CPU[c].PC, s.CPU[c].CPSR & 0x20, stopped);
+    bool live = FollowLive && !stopped;
+    Disasm->setPC(s.CPU[c].PC, s.CPU[c].CPSR & 0x20, stopped || live);
     QSet<u32> exec, disabled;
     for (const PointInfo& p : s.Points)
         if (p.Exec && (p.CPUMask & (1 << c)))
@@ -456,6 +545,8 @@ void DebuggerWindow::applySnapshot(const DebugSnapshot& s)
         Disasm->goToPC();
         FollowPC = false;
     }
+    else if (live)
+        Disasm->goToPC();
     updateRegs(0);
     updateRegs(1);
     updatePoints();

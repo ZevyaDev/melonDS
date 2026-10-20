@@ -69,6 +69,7 @@ set(SOURCES_QT_SDL
     lua/libs/LuaMemory.cpp
     lua/libs/LuaSavestate.cpp
     lua/libs/LuaMisc.cpp
+    lua/LuaDesmume.cpp
 
     ../lua_debug/LuaDebug.cpp
 
@@ -85,6 +86,13 @@ set(SOURCES_QT_SDL
     debugger/Gfx2DWindows.cpp
     debugger/Gfx3DWindow.cpp
     debugger/SoundWindow.cpp
+    debugger/Gfx3DStateWindows.cpp
+    debugger/NitroFSWindow.cpp
+    debugger/LogWindow.cpp
+    debugger/Movie.cpp
+    debugger/FrameTools.cpp
+    debugger/NitroOverride.cpp
+    MediaWriters.cpp
 )
 
 option(USE_QT6 "Use Qt 6 instead of Qt 5" ON)

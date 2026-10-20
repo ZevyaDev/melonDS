@@ -454,6 +454,8 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent) :
             menu->addSeparator();
             menu->addAction("Memory viewer", this, &MainWindow::onMemView);
             menu->addAction("Lua console", this, &MainWindow::onOpenLuaScript);
+            menu->addAction("New Lua script window", this, &MainWindow::openLuaWindow);
+            menu->addAction("Close all Lua script windows", this, &MainWindow::closeLuaWindows);
         }
         {
             QMenu * menu = menubar->addMenu("View");
@@ -809,8 +811,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
     }
 
     //close lua console
-    LuaConsoleDialog* dialog = getLuaDialog();
-    if (dialog) dialog->close();
+    closeLuaWindows();
 
     // explicitly close children windows, so the OpenGL contexts get closed properly
     auto childwins = findChildren<MainWindow *>(nullptr, Qt::FindDirectChildrenOnly);
@@ -1750,6 +1751,43 @@ void MainWindow::onOpenLuaScript()
     connect(emuThread,&EmuThread::signalLuaUpdate,luaDialog,&LuaConsoleDialog::onLuaUpdate);
     connect(luaDialog,&LuaConsoleDialog::signalLuaSaveState,this,&MainWindow::onLuaSaveState);
     connect(luaDialog,&LuaConsoleDialog::signalLuaLoadState,this,&MainWindow::onLuaLoadState);
+}
+
+std::vector<LuaConsoleDialog*> MainWindow::getLuaDialogs()
+{
+    std::vector<LuaConsoleDialog*> dialogs;
+    if (luaDialog)
+        dialogs.push_back(luaDialog);
+    for (const QPointer<LuaConsoleDialog>& dialog : moreLuaDialogs)
+        if (dialog)
+            dialogs.push_back(dialog);
+    return dialogs;
+}
+
+void MainWindow::openLuaWindow()
+{
+    if (!luaDialog || luaDialog->flagClosed)
+    {
+        onOpenLuaScript();
+        return;
+    }
+    for (const QPointer<LuaConsoleDialog>& d : moreLuaDialogs)
+        if (d && d->flagClosed)
+            d->deleteLater();
+    moreLuaDialogs.erase(std::remove_if(moreLuaDialogs.begin(), moreLuaDialogs.end(),
+        [](const QPointer<LuaConsoleDialog>& d) { return !d || d->flagClosed; }), moreLuaDialogs.end());
+    LuaConsoleDialog* dialog = new LuaConsoleDialog(this);
+    dialog->show();
+    connect(emuThread, &EmuThread::signalLuaUpdate, dialog, &LuaConsoleDialog::onLuaUpdate);
+    connect(dialog, &LuaConsoleDialog::signalLuaSaveState, this, &MainWindow::onLuaSaveState);
+    connect(dialog, &LuaConsoleDialog::signalLuaLoadState, this, &MainWindow::onLuaLoadState);
+    moreLuaDialogs.push_back(dialog);
+}
+
+void MainWindow::closeLuaWindows()
+{
+    for (LuaConsoleDialog* dialog : getLuaDialogs())
+        dialog->close();
 }
 
 void MainWindow::onEnableCheats(bool checked)

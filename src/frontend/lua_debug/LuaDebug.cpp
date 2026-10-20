@@ -583,6 +583,20 @@ Guard::~Guard()
         Lock->unlock();
 }
 
+std::function<void(bool)> FrameHook(lua_State* L, void (*fn)(lua_State*, bool))
+{
+    ContextPtr* owner = Owner(L);
+    if (!owner)
+        return nullptr;
+    ContextPtr ctx = *owner;
+    return [ctx, fn](bool after) {
+        Acquire(ctx.get());
+        std::lock_guard lock(ctx->Lock, std::adopt_lock);
+        if (ctx->L)
+            fn(ctx->L, after);
+    };
+}
+
 void RunFrameEnd(lua_State* L)
 {
     Context* ctx = Ctx(L);

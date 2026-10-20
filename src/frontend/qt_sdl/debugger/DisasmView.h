@@ -46,6 +46,7 @@ public:
     void setCPU(int cpu);
     int cpu() const { return CPU; }
     void setMode(Mode mode);
+    Mode mode() const { return ViewMode; }
     void setPC(melonDS::u32 pc, bool thumb, bool valid);
     void setBreakpoints(const QSet<melonDS::u32>& exec, const QSet<melonDS::u32>& disabled);
     void goTo(melonDS::u32 addr, bool record = true);
@@ -59,6 +60,7 @@ signals:
     void runToCursor(melonDS::u32 addr);
     void setPCRequested(melonDS::u32 addr);
     void addressHovered(melonDS::u32 addr);
+    void modeChanged(int mode);
 
 protected:
     void paintEvent(QPaintEvent* event) override;

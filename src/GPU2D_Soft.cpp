@@ -196,7 +196,7 @@ void SoftRenderer2D::DrawScanlineBGMode(u32 line)
     {
         if ((bgCnt[3] & 0x3) == i)
         {
-            if (GPU2D.LayerEnable & (1<<3))
+            if (GPU2D.VisibleLayers() & (1<<3))
             {
                 if (bgmode >= 3)
                     DoDrawBG(Extended, line, 3);
@@ -208,7 +208,7 @@ void SoftRenderer2D::DrawScanlineBGMode(u32 line)
         }
         if ((bgCnt[2] & 0x3) == i)
         {
-            if (GPU2D.LayerEnable & (1<<2))
+            if (GPU2D.VisibleLayers() & (1<<2))
             {
                 if (bgmode == 5)
                     DoDrawBG(Extended, line, 2);
@@ -220,14 +220,14 @@ void SoftRenderer2D::DrawScanlineBGMode(u32 line)
         }
         if ((bgCnt[1] & 0x3) == i)
         {
-            if (GPU2D.LayerEnable & (1<<1))
+            if (GPU2D.VisibleLayers() & (1<<1))
             {
                 DoDrawBG(Text, line, 1);
             }
         }
         if ((bgCnt[0] & 0x3) == i)
         {
-            if (GPU2D.LayerEnable & (1<<0))
+            if (GPU2D.VisibleLayers() & (1<<0))
             {
                 if (!GPU2D.Num && (dispCnt & 0x8))
                     DrawBG_3D();
@@ -235,7 +235,7 @@ void SoftRenderer2D::DrawScanlineBGMode(u32 line)
                     DoDrawBG(Text, line, 0);
             }
         }
-        if ((GPU2D.LayerEnable & (1<<4)) && NumSprites)
+        if ((GPU2D.VisibleLayers() & (1<<4)) && NumSprites)
         {
             InterleaveSprites(i);
         }
@@ -251,20 +251,20 @@ void SoftRenderer2D::DrawScanlineBGMode6(u32 line)
     {
         if ((bgCnt[2] & 0x3) == i)
         {
-            if (GPU2D.LayerEnable & (1<<2))
+            if (GPU2D.VisibleLayers() & (1<<2))
             {
                 DoDrawBG_Large(line);
             }
         }
         if ((bgCnt[0] & 0x3) == i)
         {
-            if (GPU2D.LayerEnable & (1<<0))
+            if (GPU2D.VisibleLayers() & (1<<0))
             {
                 if ((!GPU2D.Num) && (dispCnt & 0x8))
                     DrawBG_3D();
             }
         }
-        if ((GPU2D.LayerEnable & (1<<4)) && NumSprites)
+        if ((GPU2D.VisibleLayers() & (1<<4)) && NumSprites)
         {
             InterleaveSprites(i);
         }
@@ -281,14 +281,14 @@ void SoftRenderer2D::DrawScanlineBGMode7(u32 line)
     {
         if ((bgCnt[1] & 0x3) == i)
         {
-            if (GPU2D.LayerEnable & (1<<1))
+            if (GPU2D.VisibleLayers() & (1<<1))
             {
                 DoDrawBG(Text, line, 1);
             }
         }
         if ((bgCnt[0] & 0x3) == i)
         {
-            if (GPU2D.LayerEnable & (1<<0))
+            if (GPU2D.VisibleLayers() & (1<<0))
             {
                 if (!GPU2D.Num && (dispCnt & 0x8))
                     DrawBG_3D();
@@ -296,7 +296,7 @@ void SoftRenderer2D::DrawScanlineBGMode7(u32 line)
                     DoDrawBG(Text, line, 0);
             }
         }
-        if ((GPU2D.LayerEnable & (1<<4)) && NumSprites)
+        if ((GPU2D.VisibleLayers() & (1<<4)) && NumSprites)
         {
             InterleaveSprites(i);
         }

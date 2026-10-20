@@ -19,6 +19,8 @@
 #ifndef SPU_H
 #define SPU_H
 
+#include <vector>
+
 #include "Savestate.h"
 #include "Platform.h"
 
@@ -262,6 +264,10 @@ public:
     void Write8(u32 addr, u8 val);
     void Write16(u32 addr, u16 val);
     void Write32(u32 addr, u32 val);
+
+    u16 DebugMute = 0;
+    bool DebugCaptureMuted = false;
+    std::vector<s16>* DebugCapture = nullptr;
 
 private:
     u32 OutputBufferSize = 0;

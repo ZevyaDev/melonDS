@@ -72,6 +72,7 @@ public:
     void osdAddMessage(unsigned int color, const char* msg);
 
     int getMouseWheel() {return mouseWheel;}
+    bool mapToTouchScreen(int& x, int& y) { return layout.GetTouchCoords(x, y, false); }
 
     virtual void drawScreen() {}// = 0;
 
@@ -252,6 +253,10 @@ private:
     GLuint overlayShader;
     GLuint overlayScreenSizeULoc, overlayTransformULoc;
     GLuint overlayPosULoc, overlaySizeULoc, overlayScreenTypeULoc;
+
+    GLuint debugOverlayTex[2] = {0, 0};
+    quint64 debugOverlayVersion[2] = {~0ull, ~0ull};
+    void drawDebugOverlay(int w, int h, float factor);
 };
 
 #endif // SCREEN_H

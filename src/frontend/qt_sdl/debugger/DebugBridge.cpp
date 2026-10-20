@@ -23,13 +23,16 @@
 
 #include "DebugBridge.h"
 #include "DebugSymbols.h"
+#include "FrameTools.h"
+#include "LogWindow.h"
 #include "EmuInstance.h"
 #include "EmuThread.h"
 #include "ARM.h"
 
 using namespace melonDS;
 
-DebugBridge::DebugBridge(EmuInstance* inst) : QObject(nullptr), Inst(inst), Symbols(std::make_unique<DebugSymbols>())
+DebugBridge::DebugBridge(EmuInstance* inst) : QObject(nullptr), Inst(inst), Symbols(std::make_unique<DebugSymbols>()),
+    Frames(std::make_unique<FrameTools>(inst, this))
 {
     qRegisterMetaType<melonDS::BreakEvent>("melonDS::BreakEvent");
     EmuThread* thread = inst->getEmuThread();
@@ -128,6 +131,10 @@ void DebugBridge::attachConsole(NDS* nds)
         return;
     nds->Debugger.SetBreakHandler([this](const BreakEvent& ev) { onBreak(ev); });
     nds->Debugger.SetServiceHandler([this] { runJobs(); });
+    int instance = Inst->getInstanceID();
+    nds->Debugger.PrintHandler = [instance](u32 cpu, const char* text, bool newline) {
+        DebugLog::append(instance, cpu ? DebugLog::source_ARM7 : DebugLog::source_ARM9, text, newline);
+    };
     for (const SavedPoint& p : Saved)
     {
         int id = p.Exec ? nds->Debugger.AddBreakpoint(p.CPUMask, p.Start)

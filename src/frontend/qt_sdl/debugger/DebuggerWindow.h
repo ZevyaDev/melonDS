@@ -29,6 +29,8 @@
 class QComboBox;
 class QLabel;
 class QLineEdit;
+class QSpinBox;
+class QToolButton;
 class QTreeWidget;
 class QTableWidget;
 class QTimer;
@@ -94,12 +96,17 @@ private:
     QTreeWidget* Points;
     QTreeWidget* Stack;
     QTimer* Timer;
+    QSpinBox* StepCount;
+    QSpinBox* UpdateEvery;
+    QToolButton* DecodeButton;
+    std::array<QAction*, 3> DecodeActions {};
 
     DebugSnapshot Snap {};
     std::array<CPUSnapshot, 2> Prev {};
     bool HavePrev = false;
     bool Pending = false;
     bool FollowPC = false;
+    bool FollowLive = false;
     bool Tracking = false;
     int Interval = 250;
 
@@ -110,7 +117,10 @@ private:
     QAction* ActOut;
 
     void buildToolbar();
+    void buildViewToolbar();
     void buildDocks();
+    void setUpdateInterval(int ms);
+    void showDecodeMode(int mode);
     void refresh();
     void applySnapshot(const DebugSnapshot& snap);
     void updateActions();

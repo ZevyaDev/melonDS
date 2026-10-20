@@ -55,6 +55,7 @@
 
 #include "EmuInstance.h"
 #include "debugger/DebugBridge.h"
+#include "debugger/FrameTools.h"
 
 using namespace melonDS;
 
@@ -253,19 +254,31 @@ void EmuThread::run()
             }
 
             // process input and hotkeys
-            emuInstance->nds->SetKeyMask(emuInstance->inputMask);
-
-            if (emuInstance->isTouching)
-                emuInstance->nds->TouchScreen(emuInstance->touchX, emuInstance->touchY);
-            else
-                emuInstance->nds->ReleaseScreen();
-
             if (emuInstance->hotkeyPressed(HK_Lid))
             {
                 bool lid = !emuInstance->nds->IsLidClosed();
                 emuInstance->nds->SetLidClosed(lid);
                 emuInstance->osdAddMessage(0, lid ? "Lid closed" : "Lid opened");
             }
+
+            FrameInput frameInput;
+            frameInput.Keys = ~emuInstance->inputMask & 0xFFF;
+            frameInput.Touching = emuInstance->isTouching;
+            frameInput.TouchX = emuInstance->touchX;
+            frameInput.TouchY = emuInstance->touchY;
+            frameInput.Lid = emuInstance->nds->IsLidClosed();
+            frameInput.Mic = emuInstance->hotkeyDown(HK_Mic);
+            emuInstance->getDebugBridge()->frames().beforeFrame(frameInput);
+
+            emuInstance->nds->SetKeyMask(~frameInput.Keys & 0xFFF);
+
+            if (frameInput.Touching)
+                emuInstance->nds->TouchScreen(frameInput.TouchX, frameInput.TouchY);
+            else
+                emuInstance->nds->ReleaseScreen();
+
+            if (frameInput.Lid != emuInstance->nds->IsLidClosed())
+                emuInstance->nds->SetLidClosed(frameInput.Lid);
 
             // auto screen layout
             {
@@ -297,7 +310,8 @@ void EmuThread::run()
             }
 
             // RTC sync
-            emuInstance->syncRTC();
+            if (!emuInstance->getDebugBridge()->frames().movie().active())
+                emuInstance->syncRTC();
 
 
             // emulate
@@ -310,6 +324,7 @@ void EmuThread::run()
             else
             {
                 nlines = emuInstance->nds->RunFrame();
+                emuInstance->getDebugBridge()->frames().afterFrame();
             }
 
             if (emuInstance->ndsSave)
@@ -580,6 +595,7 @@ int EmuThread::handleMessages(bool parked)
 
         case msg_EmuReset:
             emuInstance->reset();
+            emuInstance->getDebugBridge()->frames().onReset();
 
             emuStatus = emuStatus_Running;
             emuPauseStack = emuPauseStackRunning;

@@ -21,6 +21,7 @@
 
 #include "DebugTool.h"
 
+class QCheckBox;
 class QLabel;
 class QProgressBar;
 class QTableWidget;
@@ -60,6 +61,8 @@ struct SoundState
     melonDS::u16 Cnt;
     melonDS::u16 Bias;
     bool Mute;
+    melonDS::u16 DebugMute;
+    bool CaptureMuted;
     SoundChannelState Channels[16];
     SoundCaptureState Captures[2];
 };
@@ -80,9 +83,12 @@ private:
     QTableWidget* Captures;
     QProgressBar* Levels[16];
     QLabel* Info;
+    QCheckBox* MuteBoxes[16];
+    QCheckBox* CaptureMuted;
     bool ColumnsSized = false;
 
     void showState(const SoundState& state);
+    void setMute(melonDS::u16 mask, int captureMuted);
 };
 
 #endif

@@ -496,7 +496,7 @@ bool GLRenderer2D::IsScreenOn()
     if ((brightmode == 1 || brightmode == 2) && brightness >= 16)
         return false;
 
-    u16 layers = GPU2D.LayerEnable | 0x20;
+    u16 layers = GPU2D.VisibleLayers() | 0x20;
     u16 bldeffect = (GPU2D.BlendCnt >> 6) & 0x3;
     u16 bldlayers = GPU2D.BlendCnt & layers & 0x3F;
     if ((bldeffect == 2 || bldeffect == 3) && bldlayers == layers && GPU2D.EVY >= 16 &&
@@ -525,7 +525,7 @@ void GLRenderer2D::UpdateAndRender(int line)
     u16 bgcnt_diff[4];
 
     dispcnt_diff = GPU2D.DispCnt ^ DispCnt;
-    layer_diff = GPU2D.LayerEnable ^ LayerEnable;
+    layer_diff = GPU2D.VisibleLayers() ^ LayerEnable;
     for (int layer = 0; layer < 4; layer++)
         bgcnt_diff[layer] = GPU2D.BGCnt[layer] ^ BGCnt[layer];
 
@@ -665,7 +665,7 @@ void GLRenderer2D::UpdateAndRender(int line)
 
     UnitEnabled = GPU2D.Enabled;
     DispCnt = GPU2D.DispCnt;
-    LayerEnable = GPU2D.LayerEnable;
+    LayerEnable = GPU2D.VisibleLayers();
     OBJEnable = GPU2D.OBJEnable;
     ForcedBlank = GPU2D.ForcedBlank;
     for (int layer = 0; layer < 4; layer++)

@@ -394,6 +394,8 @@ private:
 
     friend class EmuThread;
     friend class MainWindow;
+    friend class Movie;
+    friend class FrameTools;
 };
 
 #endif //EMUINSTANCE_H

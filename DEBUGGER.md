@@ -45,13 +45,35 @@ hook that returns true opens the window at the stop.
 | Trace | ring buffer of executed instructions in a PC range, savable |
 | Call counts and coverage | calls per function, executed instructions per function with % covered |
 | Last writer | the instruction or DMA channel behind the latest write to each main-RAM word |
-| RAM search, RAM watch | DeSmuME-style search; typed watches (fx32 too), editable, savable |
+| RAM search, RAM watch | DeSmuME-style search with autosearch; typed watches (fx32 too), separators, recent files, auto-load per game; Add cheat turns a result or watch into an Action Replay code |
 | IO registers | ARM9 and ARM7 registers decoded to fields, editable |
 | Palettes, Tile viewer, BG map, OAM / sprites | both engines, extended palettes, all BG modes |
 | 3D graphics | last frame's polygons and vertices, wireframe with picking, textures in all formats |
-| Sound | 16 channels and both capture units, live levels |
-| Memory viewer | #2384's viewer plus symbols, last writer, break on read/write, disassemble |
-| Lua console | scripts plus a command line evaluated against the live console |
+| Matrices | projection, position, direction, texture and clip matrices, every stack slot, decimal or hex |
+| Lights | four lights, material colours, shininess table, current vertex colour and normal |
+| Sound | 16 channels and both capture units, live levels, mute and solo per channel, capture analysis |
+| NitroFS | the ROM's file tree and overlay tables, loaded overlays, extract, view in the memory viewer |
+| Log | game output through the no$gba debug registers, and the emulator log |
+| Memory viewer | #2384's viewer plus the ARM7 bus, cart ROM and firmware; symbols, last writer, value decoding, break on read/write, text dump |
+| Lua console | scripts plus a command line; several script windows, recent scripts, restart, reload on change |
+
+The debugger window steps N instructions at a time, refreshes the listing while running, follows
+the PC and forces ARM or Thumb decoding.
+
+## Debug menu
+
+| item | does |
+|---|---|
+| Movie | record from power-on or from now, play, stop, read-only, rerecord count |
+| Record | AVI (MJPEG or uncompressed, split at 1.9 GB), WAV, screenshot |
+| Boot with NitroFS overrides | reboots the cart with files from a folder replacing the ROM's (`data/...` paths, any size) |
+| View layers | hide BG0 to BG3 and OBJ per engine |
+| HUD | FPS, input, graphical input, frame counter, lag counter, RTC, microphone |
+
+Movies are DeSmuME `.dsm` text files with the start state embedded. Saving a state while a movie
+runs writes `<state>.movie` beside it; loading that state seeks the movie in read-only mode and
+truncates it and counts a rerecord in read-write mode. A state from another movie stops it. Record
+with JIT off when you rerecord.
 
 ## Lua
 
@@ -63,6 +85,16 @@ The Qt console has #1671's API plus the debugger tables from the headless build:
 Memory hooks run on the emulator thread at the instruction that hit them, so `emu.getregister`
 there is exact. `gui`, `forms`, `input`, `client`, `savestate` and `console` are refused inside a
 hook: set a variable there and act on it in `_Update`.
+
+DeSmuME scripts run unchanged: `emu` (`frameadvance`, `registerbefore`, `registerafter`,
+`emulateframe`, `framecount`, `lagcount`, `lagged`, ...), `memory` (`readbyte` to `readdwordsigned`,
+`readbyterange`, `write*`, `getregister`, `setregister`, `registerwrite`, `registerread`,
+`registerexec`), `gui` (`text`, `box`, `line`, `pixel`, `getpixel`, `opacity`, `transparency`,
+`gdscreenshot`, `gdoverlay`, `register`, `setlayermask`, `popup`), `joypad`, `stylus`, `input`,
+`savestate` (slots, files and in-memory objects with `registersave`/`registerload`), `movie`,
+`sound`, `bit` and the `AND`/`OR`/`XOR`/`SHIFT`/`BIT` globals. The script body runs as a coroutine
+on the emulator thread at frame boundaries, so `emu.frameadvance` and `joypad.set` act on exact
+frames. Coordinates follow DeSmuME: y from -192 to -1 is the top screen.
 
 ## Threading
 

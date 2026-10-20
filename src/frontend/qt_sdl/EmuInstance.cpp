@@ -36,6 +36,7 @@
 #endif
 #include "EmuInstance.h"
 #include "debugger/DebugBridge.h"
+#include "debugger/FrameTools.h"
 #ifdef MELONDS_AUTOMATION
 #include "debugger/Automation.h"
 #endif
@@ -779,6 +780,7 @@ bool EmuInstance::loadState(const std::string& filename)
     assert(backup == nullptr);
 
     savestateLoaded = true;
+    debugBridge->frames().movie().onStateLoaded(*nds, filename);
 
     return true;
 }
@@ -820,6 +822,7 @@ bool EmuInstance::saveState(const std::string& filename)
     }
 
     Platform::CloseFile(file);
+    debugBridge->frames().movie().onStateSaved(filename);
 
     return true;
 }

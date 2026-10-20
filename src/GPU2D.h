@@ -64,8 +64,11 @@ public:
 
     void CalculateWindowMask(u8* windowMask, const u8* objWindow);
 
+    u8 VisibleLayers() const { return LayerEnable & ~DebugHiddenLayers; }
+
     u32 Num;
     bool Enabled;
+    u8 DebugHiddenLayers = 0;
 
     u32 DispCnt;
     u32 DispCntLatch[3];

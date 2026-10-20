@@ -28,9 +28,16 @@
 #include <QAction>
 #include <QBrush>
 #include <QCheckBox>
+#include <QCloseEvent>
 #include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 #include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
+#include <QFormLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QItemSelectionModel>
@@ -38,18 +45,24 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QLocale>
+#include <QMenu>
 #include <QMessageBox>
+#include <QMimeData>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSignalBlocker>
 #include <QTableView>
 #include <QTableWidget>
 #include <QTextStream>
+#include <QUrl>
 #include <QVBoxLayout>
 
 #include "RamSearchWindow.h"
 #include "DebugSymbols.h"
 #include "DebugTools.h"
+#include "EmuInstance.h"
+#include "Config.h"
+#include "NDSCart.h"
 
 using namespace melonDS;
 
@@ -58,12 +71,22 @@ constexpr u32 SharedWRAMBase = 0x03000000;
 constexpr u32 ARM7WRAMBase = 0x03800000;
 constexpr u32 ARM7WRAMMirrorMask = 0xFF800000;
 constexpr u32 DTCMUnmapped = 0xFFFFFFFF;
+constexpr u32 ARRegionEnd = 0x02FFFFFF;
+constexpr u32 ARAddressMask = 0x0FFFFFFF;
 constexpr double FixedOne = 4096.0;
 constexpr size_t MaxUndo = 10;
 constexpr int MaxLiveRows = 256;
 constexpr int MaxWatchAdds = 256;
+constexpr size_t MaxCheatAdds = 16;
+constexpr qint64 AutoSearchMs = 200;
+constexpr qint64 StaleSearchMs = 5000;
+constexpr int MaxRecentWatchFiles = 8;
 
 static const char* const TypeNames[] = {"signed", "unsigned", "hex", "float", "fixed"};
+static const char* const SeparatorType = "separator";
+static const char* const SeparatorNotes = "----------------";
+static const char* const RecentWatchKey = "Debugger.WatchRecent";
+static const char* const WatchGameKey = "Debugger.Watch.";
 
 enum class RamRegion
 {
@@ -90,6 +113,7 @@ enum class CompareOp
     Equal,
     NotEqual,
     DifferentBy,
+    Modulo,
 };
 
 namespace SearchColumn
@@ -116,6 +140,7 @@ struct RamSnapshot
     u8 CPU = 0;
     QByteArray Data;
     u32 Reference = 0;
+    u32 Frame = 0;
 };
 
 struct WatchRead
@@ -123,6 +148,21 @@ struct WatchRead
     bool Valid;
     u32 Addr;
     int Size;
+};
+
+struct CheatDraft
+{
+    u32 Addr;
+    int Size;
+    u32 Value;
+    QString Name;
+};
+
+struct CheatSource
+{
+    u32 Addr;
+    int Size;
+    QString Name;
 };
 
 static u8 CPUForAddress(u32 addr)
@@ -154,6 +194,7 @@ static void PokeValue(NDS& nds, u8 cpu, u32 addr, int size, u32 value)
 static RamSnapshot TakeSnapshot(NDS& nds, RamRegion region)
 {
     RamSnapshot snap;
+    snap.Frame = nds.NumFrames;
     u32 size = 0;
     switch (region)
     {
@@ -225,6 +266,7 @@ static inline bool Matches(CompareOp op, s64 lhs, s64 rhs, s64 by)
     case CompareOp::Equal: return lhs == rhs;
     case CompareOp::NotEqual: return lhs != rhs;
     case CompareOp::DifferentBy: return lhs - rhs == by || rhs - lhs == by;
+    case CompareOp::Modulo: return by != 0 && lhs % by == rhs;
     }
     return false;
 }
@@ -321,6 +363,198 @@ static QComboBox* TypeCombo(QWidget* parent, bool withReal)
 static int SizeIndex(int size)
 {
     return size == 1 ? 0 : size == 2 ? 1 : 2;
+}
+
+static QString GameCode(DebugBridge* bridge)
+{
+    NDS* nds = bridge->instance()->getNDS();
+    if (!nds || !nds->GetNDSCart())
+        return QString();
+    return QString::fromLatin1(nds->GetNDSCart()->GetHeader().GameCode, 4);
+}
+
+static QStringList RecentWatchFiles(DebugBridge* bridge)
+{
+    QString joined = QString::fromStdString(bridge->instance()->getGlobalConfig().GetString(RecentWatchKey));
+    return joined.split('\n', Qt::SkipEmptyParts);
+}
+
+static bool BuildARCode(u32 addr, int size, u32 value, std::vector<u32>& code, QString& error)
+{
+    if (addr < MainRAMBase || addr > ARRegionEnd)
+    {
+        error = "AR constant writes reach main RAM only (02000000-02FFFFFF)";
+        return false;
+    }
+    if (addr & (size - 1))
+    {
+        error = QString("A %1-byte write needs a %1-aligned address").arg(size);
+        return false;
+    }
+    u32 op = size == 4 ? 0x0 : size == 2 ? 0x1 : 0x2;
+    u32 mask = size == 4 ? 0xFFFFFFFF : (1u << (8 * size)) - 1;
+    code = {(op << 28) | (addr & ARAddressMask), value & mask};
+    return true;
+}
+
+static QString CodeLine(const std::vector<u32>& code)
+{
+    return QString::asprintf("%08X %08X", code[0], code[1]);
+}
+
+static bool ParseCheatValue(const QString& text, int size, u32& out)
+{
+    s64 value;
+    if (!ParseInteger(text, false, value))
+        return false;
+    s64 max = size == 4 ? 0xFFFFFFFFll : (1ll << (8 * size)) - 1;
+    s64 min = -(1ll << (8 * size - 1));
+    if (value < min || value > max)
+        return false;
+    out = (u32)value & (u32)max;
+    return true;
+}
+
+static QString CheatName(DebugBridge* bridge, u32 addr, const QString& notes)
+{
+    if (!notes.trimmed().isEmpty())
+        return notes.trimmed();
+    QString symbol = bridge->symbols().describe(addr);
+    return symbol.isEmpty() ? "RAM " + Hex(addr) : symbol;
+}
+
+static bool EditCheat(DebugBridge* bridge, QWidget* parent, CheatDraft& draft, bool& enabled)
+{
+    std::vector<u32> code;
+    QDialog dlg(parent);
+    dlg.setWindowTitle("Add cheat");
+    QFormLayout* form = new QFormLayout(&dlg);
+    QLineEdit* name = new QLineEdit(draft.Name, &dlg);
+    QLineEdit* addr = new QLineEdit(Hex(draft.Addr), &dlg);
+    QComboBox* size = SizeCombo(&dlg);
+    size->setCurrentIndex(SizeIndex(draft.Size));
+    QLineEdit* value = new QLineEdit("0x" + Hex(draft.Value, draft.Size * 2), &dlg);
+    value->setToolTip("Decimal, negative, or 0x-prefixed hex");
+    QCheckBox* on = new QCheckBox("Enabled", &dlg);
+    on->setChecked(true);
+    QLabel* preview = new QLabel(&dlg);
+    preview->setFont(MonoFont());
+    preview->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    QDialogButtonBox* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    form->addRow("Name", name);
+    form->addRow("Address", addr);
+    form->addRow("Size", size);
+    form->addRow("Value", value);
+    form->addRow(QString(), on);
+    form->addRow("AR code", preview);
+    form->addRow(buttons);
+    auto update = [&] {
+        CheatDraft next = draft;
+        next.Size = 1 << size->currentIndex();
+        QString error;
+        bool ok = false;
+        if (!bridge->symbols().parseAddress(addr->text(), next.Addr))
+            error = "Enter an address or symbol";
+        else if (!ParseCheatValue(value->text(), next.Size, next.Value))
+            error = "Enter a value that fits the size";
+        else
+            ok = BuildARCode(next.Addr, next.Size, next.Value, code, error);
+        preview->setText(ok ? CodeLine(code) : error);
+        buttons->button(QDialogButtonBox::Ok)->setEnabled(ok && !name->text().trimmed().isEmpty());
+        if (ok)
+            draft = next;
+    };
+    QObject::connect(name, &QLineEdit::textChanged, &dlg, update);
+    QObject::connect(addr, &QLineEdit::textChanged, &dlg, update);
+    QObject::connect(value, &QLineEdit::textChanged, &dlg, update);
+    QObject::connect(size, &QComboBox::currentIndexChanged, &dlg, update);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    update();
+    value->setFocus();
+    value->selectAll();
+    if (dlg.exec() != QDialog::Accepted)
+        return false;
+    draft.Name = name->text().trimmed();
+    enabled = on->isChecked();
+    return true;
+}
+
+static QString CommitCheat(DebugBridge* bridge, QWidget* parent, const CheatDraft& draft, bool enabled)
+{
+    std::vector<u32> code;
+    QString error;
+    if (!BuildARCode(draft.Addr, draft.Size, draft.Value, code, error))
+        return error;
+    EmuInstance* inst = bridge->instance();
+    ARCodeFile* file = inst->getCheatFile();
+    if (!file)
+        return "No game is loaded, so there is no cheat file to add to";
+    if (file->Error)
+        return "The game's cheat file could not be read; fix it in Setup cheat codes first";
+    ARCode ar {};
+    ar.Parent = &file->RootCat;
+    ar.Name = draft.Name.toStdString();
+    ar.Enabled = enabled;
+    ar.Code = code;
+    file->RootCat.Children.emplace_back(ar);
+    QString line = CodeLine(code);
+    if (!file->Save())
+        return "Added " + line + ", but the cheat file could not be written";
+    if (!enabled)
+        return "Added " + line + " (disabled)";
+    if (!inst->getLocalConfig().GetBool("EnableCheats"))
+    {
+        MainWindow* win = inst->getMainWindow();
+        if (win && win->actEnableCheats->isEnabled()
+            && QMessageBox::question(parent, "melonDS", "Cheats are turned off. Turn them on now?") == QMessageBox::Yes)
+        {
+            win->actEnableCheats->trigger();
+            return "Added " + line + " and turned cheats on";
+        }
+        return "Added " + line + "; it runs once cheats are turned on";
+    }
+    std::vector<ARCode> codes = file->GetCodes();
+    bridge->post([codes](NDS& nds) { nds.AREngine.Cheats = codes; });
+    return "Added " + line + " and it is running";
+}
+
+static void AddCheats(DebugBridge* bridge, QWidget* parent, QLabel* info, const std::vector<CheatSource>& sources)
+{
+    if (!bridge->hasConsole())
+    {
+        info->setText("No game is running");
+        return;
+    }
+    std::vector<WatchRead> reads;
+    for (const CheatSource& s : sources)
+        reads.push_back({true, s.Addr, s.Size});
+    bridge->call(parent, [reads](NDS& nds) {
+        std::vector<u32> values;
+        values.reserve(reads.size());
+        for (const WatchRead& r : reads)
+            values.push_back(PeekValue(nds, CPUForAddress(r.Addr), r.Addr, r.Size));
+        return values;
+    }, [bridge, parent, info, sources](const std::vector<u32>& values) {
+        QString status;
+        for (size_t i = 0; i < sources.size() && i < values.size(); i++)
+        {
+            CheatDraft draft {sources[i].Addr, sources[i].Size, values[i], sources[i].Name};
+            bool enabled = true;
+            if (!EditCheat(bridge, parent, draft, enabled))
+                break;
+            status = CommitCheat(bridge, parent, draft, enabled);
+        }
+        if (!status.isEmpty())
+            info->setText(status);
+    });
+}
+
+static void OpenCheatList(DebugBridge* bridge)
+{
+    MainWindow* win = bridge->instance()->getMainWindow();
+    if (win && win->actSetupCheats->isEnabled())
+        win->actSetupCheats->trigger();
 }
 
 class RamSearchModel : public QAbstractTableModel
@@ -437,7 +671,7 @@ public:
         endResetModel();
     }
 
-    void search(const RamSnapshot& snap, const SearchFilter& filter)
+    void search(const RamSnapshot& snap, const SearchFilter& filter, bool recordUndo)
     {
         bool sign = Type == RamValueType::Signed;
         size_t n = count();
@@ -457,16 +691,58 @@ public:
                 keptChanges.push_back(changes);
             }
         }
+        if (!recordUndo && !All && kept.size() == n)
+        {
+            Changes = std::move(keptChanges);
+            Previous = snap.Data;
+            invalidateLive();
+            if (n)
+                emit dataChanged(index(0, SearchColumn::Value), index((int)n - 1, SearchColumn::Changes));
+            return;
+        }
         beginResetModel();
-        History.push_back({All, std::move(Candidates), std::move(Changes)});
-        if (History.size() > MaxUndo)
-            History.erase(History.begin());
+        if (recordUndo)
+            remember();
         All = false;
         Candidates = std::move(kept);
         Changes = std::move(keptChanges);
         Previous = snap.Data;
         invalidateLive();
         endResetModel();
+    }
+
+    void eliminate(const std::vector<std::pair<size_t, size_t>>& ranges)
+    {
+        size_t n = count();
+        std::vector<u32> kept;
+        std::vector<u32> keptChanges;
+        size_t r = 0;
+        for (size_t row = 0; row < n; row++)
+        {
+            while (r < ranges.size() && ranges[r].second < row)
+                r++;
+            if (r < ranges.size() && ranges[r].first <= row)
+                continue;
+            kept.push_back(offsetAt(row));
+            keptChanges.push_back(changesAt(row));
+        }
+        if (kept.size() == n)
+            return;
+        beginResetModel();
+        remember();
+        All = false;
+        Candidates = std::move(kept);
+        Changes = std::move(keptChanges);
+        invalidateLive();
+        endResetModel();
+    }
+
+    void clearChanges()
+    {
+        if (All || Changes.empty())
+            return;
+        std::fill(Changes.begin(), Changes.end(), 0);
+        emit dataChanged(index(0, SearchColumn::Changes), index(rowCount() - 1, SearchColumn::Changes));
     }
 
     void undo()
@@ -534,6 +810,13 @@ private:
         Generation++;
         LiveValues.clear();
     }
+
+    void remember()
+    {
+        History.push_back({All, std::move(Candidates), std::move(Changes)});
+        if (History.size() > MaxUndo)
+            History.erase(History.begin());
+    }
 };
 
 RamSearchWindow::RamSearchWindow(DebugBridge* bridge, QWidget* parent) : DebugTool(bridge, "RAM search", parent)
@@ -561,7 +844,7 @@ RamSearchWindow::RamSearchWindow(DebugBridge* bridge, QWidget* parent) : DebugTo
 
     QHBoxLayout* compare = new QHBoxLayout();
     Operator = new QComboBox(this);
-    Operator->addItems({"<", ">", "<=", ">=", "==", "!=", "different by"});
+    Operator->addItems({"<", ">", "<=", ">=", "==", "!=", "different by", "modulo N =="});
     Operator->setCurrentIndex((int)CompareOp::NotEqual);
     CompareTo = new QComboBox(this);
     CompareTo->addItems({"Previous value", "Specific value", "Specific address", "Number of changes"});
@@ -569,11 +852,12 @@ RamSearchWindow::RamSearchWindow(DebugBridge* bridge, QWidget* parent) : DebugTo
     DifferentBy = new QLineEdit(this);
     DifferentBy->setPlaceholderText("N");
     DifferentBy->setMaximumWidth(100);
+    ByLabel = new QLabel("by", this);
     compare->addWidget(new QLabel("Value", this));
     compare->addWidget(Operator);
     compare->addWidget(CompareTo);
     compare->addWidget(Operand, 1);
-    compare->addWidget(new QLabel("by", this));
+    compare->addWidget(ByLabel);
     compare->addWidget(DifferentBy);
     layout->addLayout(compare);
 
@@ -582,12 +866,18 @@ RamSearchWindow::RamSearchWindow(DebugBridge* bridge, QWidget* parent) : DebugTo
     QPushButton* searchButton = new QPushButton("Search", this);
     UndoButton = new QPushButton("Undo", this);
     UndoButton->setEnabled(false);
+    AutoSearch = new QCheckBox("Autosearch", this);
+    AutoSearch->setToolTip("Apply the filter again on every refresh while the game runs");
     QPushButton* watch = new QPushButton("Add to watch", this);
+    QPushButton* cheat = new QPushButton("Add cheat...", this);
+    cheat->setToolTip("Make an Action Replay constant write from the selected candidates");
     actions->addWidget(reset);
     actions->addWidget(searchButton);
     actions->addWidget(UndoButton);
+    actions->addWidget(AutoSearch);
     actions->addStretch();
     actions->addWidget(watch);
+    actions->addWidget(cheat);
     layout->addLayout(actions);
 
     Model = new RamSearchModel(bridge, this);
@@ -611,8 +901,25 @@ RamSearchWindow::RamSearchWindow(DebugBridge* bridge, QWidget* parent) : DebugTo
     header->setSectionResizeMode(SearchColumn::Symbol, QHeaderView::Stretch);
     layout->addWidget(Table);
 
+    QHBoxLayout* edits = new QHBoxLayout();
+    QPushButton* eliminate = new QPushButton("Remove selected", this);
+    eliminate->setToolTip("Drop the selected candidates from the results (Delete)");
+    QPushButton* clearCounts = new QPushButton("Clear changes", this);
+    clearCounts->setToolTip("Reset every candidate's change count to 0");
+    QPushButton* cheatList = new QPushButton("Cheat list...", this);
+    edits->addWidget(eliminate);
+    edits->addWidget(clearCounts);
+    edits->addStretch();
+    edits->addWidget(cheatList);
+    layout->addLayout(edits);
+
     Info = new QLabel(this);
     layout->addWidget(Info);
+
+    QAction* eliminateAction = new QAction(Table);
+    eliminateAction->setShortcut(QKeySequence::Delete);
+    eliminateAction->setShortcutContext(Qt::WidgetShortcut);
+    Table->addAction(eliminateAction);
 
     connect(Region, &QComboBox::currentIndexChanged, this, &RamSearchWindow::restart);
     connect(Size, &QComboBox::currentIndexChanged, this, &RamSearchWindow::restart);
@@ -628,6 +935,12 @@ RamSearchWindow::RamSearchWindow(DebugBridge* bridge, QWidget* parent) : DebugTo
     connect(searchButton, &QPushButton::clicked, this, &RamSearchWindow::search);
     connect(UndoButton, &QPushButton::clicked, this, &RamSearchWindow::undo);
     connect(watch, &QPushButton::clicked, this, &RamSearchWindow::addToWatch);
+    connect(cheat, &QPushButton::clicked, this, &RamSearchWindow::addCheat);
+    connect(AutoSearch, &QCheckBox::toggled, this, &RamSearchWindow::toggleAutoSearch);
+    connect(eliminate, &QPushButton::clicked, this, &RamSearchWindow::eliminateSelected);
+    connect(eliminateAction, &QAction::triggered, this, &RamSearchWindow::eliminateSelected);
+    connect(clearCounts, &QPushButton::clicked, this, &RamSearchWindow::clearChanges);
+    connect(cheatList, &QPushButton::clicked, this, [this] { OpenCheatList(Bridge); });
     connect(Table->verticalScrollBar(), &QScrollBar::valueChanged, this, &RamSearchWindow::requestRefresh);
     connect(Table, &QTableView::doubleClicked, this, [this](const QModelIndex& index) {
         if (index.column() != SearchColumn::Value)
@@ -635,6 +948,7 @@ RamSearchWindow::RamSearchWindow(DebugBridge* bridge, QWidget* parent) : DebugTo
     });
     connect(bridge, &DebugBridge::symbolsChanged, this, [this] { Model->refreshSymbols(); });
 
+    AutoClock.start();
     updateControls();
 }
 
@@ -649,7 +963,9 @@ void RamSearchWindow::updateControls()
     case CompareTarget::Address: Operand->setPlaceholderText("address or symbol+offset"); break;
     case CompareTarget::Changes: Operand->setPlaceholderText("count"); break;
     }
-    DifferentBy->setEnabled((CompareOp)Operator->currentIndex() == CompareOp::DifferentBy);
+    CompareOp op = (CompareOp)Operator->currentIndex();
+    DifferentBy->setEnabled(op == CompareOp::DifferentBy || op == CompareOp::Modulo);
+    ByLabel->setText(op == CompareOp::Modulo ? "N" : "by");
 }
 
 void RamSearchWindow::showCount(const QString& prefix)
@@ -673,6 +989,7 @@ void RamSearchWindow::restart()
     Bridge->call(this, [region](NDS& nds) { return TakeSnapshot(nds, region); },
         [this, region, size, misaligned](const RamSnapshot& snap) {
             Restarting = false;
+            SearchFrame = snap.Frame;
             Model->restart(snap, size, misaligned);
             Table->scrollToTop();
             if (snap.Data.isEmpty())
@@ -685,21 +1002,15 @@ void RamSearchWindow::restart()
 
 void RamSearchWindow::search()
 {
-    if (!Model->started())
-    {
-        restart();
-        return;
-    }
-    if (!Bridge->hasConsole())
-    {
-        Info->setText("No game is running");
-        return;
-    }
-    SearchFilter filter;
+    runSearch(false);
+}
+
+bool RamSearchWindow::readFilter(SearchFilter& filter, u32& reference)
+{
     filter.Target = (CompareTarget)CompareTo->currentIndex();
     filter.Op = (CompareOp)Operator->currentIndex();
     bool hex = (RamValueType)Display->currentIndex() == RamValueType::Hex;
-    u32 reference = 0;
+    reference = 0;
     switch (filter.Target)
     {
     case CompareTarget::Previous:
@@ -708,57 +1019,110 @@ void RamSearchWindow::search()
         if (!ParseInteger(Operand->text(), hex, filter.Operand))
         {
             Info->setText("Enter a value to compare to");
-            return;
+            return false;
         }
         break;
     case CompareTarget::Address:
         if (!Bridge->symbols().parseAddress(Operand->text(), reference))
         {
             Info->setText("Enter an address or symbol to compare to");
-            return;
+            return false;
         }
         break;
     case CompareTarget::Changes:
         if (!ParseInteger(Operand->text(), false, filter.Operand))
         {
             Info->setText("Enter a number of changes");
-            return;
+            return false;
         }
         break;
     }
-    if (filter.Op == CompareOp::DifferentBy)
+    if (filter.Op == CompareOp::DifferentBy || filter.Op == CompareOp::Modulo)
     {
         if (!ParseInteger(DifferentBy->text(), hex && filter.Target != CompareTarget::Changes, filter.By))
         {
-            Info->setText("Enter the difference N");
-            return;
+            Info->setText(filter.Op == CompareOp::Modulo ? "Enter the modulus N" : "Enter the difference N");
+            return false;
         }
         filter.By = std::llabs(filter.By);
+        if (filter.Op == CompareOp::Modulo && filter.By == 0)
+        {
+            Info->setText("The modulus N cannot be 0");
+            return false;
+        }
+    }
+    return true;
+}
+
+void RamSearchWindow::runSearch(bool automatic)
+{
+    if (!Model->started())
+    {
+        if (!automatic)
+            restart();
+        return;
+    }
+    if (!Bridge->hasConsole())
+    {
+        Info->setText("No game is running");
+        return;
+    }
+    SearchFilter filter;
+    u32 reference = 0;
+    if (!readFilter(filter, reference))
+    {
+        if (AutoSearch->isChecked())
+            AutoSearch->setChecked(false);
+        return;
     }
     RamRegion region = (RamRegion)Region->currentIndex();
     int size = Model->valueSize();
     bool useReference = filter.Target == CompareTarget::Address;
     qulonglong before = Model->count();
+    Searching = true;
+    AutoClock.restart();
     Bridge->call(this, [region, useReference, reference, size](NDS& nds) {
         RamSnapshot snap = TakeSnapshot(nds, region);
         if (useReference)
             snap.Reference = PeekValue(nds, CPUForAddress(reference), reference, size);
         return snap;
-    }, [this, filter, before](const RamSnapshot& snap) {
+    }, [this, filter, before, automatic](const RamSnapshot& snap) {
+        Searching = false;
         if (!Model->sameRegion(snap))
         {
             Model->restart(snap, 1 << Size->currentIndex(), Misaligned->isChecked());
+            SearchFrame = snap.Frame;
             showCount("The region moved or changed size, so the search restarted");
             return;
         }
+        if (automatic && snap.Frame == SearchFrame)
+            return;
+        SearchFrame = snap.Frame;
         SearchFilter applied = filter;
         if (applied.Target == CompareTarget::Address)
             applied.Operand = Model->interpret(snap.Reference);
-        Model->search(snap, applied);
+        Model->search(snap, applied, !automatic);
+        if (automatic)
+        {
+            if (Model->count() == 0)
+            {
+                AutoSearch->setChecked(false);
+                showCount("Autosearch stopped: no candidates left");
+            }
+            else
+                showCount(QString("Autosearch at frame %1").arg(snap.Frame));
+            return;
+        }
         Table->scrollToTop();
         showCount(QString("Was %1").arg(QLocale().toString(before)));
         requestRefresh();
     });
+}
+
+void RamSearchWindow::toggleAutoSearch(bool on)
+{
+    if (on)
+        runSearch(false);
 }
 
 void RamSearchWindow::undo()
@@ -766,6 +1130,20 @@ void RamSearchWindow::undo()
     Model->undo();
     showCount("Undone");
     requestRefresh();
+}
+
+std::vector<int> RamSearchWindow::selectedRows(size_t cap, size_t& total) const
+{
+    std::set<int> rows;
+    total = 0;
+    for (const QItemSelectionRange& range : Table->selectionModel()->selection())
+    {
+        total += range.height();
+        for (int r = range.top(); r <= range.bottom() && rows.size() < cap; r++)
+            if ((size_t)r < Model->count())
+                rows.insert(r);
+    }
+    return std::vector<int>(rows.begin(), rows.end());
 }
 
 void RamSearchWindow::addRowToWatch(int row)
@@ -777,14 +1155,8 @@ void RamSearchWindow::addRowToWatch(int row)
 
 void RamSearchWindow::addToWatch()
 {
-    std::set<int> rows;
     size_t selected = 0;
-    for (const QItemSelectionRange& range : Table->selectionModel()->selection())
-    {
-        selected += range.height();
-        for (int r = range.top(); r <= range.bottom() && rows.size() < (size_t)MaxWatchAdds; r++)
-            rows.insert(r);
-    }
+    std::vector<int> rows = selectedRows(MaxWatchAdds, selected);
     if (rows.empty())
     {
         Info->setText("Select candidates to add them to the watch list");
@@ -796,12 +1168,59 @@ void RamSearchWindow::addToWatch()
         Info->setText(QString("Added the first %1 selected candidates").arg(rows.size()));
 }
 
+void RamSearchWindow::addCheat()
+{
+    size_t selected = 0;
+    std::vector<int> rows = selectedRows(MaxCheatAdds, selected);
+    if (rows.empty())
+    {
+        Info->setText("Select candidates to make cheats from them");
+        return;
+    }
+    std::vector<CheatSource> sources;
+    for (int r : rows)
+    {
+        u32 addr = Model->address(r);
+        sources.push_back({addr, Model->valueSize(), CheatName(Bridge, addr, QString())});
+    }
+    AddCheats(Bridge, this, Info, sources);
+}
+
+void RamSearchWindow::eliminateSelected()
+{
+    std::vector<std::pair<size_t, size_t>> ranges;
+    for (const QItemSelectionRange& range : Table->selectionModel()->selection())
+        ranges.push_back({(size_t)range.top(), (size_t)range.bottom()});
+    if (ranges.empty())
+    {
+        Info->setText("Select candidates to remove them");
+        return;
+    }
+    std::sort(ranges.begin(), ranges.end());
+    qulonglong before = Model->count();
+    Model->eliminate(ranges);
+    showCount(QString("Removed %1").arg(QLocale().toString(before - (qulonglong)Model->count())));
+    requestRefresh();
+}
+
+void RamSearchWindow::clearChanges()
+{
+    Model->clearChanges();
+    showCount("Change counts cleared");
+}
+
 void RamSearchWindow::refresh()
 {
     if (!Model->started())
     {
         if (!Restarting)
             restart();
+        return;
+    }
+    if (AutoSearch->isChecked() && Bridge->isRunning() && AutoClock.hasExpired(AutoSearchMs)
+        && (!Searching || AutoClock.hasExpired(StaleSearchMs)))
+    {
+        runSearch(true);
         return;
     }
     int total = Model->rowCount();
@@ -872,15 +1291,40 @@ RamWatchWindow::RamWatchWindow(DebugBridge* bridge, QWidget* parent) : DebugTool
     QPushButton* remove = new QPushButton("Remove", this);
     QPushButton* up = new QPushButton("Move up", this);
     QPushButton* down = new QPushButton("Move down", this);
-    QPushButton* loadButton = new QPushButton("Load...", this);
-    QPushButton* saveButton = new QPushButton("Save...", this);
+    QPushButton* duplicate = new QPushButton("Duplicate", this);
+    QPushButton* separator = new QPushButton("Separator", this);
+    QPushButton* cheat = new QPushButton("Add cheat...", this);
+    cheat->setToolTip("Make an Action Replay constant write from the selected watches");
+    QPushButton* cheatList = new QPushButton("Cheat list...", this);
     buttons->addWidget(remove);
     buttons->addWidget(up);
     buttons->addWidget(down);
+    buttons->addWidget(duplicate);
+    buttons->addWidget(separator);
     buttons->addStretch();
-    buttons->addWidget(loadButton);
-    buttons->addWidget(saveButton);
+    buttons->addWidget(cheat);
+    buttons->addWidget(cheatList);
     layout->addLayout(buttons);
+
+    QHBoxLayout* files = new QHBoxLayout();
+    QPushButton* newButton = new QPushButton("New", this);
+    QPushButton* loadButton = new QPushButton("Load...", this);
+    QPushButton* appendButton = new QPushButton("Append...", this);
+    appendButton->setToolTip("Add the watches of another file to this list");
+    QPushButton* recentButton = new QPushButton("Recent", this);
+    RecentMenu = new QMenu(recentButton);
+    recentButton->setMenu(RecentMenu);
+    QPushButton* quickSaveButton = new QPushButton("Save", this);
+    quickSaveButton->setToolTip("Save to the file the list came from (Ctrl+S)");
+    QPushButton* saveButton = new QPushButton("Save...", this);
+    files->addWidget(newButton);
+    files->addWidget(loadButton);
+    files->addWidget(appendButton);
+    files->addWidget(recentButton);
+    files->addStretch();
+    files->addWidget(quickSaveButton);
+    files->addWidget(saveButton);
+    layout->addLayout(files);
 
     Info = new QLabel("Double-click a value to change it in memory.", this);
     layout->addWidget(Info);
@@ -889,6 +1333,13 @@ RamWatchWindow::RamWatchWindow(DebugBridge* bridge, QWidget* parent) : DebugTool
     removeAction->setShortcut(QKeySequence::Delete);
     removeAction->setShortcutContext(Qt::WidgetShortcut);
     Table->addAction(removeAction);
+
+    QAction* saveAction = new QAction(this);
+    saveAction->setShortcut(QKeySequence::Save);
+    saveAction->setShortcutContext(Qt::WindowShortcut);
+    addAction(saveAction);
+
+    setAcceptDrops(true);
 
     connect(add, &QPushButton::clicked, this, &RamWatchWindow::addFromInputs);
     connect(NewAddr, &QLineEdit::returnPressed, this, &RamWatchWindow::addFromInputs);
@@ -901,7 +1352,16 @@ RamWatchWindow::RamWatchWindow(DebugBridge* bridge, QWidget* parent) : DebugTool
     connect(removeAction, &QAction::triggered, this, &RamWatchWindow::removeSelected);
     connect(up, &QPushButton::clicked, this, [this] { moveCurrent(-1); });
     connect(down, &QPushButton::clicked, this, [this] { moveCurrent(1); });
+    connect(duplicate, &QPushButton::clicked, this, &RamWatchWindow::duplicateSelected);
+    connect(separator, &QPushButton::clicked, this, &RamWatchWindow::addSeparator);
+    connect(cheat, &QPushButton::clicked, this, &RamWatchWindow::addCheat);
+    connect(cheatList, &QPushButton::clicked, this, [this] { OpenCheatList(Bridge); });
+    connect(newButton, &QPushButton::clicked, this, &RamWatchWindow::newList);
     connect(loadButton, &QPushButton::clicked, this, &RamWatchWindow::load);
+    connect(appendButton, &QPushButton::clicked, this, &RamWatchWindow::appendFile);
+    connect(RecentMenu, &QMenu::aboutToShow, this, &RamWatchWindow::rebuildRecent);
+    connect(quickSaveButton, &QPushButton::clicked, this, &RamWatchWindow::quickSave);
+    connect(saveAction, &QAction::triggered, this, &RamWatchWindow::quickSave);
     connect(saveButton, &QPushButton::clicked, this, &RamWatchWindow::save);
     connect(Table, &QTableWidget::itemChanged, this, &RamWatchWindow::onItemChanged);
     connect(bridge, &DebugBridge::symbolsChanged, this, [this] {
@@ -911,7 +1371,12 @@ RamWatchWindow::RamWatchWindow(DebugBridge* bridge, QWidget* parent) : DebugTool
             showRow(i);
         }
     });
+    connect(bridge, &DebugBridge::consoleChanged, this, &RamWatchWindow::autoLoad);
+    connect(bridge, &DebugBridge::started, this, &RamWatchWindow::autoLoad);
     setInterval(100);
+    rebuildRecent();
+    autoLoad();
+    updateTitle();
 }
 
 void RamWatchWindow::addWatch(DebugBridge* bridge, QWidget* parent, u32 addr, int size, RamValueType type)
@@ -934,11 +1399,16 @@ void RamWatchWindow::append(const QString& expr, int size, RamValueType type, co
     w.Type = type;
     w.Notes = notes;
     resolve(w);
-    Watches.push_back(w);
-    int row = Table->rowCount();
+    insertWatch((int)Watches.size(), w);
+}
+
+void RamWatchWindow::insertWatch(int row, const Watch& w)
+{
+    Watches.insert(Watches.begin() + row, w);
     Table->insertRow(row);
     setupRow(row);
     Table->scrollToItem(Table->item(row, WatchColumn::Address));
+    markDirty();
     requestRefresh();
 }
 
@@ -952,6 +1422,12 @@ int RamWatchWindow::find(u32 addr, int size) const
 
 void RamWatchWindow::resolve(Watch& w)
 {
+    if (w.Separator)
+    {
+        w.Valid = false;
+        w.Known = false;
+        return;
+    }
     u32 old = w.Addr;
     bool wasValid = w.Valid;
     w.Valid = Bridge->symbols().parseAddress(w.Expr, w.Addr);
@@ -969,12 +1445,30 @@ int RamWatchWindow::rowOf(QWidget* widget, int column) const
 
 void RamWatchWindow::setupRow(int row)
 {
+    const Watch& w = Watches[row];
+    Qt::ItemFlags fixed = Qt::ItemIsSelectable | Qt::ItemIsEnabled;
+    Qt::ItemFlags editable = QTableWidgetItem().flags();
+    QVariant background = w.Separator ? QVariant::fromValue(palette().alternateBase()) : QVariant();
     Filling = true;
     for (int column : {WatchColumn::Address, WatchColumn::Resolved, WatchColumn::Value, WatchColumn::Notes})
-        Table->setItem(row, column, new QTableWidgetItem());
-    Table->item(row, WatchColumn::Resolved)->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled);
+    {
+        if (!Table->item(row, column))
+            Table->setItem(row, column, new QTableWidgetItem());
+        Table->item(row, column)->setData(Qt::BackgroundRole, background);
+    }
+    Table->item(row, WatchColumn::Address)->setFlags(w.Separator ? fixed : editable);
+    Table->item(row, WatchColumn::Resolved)->setFlags(fixed);
+    Table->item(row, WatchColumn::Value)->setFlags(w.Separator ? fixed : editable);
+    Table->item(row, WatchColumn::Notes)->setFlags(editable);
     Filling = false;
 
+    Table->removeCellWidget(row, WatchColumn::Size);
+    Table->removeCellWidget(row, WatchColumn::Type);
+    if (w.Separator)
+    {
+        showRow(row);
+        return;
+    }
     QComboBox* size = SizeCombo(Table);
     QComboBox* type = TypeCombo(Table, true);
     Table->setCellWidget(row, WatchColumn::Size, size);
@@ -986,6 +1480,7 @@ void RamWatchWindow::setupRow(int row)
         Watch& w = Watches[r];
         w.Size = w.Type == RamValueType::Float ? 4 : 1 << index;
         w.Known = false;
+        markDirty();
         showRow(r);
         requestRefresh();
     });
@@ -995,6 +1490,7 @@ void RamWatchWindow::setupRow(int row)
             return;
         Watch& w = Watches[r];
         w.Type = (RamValueType)index;
+        markDirty();
         if (w.Type == RamValueType::Float && w.Size != 4)
         {
             w.Size = 4;
@@ -1012,11 +1508,12 @@ void RamWatchWindow::showRow(int row)
     QString symbol = w.Valid ? Bridge->symbols().describe(w.Addr) : QString();
     Filling = true;
     Table->item(row, WatchColumn::Address)->setText(w.Expr);
-    Table->item(row, WatchColumn::Resolved)->setText(!w.Valid ? QString("?") : symbol.isEmpty() ? Hex(w.Addr) : Hex(w.Addr) + "  " + symbol);
+    Table->item(row, WatchColumn::Resolved)->setText(w.Separator ? QString() : !w.Valid ? QString("?") : symbol.isEmpty() ? Hex(w.Addr) : Hex(w.Addr) + "  " + symbol);
     Table->item(row, WatchColumn::Notes)->setText(w.Notes);
     Filling = false;
-    QComboBox* size = static_cast<QComboBox*>(Table->cellWidget(row, WatchColumn::Size));
-    QComboBox* type = static_cast<QComboBox*>(Table->cellWidget(row, WatchColumn::Type));
+    QComboBox* size = qobject_cast<QComboBox*>(Table->cellWidget(row, WatchColumn::Size));
+    QComboBox* type = qobject_cast<QComboBox*>(Table->cellWidget(row, WatchColumn::Type));
+    if (size && type)
     {
         QSignalBlocker blockSize(size);
         QSignalBlocker blockType(type);
@@ -1030,13 +1527,15 @@ void RamWatchWindow::showValue(int row)
 {
     const Watch& w = Watches[row];
     Filling = true;
-    Table->item(row, WatchColumn::Value)->setText(!w.Valid ? QString("bad address") : w.Known ? FormatValue(w.Raw, w.Size, w.Type) : QString());
+    Table->item(row, WatchColumn::Value)->setText(w.Separator ? QString() : !w.Valid ? QString("bad address") : w.Known ? FormatValue(w.Raw, w.Size, w.Type) : QString());
     Filling = false;
 }
 
 void RamWatchWindow::pokeValue(int row, const QString& text)
 {
     Watch& w = Watches[row];
+    if (w.Separator)
+        return;
     u32 raw;
     if (!w.Valid || !ParseRaw(text, w.Size, w.Type, raw))
     {
@@ -1067,6 +1566,7 @@ void RamWatchWindow::onItemChanged(QTableWidgetItem* item)
     case WatchColumn::Address:
         w.Expr = item->text().trimmed();
         resolve(w);
+        markDirty();
         showRow(row);
         requestRefresh();
         break;
@@ -1075,6 +1575,7 @@ void RamWatchWindow::onItemChanged(QTableWidgetItem* item)
         break;
     case WatchColumn::Notes:
         w.Notes = item->text();
+        markDirty();
         break;
     }
 }
@@ -1102,6 +1603,8 @@ void RamWatchWindow::removeSelected()
         Table->removeRow(r);
         Watches.erase(Watches.begin() + r);
     }
+    if (!rows.empty())
+        markDirty();
 }
 
 void RamWatchWindow::moveCurrent(int delta)
@@ -1111,53 +1614,184 @@ void RamWatchWindow::moveCurrent(int delta)
     if (row < 0 || target < 0 || target >= (int)Watches.size())
         return;
     std::swap(Watches[row], Watches[target]);
-    showRow(row);
-    showRow(target);
+    setupRow(row);
+    setupRow(target);
     Table->selectRow(target);
+    markDirty();
 }
 
-void RamWatchWindow::save()
+void RamWatchWindow::duplicateSelected()
 {
-    QString path = QFileDialog::getSaveFileName(this, "Save watches", "watches.txt", "Text (*.txt)");
-    if (path.isEmpty())
+    int row = Table->currentRow();
+    if (row < 0 || row >= (int)Watches.size())
+    {
+        Info->setText("Select a watch to duplicate");
         return;
+    }
+    Watch copy = Watches[row];
+    copy.Known = false;
+    insertWatch(row + 1, copy);
+    Table->selectRow(row + 1);
+}
+
+void RamWatchWindow::addSeparator()
+{
+    Watch w;
+    w.Separator = true;
+    w.Notes = SeparatorNotes;
+    int row = Table->currentRow();
+    int at = row >= 0 && row < (int)Watches.size() ? row + 1 : (int)Watches.size();
+    insertWatch(at, w);
+    Table->selectRow(at);
+}
+
+void RamWatchWindow::addCheat()
+{
+    std::vector<int> rows;
+    for (const QModelIndex& index : Table->selectionModel()->selectedRows())
+        rows.push_back(index.row());
+    std::sort(rows.begin(), rows.end());
+    std::vector<CheatSource> sources;
+    for (int r : rows)
+    {
+        const Watch& w = Watches[r];
+        if (!w.Separator && w.Valid && sources.size() < MaxCheatAdds)
+            sources.push_back({w.Addr, w.Size, CheatName(Bridge, w.Addr, w.Notes)});
+    }
+    if (sources.empty())
+    {
+        Info->setText("Select watches with a resolved address to make cheats from them");
+        return;
+    }
+    AddCheats(Bridge, this, Info, sources);
+}
+
+void RamWatchWindow::markDirty()
+{
+    if (Dirty)
+        return;
+    Dirty = true;
+    updateTitle();
+}
+
+void RamWatchWindow::updateTitle()
+{
+    QString title = "RAM watch";
+    if (!CurrentFile.isEmpty())
+        title += " - " + QFileInfo(CurrentFile).fileName();
+    if (Dirty && !Watches.empty())
+        title += " *";
+    setWindowTitle(title);
+}
+
+bool RamWatchWindow::askSave()
+{
+    if (!Dirty || Watches.empty())
+        return true;
+    QMessageBox::StandardButton answer = QMessageBox::question(this, "melonDS", "Save changes to the watch list?",
+        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+    if (answer == QMessageBox::Cancel)
+        return false;
+    if (answer == QMessageBox::Save)
+    {
+        quickSave();
+        return !Dirty;
+    }
+    return true;
+}
+
+void RamWatchWindow::newList()
+{
+    if (!askSave())
+        return;
+    Table->setRowCount(0);
+    Watches.clear();
+    CurrentFile.clear();
+    Dirty = false;
+    updateTitle();
+    Info->setText("Started a new watch list");
+}
+
+bool RamWatchWindow::writeFile(const QString& path)
+{
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Text))
     {
         QMessageBox::warning(this, "melonDS", "Cannot write " + path);
-        return;
+        return false;
     }
     QTextStream out(&f);
     for (const Watch& w : Watches)
     {
         QString expr = w.Expr;
         QString notes = w.Notes;
-        out << expr.replace('\t', ' ') << '\t' << w.Size << '\t' << TypeNames[(int)w.Type] << '\t' << notes.replace('\t', ' ') << '\n';
+        if (w.Separator)
+            out << "-\t0\t" << SeparatorType << '\t' << notes.replace('\t', ' ') << '\n';
+        else
+            out << expr.replace('\t', ' ') << '\t' << w.Size << '\t' << TypeNames[(int)w.Type] << '\t' << notes.replace('\t', ' ') << '\n';
     }
+    CurrentFile = path;
+    Dirty = false;
+    rememberFile(path);
+    updateTitle();
     Info->setText(QString("Saved %1 watches to %2").arg(Watches.size()).arg(path));
+    return true;
 }
 
-void RamWatchWindow::load()
+void RamWatchWindow::save()
 {
-    QString path = QFileDialog::getOpenFileName(this, "Load watches", QString(), "Text (*.txt);;All files (*)");
+    QString path = QFileDialog::getSaveFileName(this, "Save watches", CurrentFile.isEmpty() ? QString("watches.txt") : CurrentFile, "Text (*.txt)");
     if (path.isEmpty())
         return;
+    writeFile(path);
+}
+
+void RamWatchWindow::quickSave()
+{
+    if (CurrentFile.isEmpty())
+    {
+        save();
+        return;
+    }
+    if (!Dirty)
+    {
+        Info->setText("No changes since the last save to " + CurrentFile);
+        return;
+    }
+    writeFile(CurrentFile);
+}
+
+bool RamWatchWindow::readFile(const QString& path, bool clear)
+{
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
     {
         QMessageBox::warning(this, "melonDS", "Cannot read " + path);
-        return;
+        return false;
     }
-    Table->setRowCount(0);
-    Watches.clear();
+    if (clear)
+    {
+        Table->setRowCount(0);
+        Watches.clear();
+    }
     QTextStream in(&f);
     int skipped = 0;
+    int added = 0;
     while (!in.atEnd())
     {
         QString line = in.readLine();
         if (line.trimmed().isEmpty())
             continue;
         QStringList fields = line.contains('\t') ? line.split('\t') : line.simplified().split(' ');
+        if (fields.size() >= 3 && fields[2].trimmed().compare(QString(SeparatorType), Qt::CaseInsensitive) == 0)
+        {
+            Watch sep;
+            sep.Separator = true;
+            sep.Notes = fields.mid(3).join(' ').trimmed();
+            insertWatch((int)Watches.size(), sep);
+            added++;
+            continue;
+        }
         bool ok = fields.size() >= 3;
         int size = ok ? fields[1].trimmed().toInt(&ok) : 0;
         int type = -1;
@@ -1170,9 +1804,109 @@ void RamWatchWindow::load()
             continue;
         }
         append(fields[0].trimmed(), size, (RamValueType)type, fields.mid(3).join(' ').trimmed());
+        added++;
     }
-    Info->setText(skipped ? QString("Loaded %1 watches, skipped %2 unreadable lines").arg(Watches.size()).arg(skipped)
-                          : QString("Loaded %1 watches").arg(Watches.size()));
+    if (clear)
+    {
+        CurrentFile = path;
+        Dirty = false;
+        rememberFile(path);
+    }
+    updateTitle();
+    Info->setText(skipped ? QString("Loaded %1 watches, skipped %2 unreadable lines").arg(added).arg(skipped)
+                          : QString("Loaded %1 watches").arg(added));
+    return true;
+}
+
+void RamWatchWindow::load()
+{
+    if (!askSave())
+        return;
+    QString path = QFileDialog::getOpenFileName(this, "Load watches", QString(), "Text (*.txt);;All files (*)");
+    if (path.isEmpty())
+        return;
+    readFile(path, true);
+}
+
+void RamWatchWindow::appendFile()
+{
+    QString path = QFileDialog::getOpenFileName(this, "Append watches", QString(), "Text (*.txt);;All files (*)");
+    if (path.isEmpty())
+        return;
+    readFile(path, false);
+}
+
+void RamWatchWindow::rememberFile(const QString& path)
+{
+    Config::Table& cfg = Bridge->instance()->getGlobalConfig();
+    QStringList recent = RecentWatchFiles(Bridge);
+    recent.removeAll(path);
+    recent.prepend(path);
+    while (recent.size() > MaxRecentWatchFiles)
+        recent.removeLast();
+    cfg.SetString(RecentWatchKey, recent.join('\n').toStdString());
+    QString code = GameCode(Bridge);
+    if (!code.isEmpty())
+    {
+        cfg.SetString(WatchGameKey + code.toStdString(), path.toStdString());
+        LoadedGame = code;
+    }
+    Config::Save();
+}
+
+void RamWatchWindow::rebuildRecent()
+{
+    RecentMenu->clear();
+    QStringList recent = RecentWatchFiles(Bridge);
+    for (const QString& path : recent)
+        RecentMenu->addAction(path, this, [this, path] {
+            if (askSave())
+                readFile(path, true);
+        });
+    if (recent.isEmpty())
+        RecentMenu->addAction("No recent watch files")->setEnabled(false);
+}
+
+void RamWatchWindow::autoLoad()
+{
+    QString code = GameCode(Bridge);
+    if (code.isEmpty() || code == LoadedGame || (Dirty && !Watches.empty()))
+        return;
+    LoadedGame = code;
+    QString path = QString::fromStdString(Bridge->instance()->getGlobalConfig().GetString(WatchGameKey + code.toStdString()));
+    if (path.isEmpty() || path == CurrentFile || !QFile::exists(path))
+        return;
+    if (readFile(path, true))
+        Info->setText(QString("Loaded the %1 watch list %2").arg(code, path));
+}
+
+void RamWatchWindow::closeEvent(QCloseEvent* event)
+{
+    if (!askSave())
+    {
+        event->ignore();
+        return;
+    }
+    DebugTool::closeEvent(event);
+}
+
+void RamWatchWindow::dragEnterEvent(QDragEnterEvent* event)
+{
+    if (event->mimeData()->hasUrls())
+        event->acceptProposedAction();
+}
+
+void RamWatchWindow::dropEvent(QDropEvent* event)
+{
+    QList<QUrl> urls = event->mimeData()->urls();
+    if (urls.isEmpty() || !urls.first().isLocalFile())
+        return;
+    QString path = urls.first().toLocalFile();
+    event->acceptProposedAction();
+    QTimer::singleShot(0, this, [this, path] {
+        if (askSave())
+            readFile(path, true);
+    });
 }
 
 void RamWatchWindow::refresh()

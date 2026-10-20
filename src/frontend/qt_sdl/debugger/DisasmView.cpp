@@ -62,9 +62,10 @@ void DisasmView::setCPU(int cpu)
 void DisasmView::setMode(Mode mode)
 {
     ViewMode = mode;
-    Thumb = mode == mode_Thumb;
+    Thumb = mode == mode_Thumb || (mode == mode_Auto && PCValid && PCThumb);
     layoutRows();
     viewport()->update();
+    emit modeChanged(mode);
 }
 
 void DisasmView::setPC(u32 pc, bool thumb, bool valid)

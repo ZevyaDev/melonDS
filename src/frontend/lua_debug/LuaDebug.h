@@ -46,6 +46,7 @@ struct Host
 void Register(lua_State* L, Host host);
 void Unregister(lua_State* L);
 void RunFrameEnd(lua_State* L);
+std::function<void(bool)> FrameHook(lua_State* L, void (*fn)(lua_State*, bool));
 int CPUArg(lua_State* L, int idx, int def);
 
 class Guard

@@ -27,11 +27,13 @@ class QCheckBox;
 class QComboBox;
 class QLabel;
 class QLineEdit;
+class QMenu;
 class QPushButton;
 class QTableView;
 class QTableWidget;
 class QTableWidgetItem;
 class RamSearchModel;
+struct SearchFilter;
 
 enum class RamValueType
 {
@@ -61,17 +63,29 @@ private:
     QLineEdit* Operand;
     QComboBox* Operator;
     QLineEdit* DifferentBy;
+    QLabel* ByLabel;
     QPushButton* UndoButton;
+    QCheckBox* AutoSearch;
     QTableView* Table;
     RamSearchModel* Model;
     QLabel* Info;
     bool Restarting = false;
+    bool Searching = false;
+    melonDS::u32 SearchFrame = 0;
+    QElapsedTimer AutoClock;
 
     void restart();
     void search();
+    void runSearch(bool automatic);
+    bool readFilter(SearchFilter& filter, melonDS::u32& reference);
+    void toggleAutoSearch(bool on);
     void undo();
     void addToWatch();
     void addRowToWatch(int row);
+    void addCheat();
+    void eliminateSelected();
+    void clearChanges();
+    std::vector<int> selectedRows(size_t cap, size_t& total) const;
     void updateControls();
     void showCount(const QString& prefix);
 };
@@ -88,6 +102,9 @@ public:
 
 protected:
     void refresh() override;
+    void closeEvent(QCloseEvent* event) override;
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
 
 private:
     struct Watch
@@ -96,6 +113,7 @@ private:
         int Size = 4;
         RamValueType Type = RamValueType::Hex;
         QString Notes;
+        bool Separator = false;
         bool Valid = false;
         melonDS::u32 Addr = 0;
         melonDS::u32 Raw = 0;
@@ -108,14 +126,33 @@ private:
     QLineEdit* NewNotes;
     QTableWidget* Table;
     QLabel* Info;
+    QMenu* RecentMenu;
     std::vector<Watch> Watches;
     bool Filling = false;
+    bool Dirty = false;
+    QString CurrentFile;
+    QString LoadedGame;
 
     void addFromInputs();
+    void insertWatch(int row, const Watch& w);
     void removeSelected();
     void moveCurrent(int delta);
+    void duplicateSelected();
+    void addSeparator();
+    void addCheat();
+    void newList();
     void save();
+    void quickSave();
     void load();
+    void appendFile();
+    bool readFile(const QString& path, bool clear);
+    bool writeFile(const QString& path);
+    bool askSave();
+    void autoLoad();
+    void rememberFile(const QString& path);
+    void rebuildRecent();
+    void markDirty();
+    void updateTitle();
     void resolve(Watch& w);
     void setupRow(int row);
     void showRow(int row);

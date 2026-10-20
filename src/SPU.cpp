@@ -859,7 +859,16 @@ void SPUCaptureUnit::Run(u32 cycles, s32 sample)
 void SPU::Mix(u32 spucycles)
 {
     s32 left = 0, right = 0;
+    s32 mutedLeft = 0, mutedRight = 0;
     s32 leftoutput = 0, rightoutput = 0;
+
+    auto pan = [&](int num, s32 sample)
+    {
+        if (DebugMute & (1 << num))
+            Channels[num].PanOutput(sample, mutedLeft, mutedRight);
+        else
+            Channels[num].PanOutput(sample, left, right);
+    };
 
     if (Cnt & (1<<15))
     {
@@ -869,26 +878,27 @@ void SPU::Mix(u32 spucycles)
         s32 ch3 = Channels[3].DoRun(spucycles);
 
         // TODO: addition from capture registers
-        Channels[0].PanOutput(ch0, left, right);
-        Channels[2].PanOutput(ch2, left, right);
+        pan(0, ch0);
+        pan(2, ch2);
 
-        if (!(Cnt & (1<<12))) Channels[1].PanOutput(ch1, left, right);
-        if (!(Cnt & (1<<13))) Channels[3].PanOutput(ch3, left, right);
+        if (!(Cnt & (1<<12))) pan(1, ch1);
+        if (!(Cnt & (1<<13))) pan(3, ch3);
 
         for (int i = 4; i < 16; i++)
-        {
-            SPUChannel* chan = &Channels[i];
+            pan(i, Channels[i].DoRun(spucycles));
 
-            s32 channel = chan->DoRun(spucycles);
-            chan->PanOutput(channel, left, right);
-        }
+        s32 captureLeft = DebugCaptureMuted ? left + mutedLeft : left;
+        s32 captureRight = DebugCaptureMuted ? right + mutedRight : right;
+
+        if (DebugMute & (1 << 1)) ch1 = 0;
+        if (DebugMute & (1 << 3)) ch3 = 0;
 
         // sound capture
         // TODO: other sound capture sources, along with their bugs
 
         if (Capture[0].Cnt & (1<<7))
         {
-            s32 val = left;
+            s32 val = captureLeft;
 
             val >>= 8;
             if      (val < -0x8000) val = -0x8000;
@@ -899,7 +909,7 @@ void SPU::Mix(u32 spucycles)
 
         if (Capture[1].Cnt & (1<<7))
         {
-            s32 val = right;
+            s32 val = captureRight;
 
             val >>= 8;
             if      (val < -0x8000) val = -0x8000;
@@ -988,6 +998,12 @@ void SPU::Mix(u32 spucycles)
     {
         output[0] = (s16)std::clamp(leftoutput, -0x8000, 0x7FFF);
         output[1] = (s16)std::clamp(rightoutput, -0x8000, 0x7FFF);
+    }
+
+    if (DebugCapture)
+    {
+        DebugCapture->push_back(output[0]);
+        DebugCapture->push_back(output[1]);
     }
 
     NDS.Mic.Advance(spucycles << 1);

@@ -36,6 +36,7 @@
 
 class EmuInstance;
 class DebugSymbols;
+class FrameTools;
 
 class DebugBridge : public QObject
 {
@@ -49,6 +50,7 @@ public:
 
     EmuInstance* instance() const { return Inst; }
     DebugSymbols& symbols() { return *Symbols; }
+    FrameTools& frames() { return *Frames; }
 
     void post(Job job);
     bool run(const Job& job, int timeoutMs = 2000);
@@ -118,6 +120,7 @@ private:
 
     EmuInstance* Inst;
     std::unique_ptr<DebugSymbols> Symbols;
+    std::unique_ptr<FrameTools> Frames;
     std::vector<QPointer<QWidget>> Windows;
 
     mutable std::mutex ConsoleLock;

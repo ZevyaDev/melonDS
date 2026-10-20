@@ -37,6 +37,9 @@ public:
     bool flagClosed;
     void onLuaSaveState(QString);
     void onLuaLoadState(QString);
+    void loadScript(const QString& path);
+    QStringList recentScripts();
+    class QFileSystemWatcher* watcher;
 protected:
     void closeEvent(QCloseEvent *event) override;
     LuaBundle* bundle;

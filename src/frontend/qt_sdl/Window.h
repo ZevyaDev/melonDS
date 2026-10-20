@@ -32,6 +32,9 @@
 #include <QMutex>
 #include <QScreen>
 #include <QCloseEvent>
+#include <QPointer>
+
+#include <vector>
 
 #include "Screen.h"
 #include "Config.h"
@@ -56,6 +59,9 @@ public:
     Config::Table& getWindowConfig() { return windowCfg; }
 
     LuaConsoleDialog* getLuaDialog() {return luaDialog;}
+    std::vector<LuaConsoleDialog*> getLuaDialogs();
+    void openLuaWindow();
+    void closeLuaWindows();
 
     int getWindowID() { return windowID; }
 
@@ -226,6 +232,7 @@ private:
     EmuInstance* emuInstance;
     EmuThread* emuThread;
     LuaConsoleDialog* luaDialog=nullptr;
+    std::vector<QPointer<LuaConsoleDialog>> moreLuaDialogs;
 
     Config::Table& globalCfg;
     Config::Table& localCfg;

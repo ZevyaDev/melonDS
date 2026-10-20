@@ -22,6 +22,11 @@
 #include "debugger/DebugTool.h"
 #include "debugger/DebugTools.h"
 #include "Platform.h"
+#include "NDSCart.h"
+#include "SPI_Firmware.h"
+#include <algorithm>
+#include <array>
+#include <utility>
 #include <QPainter>
 #include <QGraphicsTextItem>
 #include <QTextCursor>
@@ -466,15 +471,20 @@ MemViewDialog::MemViewDialog(QWidget* parent) : QDialog(parent)
     this->SetValAddr->setObjectName("lineedit_setval_addr");
 
     this->MemRegionBox->setGeometry(7, 218, 145, 32);
-    this->MemRegionBox->addItem("Default");
-    this->MemRegionBox->addItem("ITCM");
-    this->MemRegionBox->addItem("Main");
-    this->MemRegionBox->addItem("DTCM");
-    this->MemRegionBox->addItem("Shared WRAM");
-    this->MemRegionBox->addItem("Palettes");
-    this->MemRegionBox->addItem("OAM");
-    this->MemRegionBox->addItem("ARM9-BIOS");
+    this->FillRegions();
     this->MemRegionBox->setObjectName("combobox_mem_region");
+
+    this->SpaceBox = new QComboBox(this);
+    this->SpaceBox->setGeometry(7, 296, 145, 30);
+    this->SpaceBox->addItems({"ARM9 bus", "ARM7 bus", "Cart ROM", "Firmware"});
+    this->SpaceBox->setObjectName("combobox_space");
+    connect(this->SpaceBox, &QComboBox::currentIndexChanged, this, [this](int index) { this->SetSpace(index); });
+
+    QPushButton* textDump = new QPushButton("Text dump", this);
+    textDump->setGeometry(600, 364, 122, 32);
+    textDump->setObjectName("pushbutton_textdump");
+    textDump->setToolTip("Save the region as hex and ASCII text");
+    connect(textDump, &QPushButton::clicked, this, [this] { this->DumpSpace(true); });
 
     // initialize the scene
     QString text;
@@ -677,8 +687,93 @@ int MemViewDialog::GetAddressFromItem(CustomTextItem* item)
     return -1;
 }
 
+void MemViewDialog::FillRegions()
+{
+    QSignalBlocker block(this->MemRegionBox);
+    this->MemRegionBox->clear();
+    switch (this->Space)
+    {
+        case DebugTools::memSpace_ARM7:
+            this->MemRegionBox->addItems({"Default", "ARM7-BIOS", "Main", "Shared WRAM", "ARM7 WRAM", "VRAM"});
+            break;
+        case DebugTools::memSpace_CartROM:
+            this->MemRegionBox->addItem("Cart ROM");
+            break;
+        case DebugTools::memSpace_Firmware:
+            this->MemRegionBox->addItem("Firmware");
+            break;
+        default:
+            this->MemRegionBox->addItems({"Default", "ITCM", "Main", "DTCM", "Shared WRAM", "Palettes", "OAM", "ARM9-BIOS"});
+            break;
+    }
+}
+
+void MemViewDialog::SetSpace(int space)
+{
+    if (space < 0 || space > DebugTools::memSpace_Firmware)
+    {
+        return;
+    }
+    this->Space = space;
+    this->CacheValid = false;
+    if (this->SpaceBox->currentIndex() != space)
+    {
+        QSignalBlocker block(this->SpaceBox);
+        this->SpaceBox->setCurrentIndex(space);
+    }
+    this->FillRegions();
+    this->MemRegionBox->setCurrentIndex(0);
+    this->onMemRegionIndexChanged(0);
+}
+
+void MemViewDialog::RequestCache()
+{
+    if (this->CachePending)
+    {
+        return;
+    }
+    uint32_t base = ((uint32_t)this->ScrollBar->value() + 0xF) & ~0xFu;
+    int space = this->Space;
+    this->CachePending = true;
+    this->GetBridge()->call(this, [base, space](melonDS::NDS& nds) {
+        std::array<uint8_t, 256> data;
+        data.fill(0);
+        const melonDS::NDSCart::CartCommon* cart = nds.GetNDSCart();
+        const melonDS::Firmware& fw = nds.GetFirmware();
+        for (uint32_t i = 0; i < 256; i++)
+        {
+            uint32_t addr = base + i;
+            if (space == DebugTools::memSpace_ARM7)
+                data[i] = nds.Debugger.Peek(1, addr, 1);
+            else if (space == DebugTools::memSpace_CartROM)
+                data[i] = cart && cart->GetROM() && addr < cart->GetROMLength() ? cart->GetROM()[addr] : 0xFF;
+            else if (fw.Buffer() && addr < fw.Length())
+                data[i] = fw.Buffer()[addr];
+        }
+        return std::make_pair(base, data);
+    }, [this, space](const std::pair<uint32_t, std::array<uint8_t, 256>>& result) {
+        this->CachePending = false;
+        if (space != this->Space)
+        {
+            return;
+        }
+        this->CacheBase = result.first;
+        memcpy(this->Cache, result.second.data(), 256);
+        this->CacheValid = true;
+    });
+}
+
 void* MemViewDialog::GetRAM(uint32_t address)
 {
+    if (this->Space != DebugTools::memSpace_ARM9)
+    {
+        if (this->CacheValid && address - this->CacheBase < 256)
+        {
+            return &this->Cache[address - this->CacheBase];
+        }
+        return nullptr;
+    }
+
     melonDS::NDS* nds = this->GetNDS();
 
     if (nds != nullptr)
@@ -789,6 +884,11 @@ void MemViewDialog::SwitchMemRegion(uint32_t address) {
 
 void MemViewDialog::UpdateScene()
 {
+    if (this->Space != DebugTools::memSpace_ARM9)
+    {
+        this->RequestCache();
+    }
+
     this->UpdateThread->Pause();
 
     for (int i = 0; i < 16; i++)
@@ -908,7 +1008,18 @@ void MemViewDialog::GoToAddress(const QString &text)
     // change memory region if necessary
     if (addr < this->ARM9AddrStart || addr > this->ARM9AddrEnd + 0x100)
     {
-        this->SwitchMemRegion(addr);
+        if (this->Space == DebugTools::memSpace_ARM9)
+        {
+            this->SwitchMemRegion(addr);
+        }
+        else if (this->Space == DebugTools::memSpace_ARM7)
+        {
+            this->MemRegionBox->setCurrentIndex(0);
+        }
+        else
+        {
+            return;
+        }
     }
 
     // scroll bars are dumb and the `value()` method doesn't always return what you want as the step
@@ -957,7 +1068,33 @@ void MemViewDialog::onValueBtnSetPressed()
     int base = isHex == true ? 16 : 10;
     u32 value = text.toUInt(0, base);
     u8 size = 1 << this->SetValBits->currentIndex();
-    this->GetBridge()->post([address, size, value](melonDS::NDS& nds) { nds.Debugger.Poke(0, address, size, value); });
+    this->PokeSpace(address, size, value);
+}
+
+void MemViewDialog::PokeSpace(uint32_t address, u8 size, u32 value)
+{
+    int space = this->Space;
+    if (space == DebugTools::memSpace_CartROM)
+    {
+        return;
+    }
+    u8 cpu = this->SpaceCPU();
+    this->CacheValid = false;
+    this->GetBridge()->post([space, cpu, address, size, value](melonDS::NDS& nds) {
+        if (space != DebugTools::memSpace_Firmware)
+        {
+            nds.Debugger.Poke(cpu, address, size, value);
+            return;
+        }
+        melonDS::Firmware& fw = nds.GetFirmware();
+        for (u8 i = 0; i < size; i++)
+        {
+            if (fw.Buffer() && address + i < fw.Length())
+            {
+                fw.Buffer()[address + i] = value >> (8 * i);
+            }
+        }
+    });
 }
 
 void MemViewDialog::onApplyEditToRAM(uint8_t value, QGraphicsItem *focus)
@@ -968,7 +1105,7 @@ void MemViewDialog::onApplyEditToRAM(uint8_t value, QGraphicsItem *focus)
         return;
     }
 
-    this->GetBridge()->post([addr, value](melonDS::NDS& nds) { nds.Debugger.Poke(0, addr, 1, value); });
+    this->PokeSpace(addr, 1, value);
 }
 
 DebugBridge* MemViewDialog::GetBridge()
@@ -986,12 +1123,29 @@ void MemViewDialog::UpdateInfo()
     }
     DebugBridge* bridge = this->GetBridge();
     QString text = Hex(addr);
-    QString sym = bridge->symbols().describe(addr);
+    uint8_t bytes[4];
+    bool readable = true;
+    for (int i = 0; i < 4 && readable; i++)
+    {
+        uint8_t* p = (uint8_t*)this->GetRAM(addr + i);
+        readable = p != nullptr;
+        bytes[i] = readable ? *p : 0;
+    }
+    if (readable)
+    {
+        u16 half = bytes[0] | (bytes[1] << 8);
+        u32 word = half | (bytes[2] << 16) | ((u32)bytes[3] << 24);
+        text += QString("  s8 %1 u16 %2 s16 %3 u32 %4 s32 %5 fx32 %6 BE %7")
+            .arg((melonDS::s8)bytes[0]).arg(half).arg((melonDS::s16)half).arg(word).arg((melonDS::s32)word)
+            .arg((melonDS::s32)word / 4096.0, 0, 'f', 4).arg(Hex((word >> 24) | ((word >> 8) & 0xFF00) | ((word << 8) & 0xFF0000) | (word << 24)));
+    }
+    QString sym = this->Space <= DebugTools::memSpace_ARM7 ? bridge->symbols().describe(addr) : QString();
     if (!sym.isEmpty())
     {
         text += "  " + sym;
     }
     this->InfoLabel->setText(text);
+    this->InfoLabel->setToolTip(text);
     bridge->call(this, [addr](melonDS::NDS& nds) { return nds.Debugger.GetLastWriter(addr); },
         [this, addr, text](const u32& writer) {
             if (this->GetFocusAddress(this->GfxScene->focusItem()) != addr || !writer)
@@ -1013,8 +1167,14 @@ void MemViewDialog::AddWatch(u8 flags)
     {
         return;
     }
+    if (this->Space >= DebugTools::memSpace_CartROM)
+    {
+        this->InfoLabel->setText("Watchpoints need the ARM9 or ARM7 bus");
+        return;
+    }
     u32 size = 1 << this->SetValBits->currentIndex();
-    this->GetBridge()->post([addr, size, flags](melonDS::NDS& nds) { nds.Debugger.AddWatchpoint(1, addr, size, flags); });
+    u8 mask = this->Space == DebugTools::memSpace_ARM7 ? 2 : 1;
+    this->GetBridge()->post([addr, size, flags, mask](melonDS::NDS& nds) { nds.Debugger.AddWatchpoint(mask, addr, size, flags); });
     this->InfoLabel->setText(QString("Watchpoint on %1 (%2 bytes); see the Debugger window").arg(Hex(addr)).arg(size));
 }
 
@@ -1153,6 +1313,37 @@ void MemViewDialog::onScrollBarValueChanged(int value) {
 void MemViewDialog::onMemRegionIndexChanged(int index) {
     melonDS::NDS* nds = this->GetNDS();
 
+    if (nds != nullptr && this->Space != DebugTools::memSpace_ARM9) {
+        static const uint32_t arm7Ranges[6][2] = {
+            {0x00000000, 0x08000000}, {0x00000000, 0x00004000}, {0x02000000, 0x02400000},
+            {0x03000000, 0x03008000}, {0x03800000, 0x03810000}, {0x06000000, 0x06040000},
+        };
+        uint32_t newStart = 0;
+        uint32_t newEnd = 0;
+        if (this->Space == DebugTools::memSpace_ARM7)
+        {
+            if (index < 0 || index >= 6)
+            {
+                return;
+            }
+            newStart = arm7Ranges[index][0];
+            newEnd = arm7Ranges[index][1];
+        }
+        else if (this->Space == DebugTools::memSpace_CartROM)
+        {
+            const melonDS::NDSCart::CartCommon* cart = nds->GetNDSCart();
+            newEnd = cart ? cart->GetROMLength() : 0;
+        }
+        else
+        {
+            newEnd = nds->GetFirmware().Length();
+        }
+        this->CacheValid = false;
+        this->UpdateViewRegion(newStart, std::max<uint32_t>(newEnd, newStart + 0x100));
+        this->DumpBtn->setText("Dump " + this->MemRegionBox->currentText());
+        return;
+    }
+
     if (nds != nullptr) {
         uint32_t newStart;
         uint32_t newEnd;
@@ -1214,8 +1405,83 @@ void MemViewDialog::onUpdateSceneSignal()
     this->Highlight = false;
 }
 
+void MemViewDialog::DumpSpace(bool text)
+{
+    QString filter = text ? "Text files (*.txt)" : "Binary files (*.bin)";
+    QString path = QFileDialog::getSaveFileName(this, "Save memory dump to... - melonDS", QDir::currentPath(), filter);
+    if (path.isEmpty())
+    {
+        return;
+    }
+    QString suffix = text ? ".txt" : ".bin";
+    if (!path.endsWith(suffix))
+    {
+        path.append(suffix);
+    }
+    uint32_t start = this->ARM9AddrStart;
+    uint32_t size = this->ARM9AddrEnd - this->ARM9AddrStart;
+    int space = this->Space;
+    QByteArray data;
+    bool ok = this->GetBridge()->run([&](melonDS::NDS& nds) {
+        data.resize(size);
+        const melonDS::NDSCart::CartCommon* cart = nds.GetNDSCart();
+        const melonDS::Firmware& fw = nds.GetFirmware();
+        for (uint32_t i = 0; i < size; i++)
+        {
+            uint32_t addr = start + i;
+            uint8_t value = 0;
+            if (space == DebugTools::memSpace_ARM9 || space == DebugTools::memSpace_ARM7)
+                value = nds.Debugger.Peek(space == DebugTools::memSpace_ARM7 ? 1 : 0, addr, 1);
+            else if (space == DebugTools::memSpace_CartROM)
+                value = cart && cart->GetROM() && addr < cart->GetROMLength() ? cart->GetROM()[addr] : 0xFF;
+            else if (fw.Buffer() && addr < fw.Length())
+                value = fw.Buffer()[addr];
+            data[i] = (char)value;
+        }
+    }, 30000);
+    if (!ok)
+    {
+        this->InfoLabel->setText("The emulator thread did not answer");
+        return;
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly))
+    {
+        this->InfoLabel->setText("Cannot write " + path);
+        return;
+    }
+    if (!text)
+    {
+        file.write(data);
+    }
+    else
+    {
+        QByteArray out;
+        for (uint32_t row = 0; row < size; row += 16)
+        {
+            out += QByteArray::number(start + row, 16).toUpper().rightJustified(8, '0') + "  ";
+            QByteArray ascii;
+            for (uint32_t i = row; i < row + 16 && i < size; i++)
+            {
+                uint8_t c = (uint8_t)data[i];
+                out += QByteArray::number(c, 16).toUpper().rightJustified(2, '0') + " ";
+                ascii += (c >= 0x20 && c <= 0x7E) ? (char)c : '.';
+            }
+            out += " " + ascii + "\n";
+        }
+        file.write(out);
+    }
+    this->InfoLabel->setText(QString("Saved %1 bytes to %2").arg(size).arg(QFileInfo(path).fileName()));
+}
+
 void MemViewDialog::onDumpBtnPressed()
 {
+    if (this->Space != DebugTools::memSpace_ARM9)
+    {
+        this->DumpSpace(false);
+        return;
+    }
+
     // get region to save
     uint8_t* pRAM = (uint8_t*)this->GetRAM(this->ARM9AddrStart);
     size_t size = this->ARM9AddrEnd - this->ARM9AddrStart;
