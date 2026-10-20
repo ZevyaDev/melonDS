@@ -8,6 +8,7 @@ endif()
 add_library(melonds_headless SHARED
     Api.cpp
     Barrier.cpp
+    Cheats.cpp
     Commands.cpp
     Input.cpp
     InputApply.cpp
@@ -65,6 +66,8 @@ add_executable(headless_tests
     tests/BarrierTests.cpp
     tests/MicFifoTests.cpp
     tests/TouchTimelineTests.cpp
+    tests/CheatTests.cpp
+    Cheats.cpp
     MicFifo.cpp
     Commands.cpp
     Barrier.cpp

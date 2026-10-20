@@ -48,6 +48,15 @@ struct Config
     bool Debug = true;
 };
 
+// An Action Replay code in a console's cheat list (mds_cheat_*).
+struct CheatEntry
+{
+    int ID;
+    std::string Name;
+    bool Enabled;
+    std::vector<melonDS::u32> Code;     // the words the core's engine runs (ParseCheatCode)
+};
+
 struct PacketRecord
 {
     melonDS::u64 Timestamp;
@@ -96,6 +105,14 @@ public:
     bool SaveState(const std::string& path, std::string& error);
     bool LoadState(const std::string& path, std::string& error);
 
+    // The console's Action Replay codes, run by the core's engine (NDS::AREngine) every frame, in the order
+    // added. Emulator thread only (Call). A savestate load and a ROM load clear the list; a reset keeps it.
+    int AddCheat(const std::string& name, std::vector<melonDS::u32> code, bool enabled);
+    bool RemoveCheat(int id);
+    bool EnableCheat(int id, bool enabled);
+    int ClearCheats();
+    const std::vector<CheatEntry>& GetCheats() const { return Cheats; }
+
     void SetPacketLog(bool enabled, size_t capacity);
     std::vector<PacketRecord> DrainPackets();
 
@@ -141,6 +158,10 @@ private:
     CommandQueue Commands;
 
     bool LoadedHeadlessSection = false;
+
+    std::vector<CheatEntry> Cheats;
+    int NextCheatID = 1;
+    void SyncCheats();
 
     bool DoSavestateExtra(melonDS::Savestate* file);
     void ThreadMain();

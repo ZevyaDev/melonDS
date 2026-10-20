@@ -26,6 +26,7 @@
 
 #include "melonds_api.h"
 #include "ApiInternal.h"
+#include "Cheats.h"
 #include "Instance.h"
 #include "LuaHost.h"
 #include "MPInterface.h"
@@ -229,9 +230,13 @@ int mds_has(const char* name)
         "lua_queue",            // Lua run/exec/stop go through the command queue; a first-step error fails the call
         "step_exact",           // mds_step(n) executes n instructions from idle and from parked
         "lastwriter_query",     // mds_lastwriter_query
+        // API level 3 (feature/cheats)
+        "cheats",               // mds_cheat_*: Action Replay codes run by the core's engine every frame
     };
     static const char* const Functions[] = {
         "mds_has", "mds_serve_host", "mds_gdb_host", "mds_lastwriter_query",
+        "mds_cheat_add", "mds_cheat_remove", "mds_cheat_enable", "mds_cheat_clear", "mds_cheat_list",
+        "mds_cheat_get",
     };
     if (!name)
         return 0;
@@ -1027,6 +1032,112 @@ int mds_loadstate(int id, const char* path)
         return -1;
     return OnEmu(s, [&](Instance& inst, std::string& error) {
         return inst.LoadState(path, error) ? 0 : -1;
+    });
+}
+
+// Action Replay codes. The list lives on the console (Instance::Cheats) and feeds the core's AREngine; every
+// change runs on the emulator thread, so it never races the engine, which runs inside the frame.
+int mds_cheat_add(int id, const char* name, const char* code, int enabled)
+{
+    Slot* s = Find(id);
+    if (!s)
+        return -1;
+    if (!code)
+        return Fail("cheat: no code text");
+    std::string n = name ? name : "";
+    if (n.size() > MaxCheatName)
+        return Fail("cheat: the name is longer than " + std::to_string(MaxCheatName) + " bytes");
+    std::vector<uint32_t> words;
+    std::string error;
+    if (!ParseCheatCode(code, words, error))
+        return Fail("cheat: " + error);
+    return OnEmu(s, [&](Instance& inst, std::string&) {
+        return inst.AddCheat(n, std::move(words), enabled != 0);
+    });
+}
+
+int mds_cheat_remove(int id, int cheat)
+{
+    Slot* s = Find(id);
+    if (!s)
+        return -1;
+    return OnEmu(s, [&](Instance& inst, std::string& error) {
+        if (inst.RemoveCheat(cheat))
+            return 0;
+        error = "no cheat " + std::to_string(cheat);
+        return -1;
+    });
+}
+
+int mds_cheat_enable(int id, int cheat, int enabled)
+{
+    Slot* s = Find(id);
+    if (!s)
+        return -1;
+    return OnEmu(s, [&](Instance& inst, std::string& error) {
+        if (inst.EnableCheat(cheat, enabled != 0))
+            return 0;
+        error = "no cheat " + std::to_string(cheat);
+        return -1;
+    });
+}
+
+int mds_cheat_clear(int id)
+{
+    Slot* s = Find(id);
+    if (!s)
+        return -1;
+    return OnEmu(s, [](Instance& inst, std::string&) { return inst.ClearCheats(); });
+}
+
+int mds_cheat_list(int id, mds_cheat* out, int max)
+{
+    Slot* s = Find(id);
+    if (!s || !CountOk(max, "max"))
+        return -1;
+    if (!out && max > 0)
+        return Fail("no buffer");
+    return OnEmu(s, [&](Instance& inst, std::string&) {
+        int n = 0;
+        for (const CheatEntry& c : inst.GetCheats())
+        {
+            if (n >= max)
+                break;
+            mds_cheat& e = out[n++];
+            memset(&e, 0, sizeof(e));
+            e.cheat = c.ID;
+            e.enabled = c.Enabled;
+            e.words = (int32_t)c.Code.size();
+            strncpy(e.name, c.Name.c_str(), sizeof(e.name) - 1);
+        }
+        return n;
+    });
+}
+
+int mds_cheat_get(int id, int cheat, char* name, int name_max, uint32_t* words, int max_words)
+{
+    Slot* s = Find(id);
+    if (!s || !CountOk(name_max, "name_max") || !CountOk(max_words, "max_words"))
+        return -1;
+    if ((!name && name_max > 0) || (!words && max_words > 0))
+        return Fail("no buffer");
+    return OnEmu(s, [&](Instance& inst, std::string& error) {
+        for (const CheatEntry& c : inst.GetCheats())
+        {
+            if (c.ID != cheat)
+                continue;
+            if (name_max > 0)
+            {
+                size_t n = std::min(c.Name.size(), (size_t)name_max - 1);
+                memcpy(name, c.Name.data(), n);
+                name[n] = 0;
+            }
+            int n = std::min<int>(max_words, (int)c.Code.size());
+            std::copy(c.Code.begin(), c.Code.begin() + n, words);
+            return (int)c.Code.size();
+        }
+        error = "no cheat " + std::to_string(cheat);
+        return -1;
     });
 }
 

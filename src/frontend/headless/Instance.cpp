@@ -233,6 +233,7 @@ bool Instance::LoadROM(const std::string& path, const std::string& savePath, std
 
     ROMName = fs::u8path(path).filename().u8string();
     NDS->SetNDSCart(std::move(cart));
+    ClearCheats();      // codes are written for one game
     Reset();
     return true;
 }
@@ -598,7 +599,59 @@ bool Instance::LoadState(const std::string& path, std::string& error)
         TouchLine.Restore(held.Last.TouchDown, held.Last.TouchX, held.Last.TouchY);
     }
     // Older states carry no input: the held input and EmuFrame stay as they were before the load.
+    // Cheats are not part of a state: the loaded state is what a run from it starts with, so the codes added
+    // before the load are dropped and a client re-adds the ones it wants (docs/headless-api.md, section 6).
+    ClearCheats();
     return true;
+}
+
+void Instance::SyncCheats()
+{
+    std::vector<ARCode> codes;
+    codes.reserve(Cheats.size());
+    for (const CheatEntry& c : Cheats)
+        codes.push_back(ARCode {nullptr, c.Name, "", c.Enabled, c.Code});
+    NDS->AREngine.Cheats = std::move(codes);
+}
+
+int Instance::AddCheat(const std::string& name, std::vector<u32> code, bool enabled)
+{
+    int id = NextCheatID++;
+    Cheats.push_back(CheatEntry {id, name, enabled, std::move(code)});
+    SyncCheats();
+    return id;
+}
+
+bool Instance::RemoveCheat(int id)
+{
+    for (auto it = Cheats.begin(); it != Cheats.end(); ++it)
+        if (it->ID == id)
+        {
+            Cheats.erase(it);
+            SyncCheats();
+            return true;
+        }
+    return false;
+}
+
+bool Instance::EnableCheat(int id, bool enabled)
+{
+    for (CheatEntry& c : Cheats)
+        if (c.ID == id)
+        {
+            c.Enabled = enabled;
+            SyncCheats();
+            return true;
+        }
+    return false;
+}
+
+int Instance::ClearCheats()
+{
+    int n = (int)Cheats.size();
+    Cheats.clear();
+    SyncCheats();
+    return n;
 }
 
 // The headless frontend's own section ("HDLS", after the core's): the input the empty-queue rule holds, the

@@ -91,9 +91,9 @@ typedef struct
 } mds_packet;
 
 // Reference: docs/headless-api.md, section 1 (library-wide settings, errors, version and features).
-// API level: 1 up to the IPC merge, 2 from fix/api-quirks (MDS_API_VERSION). It goes up whenever functions
-// are added or behaviour changes; mds_has names the individual features.
-#define MDS_API_VERSION 2
+// API level: 1 up to the IPC merge, 2 from fix/api-quirks, 3 from feature/cheats (MDS_API_VERSION). It goes up
+// whenever functions are added or behaviour changes; mds_has names the individual features.
+#define MDS_API_VERSION 3
 MDS_API int mds_version(void);
 // 1 if the library has the named feature or exported function ("serve_host", "mds_serve_host", ...; the list
 // is in docs/headless-api.md, section 1), else 0. Absent from libraries before API level 2: look the symbol up.
@@ -221,6 +221,29 @@ MDS_API int mds_lastwriter_query(int id, uint32_t addr, uint32_t* raw, int* dma)
 // Reference: docs/headless-api.md, section 6 (savestates).
 MDS_API int mds_savestate(int id, const char* path);
 MDS_API int mds_loadstate(int id, const char* path);
+
+// Reference: docs/headless-api.md, section 6a (Action Replay cheat codes). API level 3, feature "cheats".
+typedef struct
+{
+    int32_t cheat;      // the code's id in this console's list (1, 2, ...; never reused)
+    int32_t enabled;
+    int32_t words;      // code words (two per "XXXXXXXX YYYYYYYY" line)
+    char name[116];     // NUL-terminated, cut short if longer (mds_cheat_get has the whole name)
+} mds_cheat;
+
+// Add a code to the console's list. code: Action Replay text, one "XXXXXXXX YYYYYYYY" line per pair of words;
+// it is checked before anything is added (mds_error: "cheat: line 3: ..."). name may be NULL ("").
+// Returns the code's id (>= 1). Any console state; a running console adds it at the next frame boundary.
+MDS_API int mds_cheat_add(int id, const char* name, const char* code, int enabled);
+MDS_API int mds_cheat_remove(int id, int cheat);
+MDS_API int mds_cheat_enable(int id, int cheat, int enabled);
+// Remove every code; returns how many there were.
+MDS_API int mds_cheat_clear(int id);
+// Copy up to max entries in list order; returns the number copied.
+MDS_API int mds_cheat_list(int id, mds_cheat* out, int max);
+// One code's whole name (into name, name_max bytes with the NUL; may be NULL with name_max 0) and words
+// (up to max_words into words). Returns the code's word count, which may exceed max_words.
+MDS_API int mds_cheat_get(int id, int cheat, char* name, int name_max, uint32_t* words, int max_words);
 
 // Reference: docs/headless-api.md, section 7 (Lua).
 MDS_API int mds_lua_run(int id, const char* source, int is_file);
