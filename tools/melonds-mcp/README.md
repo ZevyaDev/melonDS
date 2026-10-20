@@ -2,6 +2,8 @@
 
 `melonds_headless` is melonDS without a window: several consoles in one process, each on its own
 thread, with a debugger, Lua, and local wireless between them. `melonds_mcp` drives it over MCP.
+The C API (`melonds_api.h`, wrapped by `melonds_mcp/native.py`) is documented in
+[docs/headless-api.md](../../docs/headless-api.md).
 
 ## Build
 

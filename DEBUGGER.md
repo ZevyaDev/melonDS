@@ -110,5 +110,8 @@ waits for the emulator thread except `run`, and the emulator thread never waits 
 neither side can deadlock the other. Saving or loading a state, reset and similar commands sent
 while stopped let the current frame finish first.
 
+The same debugger without a window is the headless library; its C API (`melonds_api.h`) is
+documented in [docs/headless-api.md](docs/headless-api.md).
+
 `-DMELONDS_AUTOMATION=ON` builds a file-driven command interface (`MELONDS_AUTOMATION=<dir>`) used
 to test these windows without a display.

@@ -31,6 +31,7 @@
 extern "C" {
 #endif
 
+// Reference: docs/headless-api.md, section 2 (run states, mds_break) and section 5 (points, trace, frames, packets).
 enum
 {
     MDS_IDLE = 0,
@@ -89,6 +90,7 @@ typedef struct
     uint32_t length;
 } mds_packet;
 
+// Reference: docs/headless-api.md, section 1 (library-wide settings, errors).
 MDS_API int mds_version(void);
 MDS_API const char* mds_error(void);
 MDS_API void mds_set_local_dir(const char* dir);
@@ -96,6 +98,7 @@ MDS_API void mds_set_log_level(int level);
 MDS_API int mds_mp_timeout(int ms);
 MDS_API void mds_set_pacing(int fps);
 
+// Reference: docs/headless-api.md, section 2 (lifecycle, save files, reset, clock).
 MDS_API int mds_create(const char* bios9, const char* bios7, const char* firmware, const char* nickname, int debug);
 MDS_API void mds_destroy(int id);
 MDS_API int mds_load_rom(int id, const char* rom, const char* save);
@@ -104,6 +107,7 @@ MDS_API int mds_reset(int id);
 MDS_API int mds_set_rtc(int id, int year, int month, int day, int hour, int minute, int second);
 MDS_API int mds_get_rtc(int id, int* out);
 
+// Reference: docs/headless-api.md, section 2 (running, breaks, stepping) and section 8 (mds_gdb).
 MDS_API int mds_run(const int* ids, int count, uint32_t frames, int timeout_ms, int* states);
 MDS_API int mds_wait(const int* ids, int count, int timeout_ms, int* states);
 MDS_API int mds_gdb(int id, int port9, int port7, int break_on_start);
@@ -114,6 +118,7 @@ MDS_API int mds_state(int id);
 MDS_API int mds_take_break(int id, mds_break* out);
 MDS_API uint64_t mds_frames(int id);
 
+// Reference: docs/headless-api.md, section 3 (input queue, touch timeline, mic, input log).
 typedef struct
 {
     uint32_t offset;    // system cycles from frame start
@@ -149,6 +154,7 @@ typedef struct
     uint16_t pad3;
 } mds_input_log_entry;
 
+// Reference: docs/headless-api.md, section 4 (mds_screen) and section 3 (setters and queued input).
 MDS_API int mds_screen(int id, uint32_t* out);
 MDS_API int mds_set_keys(int id, uint32_t pressed);
 MDS_API int mds_touch(int id, int x, int y);
@@ -173,11 +179,13 @@ MDS_API int mds_input_waiting(int id);
 MDS_API int mds_input_clear(int id);
 MDS_API int mds_input_log(int id, uint64_t from_frame, mds_input_log_entry* out, int max);
 
+// Reference: docs/headless-api.md, section 4 (memory and registers).
 MDS_API int mds_read(int id, int cpu, uint32_t addr, uint32_t len, uint8_t* out);
 MDS_API int mds_write(int id, int cpu, uint32_t addr, uint32_t len, const uint8_t* data);
 MDS_API int mds_get_regs(int id, int cpu, uint32_t* out);
 MDS_API int mds_set_reg(int id, int cpu, int reg, uint32_t value);
 
+// Reference: docs/headless-api.md, section 5 (breakpoints, watchpoints) and section 2 (mds_step).
 MDS_API int mds_bp_add(int id, uint32_t cpumask, uint32_t addr);
 MDS_API int mds_wp_add(int id, uint32_t cpumask, uint32_t addr, uint32_t size, uint32_t flags);
 MDS_API int mds_point_remove(int id, int point);
@@ -185,6 +193,7 @@ MDS_API int mds_point_enable(int id, int point, int enabled);
 MDS_API int mds_point_list(int id, mds_point* out, int max);
 MDS_API int mds_step(int id, int cpu, uint32_t count);
 
+// Reference: docs/headless-api.md, section 5 (trace, call tracking, coverage, last writer).
 MDS_API int mds_trace(int id, uint32_t cpumask, uint32_t start, uint32_t end, uint32_t capacity);
 MDS_API int mds_trace_take(int id, mds_trace_entry* out, int max);
 MDS_API int mds_calls(int id, int enabled);
@@ -195,17 +204,21 @@ MDS_API int mds_coverage_take(int id, int cpu, uint32_t* out, int max);
 MDS_API int mds_lastwriter(int id, int enabled);
 MDS_API uint32_t mds_lastwriter_get(int id, uint32_t addr);
 
+// Reference: docs/headless-api.md, section 6 (savestates).
 MDS_API int mds_savestate(int id, const char* path);
 MDS_API int mds_loadstate(int id, const char* path);
 
+// Reference: docs/headless-api.md, section 7 (Lua).
 MDS_API int mds_lua_run(int id, const char* source, int is_file);
 MDS_API int mds_lua_exec(int id, const char* code);
 MDS_API int mds_lua_stop(int id);
 MDS_API int mds_lua_output(int id, char* out, int max);
 
+// Reference: docs/headless-api.md, section 5 (wireless packet capture).
 MDS_API int mds_packets(int id, int enabled, int capacity);
 MDS_API int mds_packets_take(int id, mds_packet* headers, uint8_t* data, int max_packets, int max_data);
 
+// Reference: docs/headless-api.md, section 8 (socket server, instance base).
 // Socket server (protocol: Protocol.h). One server thread per process serves every console.
 // port 0 lets the OS pick; otherwise the first free port in [port, port + range) is used,
 // where range is flags & 0xFFFF (0 = 32, 1 = strict). Returns 0 and the bound port, or -1
