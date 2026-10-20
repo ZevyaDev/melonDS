@@ -232,6 +232,15 @@ static void SetFuncs(lua_State* L, const char* table, const luaL_Reg* funcs)
     lua_setglobal(L, table);
 }
 
+// The error on top of the stack as text; never empty, so an empty text still reads as a failure.
+static std::string ErrorText(lua_State* L)
+{
+    const char* text = lua_tostring(L, -1);
+    if (!text)
+        return "(error object is not a string)";
+    return *text ? text : "(empty error message)";
+}
+
 LuaHost::LuaHost(Instance& inst) : Inst(inst)
 {
     Open();
@@ -338,7 +347,7 @@ bool LuaHost::Run(const std::string& source, bool isFile, std::string& error)
     int status = isFile ? luaL_loadfile(Main, source.c_str()) : luaL_loadbuffer(Main, source.data(), source.size(), "=script");
     if (status != LUA_OK)
     {
-        error = lua_tostring(Main, -1);
+        error = ErrorText(Main);
         Stop();
         return false;
     }
@@ -358,7 +367,7 @@ bool LuaHost::Exec(const std::string& code, std::string& error)
 {
     if (luaL_loadbuffer(L, code.data(), code.size(), "=exec") != LUA_OK || lua_pcall(L, 0, 0, 0) != LUA_OK)
     {
-        error = lua_tostring(L, -1);
+        error = ErrorText(L);
         lua_pop(L, 1);
         return false;
     }
@@ -379,8 +388,7 @@ void LuaHost::Resume(std::string* error)
     }
     if (status != LUA_OK)
     {
-        const char* text = lua_tostring(Main, -1);
-        std::string message = text ? text : "error object is not a string";
+        std::string message = ErrorText(Main);
         if (error)
             *error = message;
         else

@@ -214,6 +214,14 @@ class LuaOnTheEmulatorThread(ConsoleTest):
         self.run_frames(2)
         self.assertIn("boom later", self.c.lua_output())
 
+    def test_odd_error_objects_still_fail(self):
+        for code in ("error('')", "error({})", "error(nil)"):
+            with self.subTest(code):
+                with self.assertRaises(MelonError):
+                    self.c.lua_run(code)
+                with self.assertRaises(MelonError):
+                    self.c.lua_exec(code)
+
     def test_syntax_error_still_fails(self):
         with self.assertRaises(MelonError):
             self.c.lua_run("this is not lua")
