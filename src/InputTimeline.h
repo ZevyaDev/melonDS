@@ -16,40 +16,28 @@
     with melonDS. If not, see http://www.gnu.org/licenses/.
 */
 
-#ifndef DISASSEMBLER_H
-#define DISASSEMBLER_H
-
-#include <QString>
+#ifndef INPUTTIMELINE_H
+#define INPUTTIMELINE_H
 
 #include "types.h"
 
-struct DisasmLine
+namespace melonDS
 {
-    melonDS::u32 Addr;
-    melonDS::u32 Opcode;
-    melonDS::u8 Size;
-    QString Mnemonic;
-    QString Operands;
-    melonDS::u32 Target;
-    bool HasTarget;
-    bool IsCall;
-    bool IsLiteral;
-};
 
-class Disassembler
+// Optional source of sub-frame touch input. When one is set on an NDS, the touch controller
+// asks it for the pen state whenever the ARM7 samples it (SPI conversion commands and reads of
+// EXTKEYIN), instead of relying on the single state stored by NDS::TouchScreen.
+class InputTimeline
 {
 public:
-    Disassembler();
-    ~Disassembler();
-    Disassembler(const Disassembler&) = delete;
-    Disassembler& operator=(const Disassembler&) = delete;
+    virtual ~InputTimeline() = default;
 
-    DisasmLine decode(melonDS::u32 addr, const melonDS::u8* bytes, int avail, bool thumb);
-    static bool available();
-
-private:
-    void* Arm = nullptr;
-    void* Thumb = nullptr;
+    // The pen state at the given time, in system (33.51 MHz) cycles since the start of the
+    // current frame. Returns true if the pen is down, with the screen position in x (0..255)
+    // and y (0..191). Called from the emulation thread; must not touch the NDS.
+    virtual bool TouchAt(u64 cyclesSinceFrameStart, u16& x, u16& y) = 0;
 };
+
+}
 
 #endif

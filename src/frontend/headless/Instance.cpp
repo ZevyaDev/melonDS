@@ -67,7 +67,7 @@ static std::unique_ptr<T> LoadBIOS(const std::string& path, std::string& error)
     return bios;
 }
 
-static void CustomizeFirmware(Firmware& firmware, int id, const std::string& nickname)
+static void CustomizeFirmware(Firmware& firmware, int effectiveId, const std::string& nickname)
 {
     auto& user = firmware.GetEffectiveUserData();
     if (!nickname.empty())
@@ -78,18 +78,46 @@ static void CustomizeFirmware(Firmware& firmware, int id, const std::string& nic
         user.NameLength = len;
     }
 
-    if (id > 0)
+    if (effectiveId > 0)
     {
         auto& header = firmware.GetHeader();
         MacAddress mac = header.MacAddr;
-        mac[3] += id;
-        mac[4] += id * 0x44;
-        mac[5] += id * 0x10;
+        mac[3] += effectiveId;
+        mac[4] += effectiveId * 0x44;
+        mac[5] += effectiveId * 0x10;
         mac[0] &= 0xFC;
         header.MacAddr = mac;
         header.UpdateChecksum();
     }
     firmware.UpdateChecksums();
+}
+
+static std::atomic<int> Base {0};
+
+int InstanceBase()
+{
+    return Base;
+}
+
+bool SetInstanceBase(int base)
+{
+    if (base < 0)
+        return false;
+    Base = base;
+    return true;
+}
+
+std::string DefaultSavePath(const std::string& romPath, int effectiveId)
+{
+    std::string save = fs::u8path(romPath).replace_extension(".sav").u8string();
+    if (effectiveId > 0)
+        save += "." + std::to_string(effectiveId + 1);
+    return save;
+}
+
+int Instance::EffectiveID() const
+{
+    return ID + InstanceBase();
 }
 
 Instance::Instance(int id, const Config& config, std::string& error) : ID(id)
@@ -124,29 +152,50 @@ Instance::Instance(int id, const Config& config, std::string& error) : ID(id)
         }
         args.Firmware = std::move(firmware);
     }
-    CustomizeFirmware(args.Firmware, id, config.Nickname);
+    CustomizeFirmware(args.Firmware, EffectiveID(), config.Nickname);
 
     NDS = std::make_unique<melonDS::NDS>(std::move(args), this);
     NDS->SetRenderer(std::make_unique<SoftRenderer>(*NDS));
     NDS->Reset();
+    NDS->SetInputTimeline(&TouchLine);
     NDS->Debugger.SetBreakHandler([this](const BreakEvent& ev) { Park(ev); });
     Network().RegisterInstance(ID);
     Lua = std::make_unique<LuaHost>(*this);
 
+    Commands.SetWake([this] {
+        // Take the lock so a thread between its predicate check and its wait cannot miss this.
+        { std::lock_guard lock(Lock); }
+        Cond.notify_all();
+    });
+    Input.SetWake([this] {
+        { std::lock_guard lock(Lock); }
+        Cond.notify_all();
+    });
+    Input.SetBarrierOwner(ID);
+    Barriers().Register(ID, [this] {
+        { std::lock_guard lock(Lock); BarrierEvent = true; }
+        Cond.notify_all();
+    });
     Thread = std::thread([this] { ThreadMain(); });
+    Commands.SetDrainThread(Thread.get_id());
 }
 
 Instance::~Instance()
 {
+    if (!NDS)       // the constructor failed before the console existed (bad BIOS or firmware)
+        return;
     {
         std::lock_guard lock(Lock);
         Quit = true;
         FramesLeft = 0;
     }
+    Commands.Shutdown();
     NDS->Debugger.SetBreakHandler(nullptr);
     Cond.notify_all();
     if (Thread.joinable())
         Thread.join();
+    Barriers().Unregister(ID);
+    Barriers().DropConsole(ID);     // partners waiting for this console's payload are released
     Lua.reset();
     Network().UnregisterInstance(ID);
     NDS->Stop();
@@ -161,9 +210,7 @@ bool Instance::LoadROM(const std::string& path, const std::string& savePath, std
         return false;
     }
 
-    SavePath = savePath.empty() ? (fs::u8path(path).replace_extension(".sav").u8string()) : savePath;
-    if (ID > 0 && savePath.empty())
-        SavePath += "." + std::to_string(ID + 1);
+    SavePath = savePath.empty() ? DefaultSavePath(path, EffectiveID()) : savePath;
 
     std::optional<NDSCart::NDSCartArgs> cartArgs;
     auto save = ReadFile(SavePath);
@@ -192,10 +239,13 @@ bool Instance::LoadROM(const std::string& path, const std::string& savePath, std
 void Instance::Reset()
 {
     NDS->Reset();
-    if (NDS->NeedsDirectBoot())
+    if (NDS->CartInserted() && NDS->NeedsDirectBoot())
         NDS->SetupDirectBoot(ROMName);
     NDS->Start();
     FramesRun = 0;
+    Input.Reset();
+    TouchLine.Reset();
+    Mic.Clear();
     Lua->OnReset();
 }
 
@@ -221,9 +271,12 @@ void Instance::Start(u32 frames)
 
 void Instance::StopAfter(u32 frames)
 {
-    std::lock_guard lock(Lock);
-    if (State == RunState::Running)
-        FramesLeft = frames;
+    {
+        std::lock_guard lock(Lock);
+        if (State == RunState::Running)
+            FramesLeft = frames;
+    }
+    Cond.notify_all();      // a console waiting for input has to see FramesLeft change
 }
 
 RunState Instance::Wait(int timeoutMs)
@@ -245,7 +298,23 @@ RunState Instance::GetState()
 
 void Instance::Interrupt()
 {
+    {
+        std::lock_guard lock(Lock);
+        if (Waiting)
+        {
+            // No CPU is running to take a break request: park at the frame boundary instead.
+            WaitInterrupt = true;
+            Cond.notify_all();
+            return;
+        }
+    }
     NDS->Debugger.RequestBreak(3);
+}
+
+bool Instance::WaitingForInput()
+{
+    std::lock_guard lock(Lock);
+    return Waiting;
 }
 
 bool Instance::TakeBreak(BreakEvent& out)
@@ -258,19 +327,32 @@ bool Instance::TakeBreak(BreakEvent& out)
     return true;
 }
 
+bool Instance::Call(const std::function<void(Instance&)>& fn)
+{
+    return Commands.Call([this, &fn] { fn(*this); });
+}
+
 void Instance::ThreadMain()
 {
     for (;;)
     {
         {
             std::unique_lock lock(Lock);
-            Cond.wait(lock, [this] { return Quit || State == RunState::Running; });
+            Cond.wait(lock, [this] { return Quit || State == RunState::Running || Commands.HasPending(); });
             if (Quit)
                 return;
+            if (State != RunState::Running)
+            {
+                // woken by a command while idle
+                lock.unlock();
+                Commands.Drain();
+                continue;
+            }
         }
         auto next = std::chrono::steady_clock::now();
         for (;;)
         {
+            Commands.Drain();   // frame boundary: the only place the NDS is touched from outside
             {
                 std::lock_guard lock(Lock);
                 if (Quit || FramesLeft == 0)
@@ -279,9 +361,22 @@ void Instance::ThreadMain()
                     break;
                 }
             }
+            AppliedInput applied;
+            if (!AcquireInput(applied))     // may wait at a barrier or for input
+            {
+                std::lock_guard lock(Lock);
+                if (Quit || FramesLeft == 0)
+                {
+                    State = RunState::Idle;
+                    break;
+                }
+                continue;
+            }
+            ApplyInput(*this, applied);
             NDS->RunFrame();
             FramesRun++;
             Lua->OnFrameEnd();
+            Subs.Publish(*this, applied);
             {
                 std::lock_guard lock(Lock);
                 if (FramesLeft)
@@ -297,7 +392,123 @@ void Instance::ThreadMain()
                     next = now;
             }
         }
+        // The console stopped running: a barrier partner must not wait for a payload it will not reach.
+        Barriers().DropConsole(ID);
         Cond.notify_all();
+    }
+}
+
+// Wait at the frame boundary until every console of the barrier group has reached its payload (or can
+// no longer reach it, or a partner is blocked in a wireless receive). True: go ahead and pop the payload.
+// False: the caller should look at Quit/FramesLeft again before running a frame. Like the wait for input,
+// the wait ends for Quit, a stop, an interrupt (which parks) and posted commands (which are drained).
+bool Instance::AwaitBarrier(uint32_t group)
+{
+    BarrierGroups& groups = Barriers();
+    groups.Arrive(group, ID);
+
+    std::unique_lock lock(Lock);
+    bool waited = false;
+    for (;;)
+    {
+        // Clear the event before looking: one that arrives after the look sets it again.
+        BarrierEvent = false;
+        lock.unlock();
+        bool released = groups.Released(group, ID);
+        lock.lock();
+        if (released)
+        {
+            Waiting = false;
+            return true;
+        }
+
+        Waiting = true;
+        if (!waited)
+            Cond.notify_all();
+        waited = true;
+        Cond.wait(lock, [this, group] {
+            return Quit || FramesLeft == 0 || WaitInterrupt || Commands.HasPending() || BarrierEvent
+                || Input.FrontBarrier() != group;
+        });
+        if (Quit || FramesLeft == 0)
+        {
+            Waiting = false;
+            return false;
+        }
+        if (WaitInterrupt)
+        {
+            Waiting = false;
+            WaitInterrupt = false;
+            BreakEvent ev {};
+            ev.Kind = BreakKind::Request;
+            ev.PC = NDS->ARM9->R[15];
+            lock.unlock();
+            Park(ev);
+            return false;
+        }
+        if (Commands.HasPending())
+        {
+            Waiting = false;
+            lock.unlock();
+            Commands.Drain();
+            return false;
+        }
+        if (Input.FrontBarrier() != group)      // the queue was cleared under us
+        {
+            Waiting = false;
+            return true;
+        }
+    }
+}
+
+// Resolve the input for the next frame. In Wait mode with nothing queued this blocks at the frame
+// boundary (FramesLeft is not used up) until input arrives or something else needs attention.
+// A payload of a barrier group is not popped until its group is released.
+// False means the caller should look at Quit/FramesLeft again before running a frame.
+bool Instance::AcquireInput(AppliedInput& out)
+{
+    for (;;)
+    {
+        if (uint32_t group = Input.FrontBarrier())
+        {
+            if (!AwaitBarrier(group))
+                return false;
+            if (Input.FrontBarrier() != group)
+                continue;
+        }
+        if (Input.Next(FramesRun, out))
+        {
+            if (out.Barrier)
+                Barriers().Applied(out.Barrier, ID);
+            return true;
+        }
+
+        std::unique_lock lock(Lock);
+        Waiting = true;
+        Cond.notify_all();
+        Cond.wait(lock, [this] {
+            return Quit || FramesLeft == 0 || WaitInterrupt || Commands.HasPending()
+                || Input.Depth() != 0 || Input.Mode() != EmptyMode::Wait;
+        });
+        Waiting = false;
+        if (Quit || FramesLeft == 0)
+            return false;
+        if (WaitInterrupt)
+        {
+            WaitInterrupt = false;
+            BreakEvent ev {};
+            ev.Kind = BreakKind::Request;
+            ev.PC = NDS->ARM9->R[15];
+            lock.unlock();
+            Park(ev);
+            return false;
+        }
+        if (Commands.HasPending())
+        {
+            lock.unlock();
+            Commands.Drain();
+            return false;
+        }
     }
 }
 
@@ -310,7 +521,17 @@ void Instance::Park(const BreakEvent& ev)
     BreakPending = true;
     State = RunState::Parked;
     Cond.notify_all();
-    Cond.wait(lock, [this] { return Quit || State == RunState::Running; });
+    while (!Quit && State != RunState::Running)
+    {
+        if (Commands.HasPending())
+        {
+            lock.unlock();
+            Commands.Drain();
+            lock.lock();
+            continue;
+        }
+        Cond.wait(lock, [this] { return Quit || State == RunState::Running || Commands.HasPending(); });
+    }
 }
 
 bool Instance::SaveState(const std::string& path, std::string& error)
@@ -347,6 +568,8 @@ bool Instance::LoadState(const std::string& path, std::string& error)
         error = "cannot read " + path;
         return false;
     }
+    Input.Clear();
+    Mic.Clear();    // the load itself calls Mic_Start/Mic_Stop to match the saved state
     Savestate backup;
     NDS->DoSavestate(&backup);
     Savestate state(data.data(), data.size(), false);
@@ -396,7 +619,7 @@ void Instance::WriteSave(const u8* data, u32 len)
         WriteFile(SavePath, data, len);
 }
 
-static Net NetInstance;
+static Net& NetInstance = *new Net();      // never destroyed, as the console registry: see Api.cpp
 static std::once_flag NetInit;
 
 Net& Network()

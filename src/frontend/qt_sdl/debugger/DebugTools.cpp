@@ -41,7 +41,7 @@
 #include "Gfx2DWindows.h"
 #include "Gfx3DWindow.h"
 #include "SoundWindow.h"
-#include "DebugSymbols.h"
+#include "DebugSymbolsQt.h"
 #include "EmuInstance.h"
 #include "Config.h"
 #include "NDSCart.h"
@@ -271,17 +271,17 @@ void autoLoadSymbols(DebugBridge* bridge)
     QString labels = QString::fromStdString(cfg.GetString("Debugger.Labels." + code.toStdString()));
     DebugSymbols& symbols = bridge->symbols();
     bool changed = false;
-    QString error;
-    if (!path.isEmpty() && path != symbols.source())
-        changed |= symbols.load(path, error);
-    if (labels != symbols.labelsSource())
+    std::string error;
+    if (!path.isEmpty() && path != SymStr(symbols.source()))
+        changed |= symbols.load(SymStr(path), error);
+    if (labels != SymStr(symbols.labelsSource()))
     {
         if (labels.isEmpty())
         {
             symbols.clearLabels();
             changed = true;
         }
-        else if (symbols.loadLabels(labels, error))
+        else if (symbols.loadLabels(SymStr(labels), error))
             changed = true;
     }
     if (changed)

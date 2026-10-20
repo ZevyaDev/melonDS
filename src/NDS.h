@@ -24,6 +24,7 @@
 #include <optional>
 #include <functional>
 
+#include "InputTimeline.h"
 #include "Platform.h"
 #include "Savestate.h"
 #include "types.h"
@@ -422,6 +423,11 @@ public: // TODO: Encapsulate the rest of these members
     void TouchScreen(u16 x, u16 y);
     void ReleaseScreen();
 
+    // Optional sub-frame touch source (not owned, not part of savestates). When set, the touch
+    // controller resolves the pen state at the time the ARM7 samples it; see InputTimeline.h.
+    void SetInputTimeline(InputTimeline* timeline) noexcept { Timeline = timeline; TimelineValid = false; }
+    void SyncTouchTimeline();
+
     void SetKeyMask(u32 mask);
 
     bool IsLidClosed() const;
@@ -540,6 +546,10 @@ protected:
     bool RunningGame;
     u64 LastSysClockCycles;
     u64 FrameStartTimestamp;
+    InputTimeline* Timeline = nullptr;
+    bool TimelineValid = false;     // TimelineDown/X/Y match what the touch controller holds
+    bool TimelineDown = false;
+    u16 TimelineX = 0, TimelineY = 0;
     u64 NextTarget();
     u64 NextTargetSleep();
     void CheckKeyIRQ(u32 cpu, u32 oldkey, u32 newkey);

@@ -115,5 +115,6 @@ if (BUILD_QT_SDL)
 endif()
 
 if (BUILD_HEADLESS)
+    enable_testing()
     add_subdirectory(src/frontend/headless)
 endif()

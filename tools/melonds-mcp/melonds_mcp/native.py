@@ -1,7 +1,10 @@
+import atexit
 import ctypes
 import os
 import sys
-from ctypes import POINTER, Structure, c_char, c_char_p, c_int, c_int32, c_uint8, c_uint32, c_uint64
+import weakref
+from ctypes import (POINTER, Structure, c_char, c_char_p, c_int, c_int16, c_int32, c_uint8, c_uint16, c_uint32,
+                    c_uint64)
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +36,26 @@ class MdsFrame(Structure):
 
 class MdsPacket(Structure):
     _fields_ = [("timestamp", c_uint64), ("sent", c_uint32), ("type", c_uint32), ("length", c_uint32)]
+
+
+class MdsTouchPoint(Structure):
+    _fields_ = [("offset", c_uint32), ("x", c_uint16), ("y", c_uint16), ("down", c_uint8), ("pad", c_uint8 * 3)]
+
+
+class MdsInput(Structure):
+    _fields_ = [("seq", c_uint32), ("buttons", c_uint16), ("lid", c_uint8), ("touch_count", c_uint8),
+                ("mic_kind", c_uint8), ("flags", c_uint8), ("mic_count", c_uint16), ("mic_level", c_uint16),
+                ("pad2", c_uint16)]
+
+
+class MdsInputLogEntry(Structure):
+    _fields_ = [("frame", c_uint64), ("seq", c_uint32), ("buttons", c_uint16), ("lid", c_uint8),
+                ("touch_count", c_uint8), ("mic_kind", c_uint8), ("pad", c_uint8), ("mic_level", c_uint16),
+                ("pad2", c_uint16), ("pad3", c_uint16)]
+
+
+INPUT_FLAG_CLIENT = 1
+INPUT_MODES = {"repeat": 0, "neutral": 1, "wait": 2}
 
 
 class MelonError(RuntimeError):
@@ -96,6 +119,15 @@ def _load():
         "mds_set_keys": (c_int, [c_int, c_uint32]),
         "mds_touch": (c_int, [c_int, c_int, c_int]),
         "mds_set_lid": (c_int, [c_int, c_int]),
+        "mds_input_submit": (c_int, [c_int, POINTER(MdsInput), POINTER(MdsTouchPoint), POINTER(c_int16)]),
+        "mds_input_submit_multi": (c_int, [POINTER(c_int), c_int, POINTER(MdsInput), POINTER(POINTER(MdsTouchPoint)),
+                                           POINTER(POINTER(c_int16)), POINTER(c_int)]),
+        "mds_debug_recv_pending": (c_int, [c_int, c_int]),
+        "mds_input_mode": (c_int, [c_int, c_int, c_int]),
+        "mds_input_depth": (c_int, [c_int]),
+        "mds_input_waiting": (c_int, [c_int]),
+        "mds_input_clear": (c_int, [c_int]),
+        "mds_input_log": (c_int, [c_int, c_uint64, POINTER(MdsInputLogEntry), c_int]),
         "mds_read": (c_int, [c_int, c_int, c_uint32, c_uint32, POINTER(c_uint8)]),
         "mds_write": (c_int, [c_int, c_int, c_uint32, c_uint32, POINTER(c_uint8)]),
         "mds_get_regs": (c_int, [c_int, c_int, POINTER(c_uint32)]),
@@ -123,6 +155,16 @@ def _load():
         "mds_lua_output": (c_int, [c_int, POINTER(c_char), c_int]),
         "mds_packets": (c_int, [c_int, c_int, c_int]),
         "mds_packets_take": (c_int, [c_int, POINTER(MdsPacket), POINTER(c_uint8), c_int, c_int]),
+    }
+    sig |= {
+        "mds_serve": (c_int, [c_int, c_int, POINTER(c_int)]),
+        "mds_serve_stop": (None, []),
+        "mds_serve_wait": (c_int, [c_int]),
+        "mds_serve_name": (None, [c_char_p]),
+        "mds_set_instance_base": (c_int, [c_int]),
+        "mds_instance_base": (c_int, []),
+        "mds_mac": (c_int, [c_int, POINTER(c_uint8)]),
+        "mds_save_path": (c_int, [c_int, POINTER(c_char), c_int]),
     }
     for name, (res, args) in sig.items():
         fn = getattr(lib, name)
@@ -159,6 +201,15 @@ def _cpu(cpu):
     raise MelonError(f"cpu must be 9 or 7, not {cpu!r}")
 
 
+def _key_mask(keys):
+    if isinstance(keys, int):
+        return keys & 0xFFF
+    mask = 0
+    for k in keys:
+        mask |= 1 << KEYS.index(k)
+    return mask
+
+
 def _mask(cpu):
     if cpu in ("both", 3):
         return 3
@@ -171,6 +222,35 @@ def mp_timeout(ms=-1):
 
 def set_pacing(fps):
     lib().mds_set_pacing(fps)
+
+
+def serve(port=0, port_range=0, name=None):
+    """Start the socket server thread (flags low 16 bits = port range, 0 = default 32).
+    port 0 lets the OS pick. Returns the bound port."""
+    if name:
+        lib().mds_serve_name(name.encode())
+    bound = c_int(0)
+    _check(lib().mds_serve(port, port_range, ctypes.byref(bound)))
+    return bound.value
+
+
+def serve_stop():
+    lib().mds_serve_stop()
+
+
+def serve_wait(timeout_ms=0):
+    """1 once a client has sent shutdown, else 0 after timeout_ms."""
+    return lib().mds_serve_wait(timeout_ms)
+
+
+def set_instance_base(base):
+    """Process-wide offset for console ids (MAC, save numbering, emu.getconsoleid()). Call before
+    creating consoles."""
+    _check(lib().mds_set_instance_base(base))
+
+
+def instance_base():
+    return lib().mds_instance_base()
 
 
 def run_group(consoles, frames, timeout_ms):
@@ -187,10 +267,72 @@ def wait_group(consoles, timeout_ms):
     return ret == 1, list(states)
 
 
+def _make_input(buttons, lid, touch, mic, mic_level, seq, client):
+    if touch and not isinstance(touch[0], (tuple, list)):
+        touch = [(0, touch[0], touch[1], 1)]
+    pts = (MdsTouchPoint * max(len(touch or []), 1))()
+    for i, (offset, x, y, down) in enumerate(touch or []):
+        pts[i].offset, pts[i].x, pts[i].y, pts[i].down = offset, x, y, int(down)
+    samples = list(mic or [])
+    buf = (c_int16 * max(len(samples), 1))(*samples)
+    hdr = MdsInput()
+    hdr.seq = seq
+    hdr.buttons = _key_mask(buttons)
+    hdr.lid = int(lid)
+    hdr.touch_count = len(touch or [])
+    hdr.mic_kind = 2 if mic_level is not None else (1 if mic is not None else 0)
+    hdr.flags = INPUT_FLAG_CLIENT if client else 0
+    hdr.mic_count = len(samples)
+    hdr.mic_level = mic_level or 0
+    return hdr, pts, buf
+
+
+def submit_multi(entries, client=False):
+    """input_multi without a socket: entries is a list of (console, kwargs) where kwargs are
+    Console.submit_input's arguments (buttons, lid, touch, mic, mic_level, seq). The payloads form a
+    barrier group: each console waits at its payload until all of them are there, then they start the
+    frame together. All or none are queued. Returns each console's queue depth."""
+    n = len(entries)
+    made = [_make_input(client=client, **{"buttons": 0, "lid": False, "touch": None, "mic": None,
+                                           "mic_level": None, "seq": 0, **kw}) for _, kw in entries]
+    ids = (c_int * n)(*[c.id for c, _ in entries])
+    hdrs = (MdsInput * n)(*[m[0] for m in made])
+    pts = (POINTER(MdsTouchPoint) * n)(*[ctypes.cast(m[1], POINTER(MdsTouchPoint)) for m in made])
+    bufs = (POINTER(c_int16) * n)(*[ctypes.cast(m[2], POINTER(c_int16)) for m in made])
+    depths = (c_int * n)()
+    _check(lib().mds_input_submit_multi(ids, n, hdrs, pts, bufs, depths))
+    return list(depths)
+
+
+def debug_recv_pending(console, pending):
+    """Test hook: pretend the console is (True) or is no longer (False) blocked in a wireless receive."""
+    _check(lib().mds_debug_recv_pending(console.id, int(pending)))
+
+
+_live = weakref.WeakSet()
+
+
+def _shutdown():
+    """At interpreter exit: stop the server and destroy the consoles still open, from a normal thread
+    context (the library also survives a process that skips this, see Api.cpp)."""
+    if _lib is None:
+        return
+    try:
+        _lib.mds_serve_stop()
+        for con in list(_live):
+            con.close()
+    except Exception:
+        pass
+
+
+atexit.register(_shutdown)
+
+
 class Console:
     def __init__(self, bios9=None, bios7=None, firmware=None, nickname=None, debug=True):
         self.id = _check(lib().mds_create(_b(bios9), _b(bios7), _b(firmware), _b(nickname), int(debug)))
         self.rom = None
+        _live.add(self)
 
     def close(self):
         if self.id is not None:
@@ -251,16 +393,40 @@ class Console:
         return buf
 
     def set_keys(self, pressed):
-        mask = 0
-        for k in pressed:
-            mask |= 1 << KEYS.index(k)
-        _check(lib().mds_set_keys(self.id, mask))
+        _check(lib().mds_set_keys(self.id, _key_mask(pressed)))
 
     def touch(self, x=None, y=None):
         _check(lib().mds_touch(self.id, -1 if x is None else x, -1 if y is None else y))
 
     def set_lid(self, closed):
         _check(lib().mds_set_lid(self.id, int(closed)))
+
+    def submit_input(self, buttons=0, lid=False, touch=None, mic=None, mic_level=None, seq=0, client=False):
+        """Queue one frame of input; returns the queue depth. buttons: key names or a bitmask.
+        touch: list of (offset, x, y, down) or a single (x, y). mic: list of int16 samples.
+        client=True marks the payload as coming from a socket client (subject to the stall timeout)."""
+        hdr, pts, buf = _make_input(buttons, lid, touch, mic, mic_level, seq, client)
+        return _check(lib().mds_input_submit(self.id, ctypes.byref(hdr), pts, buf))
+
+    def input_mode(self, mode=None, stall_frames=None):
+        """mode: "repeat", "neutral" or "wait" (None = unchanged). stall_frames: repeat-mode timeout, 0 = off."""
+        m = -1 if mode is None else INPUT_MODES[mode]
+        _check(lib().mds_input_mode(self.id, m, -1 if stall_frames is None else stall_frames))
+
+    def input_depth(self):
+        return _check(lib().mds_input_depth(self.id))
+
+    def input_waiting(self):
+        return bool(_check(lib().mds_input_waiting(self.id)))
+
+    def input_clear(self):
+        _check(lib().mds_input_clear(self.id))
+
+    def input_log(self, from_frame=0, max=4096):
+        buf = (MdsInputLogEntry * max)()
+        n = _check(lib().mds_input_log(self.id, from_frame, buf, max))
+        return [{"frame": e.frame, "seq": e.seq, "buttons": e.buttons, "lid": e.lid, "touch_count": e.touch_count,
+                 "mic_kind": e.mic_kind, "mic_level": e.mic_level} for e in buf[:n]]
 
     def read(self, addr, length, cpu=9):
         buf = (c_uint8 * length)()
@@ -367,6 +533,16 @@ class Console:
 
     def lua_stop(self):
         _check(lib().mds_lua_stop(self.id))
+
+    def mac(self):
+        buf = (c_uint8 * 6)()
+        _check(lib().mds_mac(self.id, buf))
+        return bytes(buf)
+
+    def save_path(self):
+        buf = ctypes.create_string_buffer(4096)
+        _check(lib().mds_save_path(self.id, buf, 4096))
+        return buf.value.decode()
 
     def lua_output(self):
         chunks, buf = [], (c_char * 65536)()

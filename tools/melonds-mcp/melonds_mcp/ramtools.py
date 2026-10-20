@@ -3,7 +3,7 @@ import re
 import struct
 from pathlib import Path
 
-import numpy as np
+np = None  # imported on first use: the CLI does not need numpy
 
 DTYPES = {
     (1, False): "<u1", (1, True): "<i1",
@@ -16,6 +16,8 @@ COMPARES = ("changed", "unchanged", "increased", "decreased", "eq", "ne", "gt", 
 
 class RamSearch:
     def __init__(self, console, start=0x02000000, length=0x400000, size=4, signed=True, cpu=9):
+        global np
+        import numpy as np
         if (size, signed) not in DTYPES:
             raise ValueError("size must be 1, 2 or 4")
         self.console = console

@@ -18,7 +18,8 @@
 
 #include <cstring>
 
-#include <QRegularExpression>
+#include <cstdio>
+#include <string>
 
 #include "Disassembler.h"
 
@@ -67,17 +68,44 @@ bool Disassembler::available()
 #endif
 }
 
-static QString PlainRegisterNames(const QString& ops)
+static bool IsWordChar(char c)
 {
-    static const QRegularExpression apcs("\\b(sb|sl|fp|ip)\\b");
-    if (!ops.contains(apcs))
-        return ops;
-    QString out = ops;
-    out.replace(QRegularExpression("\\bsb\\b"), "r9");
-    out.replace(QRegularExpression("\\bsl\\b"), "r10");
-    out.replace(QRegularExpression("\\bfp\\b"), "r11");
-    out.replace(QRegularExpression("\\bip\\b"), "r12");
+    return isalnum((unsigned char)c) || c == '_';
+}
+
+// Capstone prints the APCS names sb/sl/fp/ip; show plain r9-r12 instead
+static std::string PlainRegisterNames(const std::string& ops)
+{
+    static const struct { const char* Name; const char* Plain; } map[] = {
+        {"sb", "r9"}, {"sl", "r10"}, {"fp", "r11"}, {"ip", "r12"}};
+
+    std::string out;
+    size_t i = 0;
+    while (i < ops.size())
+    {
+        if (!IsWordChar(ops[i]))
+        {
+            out += ops[i++];
+            continue;
+        }
+        size_t j = i;
+        while (j < ops.size() && IsWordChar(ops[j]))
+            j++;
+        std::string word = ops.substr(i, j - i);
+        for (auto& m : map)
+            if (word == m.Name)
+                word = m.Plain;
+        out += word;
+        i = j;
+    }
     return out;
+}
+
+static std::string Format(const char* fmt, u32 value)
+{
+    char buf[32];
+    snprintf(buf, sizeof(buf), fmt, value);
+    return buf;
 }
 
 static void Analyze(DisasmLine& line, bool thumb)
@@ -172,13 +200,13 @@ DisasmLine Disassembler::decode(u32 addr, const u8* bytes, int avail, bool thumb
     if (thumb && size == 2 && (line.Opcode & 0xE000) == 0xE000 && (line.Opcode & 0x1800))
     {
         line.Mnemonic = (line.Opcode & 0xF800) == 0xF000 ? "bl.hi" : "bl.lo";
-        line.Operands = QString("#0x%1").arg(line.Opcode & 0x7FF, 0, 16);
+        line.Operands = Format("#0x%x", line.Opcode & 0x7FF);
         return line;
     }
     if (thumb && size == 4)
     {
         line.Mnemonic = ((line.Opcode >> 16) & 0xF800) == 0xE800 ? "blx" : "bl";
-        line.Operands = QString("#0x%1").arg(line.Target, 8, 16, QChar('0'));
+        line.Operands = Format("#0x%08x", line.Target);
         return line;
     }
 
@@ -190,14 +218,14 @@ DisasmLine Disassembler::decode(u32 addr, const u8* bytes, int avail, bool thumb
         size_t n = cs_disasm(*(csh*)handle, bytes, size, addr, 1, &insn);
         if (n)
         {
-            line.Mnemonic = QString::fromLatin1(insn[0].mnemonic);
-            line.Operands = PlainRegisterNames(QString::fromLatin1(insn[0].op_str));
+            line.Mnemonic = insn[0].mnemonic;
+            line.Operands = PlainRegisterNames(insn[0].op_str);
             cs_free(insn, n);
             return line;
         }
     }
 #endif
     line.Mnemonic = thumb ? ".hword" : ".word";
-    line.Operands = QString("0x%1").arg(line.Opcode, thumb ? 4 : 8, 16, QChar('0'));
+    line.Operands = Format(thumb ? "0x%04x" : "0x%08x", line.Opcode);
     return line;
 }

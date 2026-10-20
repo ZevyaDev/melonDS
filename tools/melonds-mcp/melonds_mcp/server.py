@@ -28,8 +28,9 @@ server = Server(
 
 CONSOLES: dict[int, Console] = {}
 SEARCHES: dict[int, RamSearch] = {}
-WATCHES = Watches()
-symbols = SymbolTable()
+SYMBOLS: dict[int, SymbolTable] = {}  # per console id; a console without symbols_load has no entry
+WATCH_LISTS: dict[tuple, Watches] = {}  # per game, see watch_key
+NO_SYMBOLS = SymbolTable()  # stays empty
 STATE_NAMES = {0: "idle", 1: "running", 2: "stopped"}
 HEX_DIGITS = set("0123456789abcdefABCDEF")
 
@@ -38,6 +39,33 @@ def con(console):
     if console not in CONSOLES:
         raise MelonError(f"no console {console}; call console_create first")
     return CONSOLES[console]
+
+
+def syms(c):
+    """The symbol table of console `c` (an empty one when it has none)."""
+    return SYMBOLS.get(c.id, NO_SYMBOLS) if c else NO_SYMBOLS
+
+
+def watch_key(c):
+    """Watch lists belong to a game: consoles with the same ROM path (absolute, case-normalised) share one list.
+    A console without a ROM has a list of its own."""
+    if c.rom:
+        return ("rom", os.path.normcase(os.path.abspath(c.rom)))
+    return ("console", c.id)
+
+
+def watches_of(c, create=False):
+    key = watch_key(c)
+    if create:
+        return WATCH_LISTS.setdefault(key, Watches())
+    return WATCH_LISTS.get(key) or Watches()
+
+
+def prune_watches():
+    """Drop watch lists that no console's game refers to any more."""
+    live = {watch_key(c) for c in CONSOLES.values()}
+    for key in [k for k in WATCH_LISTS if k not in live]:
+        del WATCH_LISTS[key]
 
 
 def addr_of(value, c=None):
@@ -50,21 +78,22 @@ def addr_of(value, c=None):
         return int(text, 16)
     if text.isdigit():
         return int(text)
-    s = symbols.resolve(text, c)
+    s = syms(c).resolve(text, c)
     if not s:
         raise MelonError(f"unknown address or symbol: {text}")
     return s.addr
 
 
 def describe(addr, c=None):
-    return symbols.describe(addr, c) if symbols.source else f"{addr:08x}"
+    t = syms(c)
+    return t.describe(addr, c) if t.source else f"{addr:08x}"
 
 
 def is_thumb(addr, c, cpu, mode):
     if mode in ("thumb", "arm"):
         return mode == "thumb"
-    if symbols.source:
-        s = symbols.lookup(addr, c)
+    if syms(c).source:
+        s = syms(c).lookup(addr, c)
         if s and s.kind == "function":
             return s.thumb
     regs = c.regs(cpu)
@@ -75,7 +104,7 @@ def disasm_text(c, addr, count, cpu, mode="auto", mark=None):
     thumb = is_thumb(addr, c, cpu, mode)
     code = c.read(addr, count * (2 if thumb else 4), cpu)
     lines = disassemble(code, addr, thumb, lambda a: describe(a, c))
-    return format_lines(lines, (lambda a: describe(a, c)) if symbols.source else None, mark)
+    return format_lines(lines, (lambda a: describe(a, c)) if syms(c).source else None, mark)
 
 
 def break_report(c):
@@ -109,21 +138,26 @@ def group_result(group, timed_out, states):
 
 
 @server.tool()
-def console_create(nickname: str = "", bios9: str = "", bios7: str = "", firmware: str = "", rom: str = "", save: str = "") -> dict:
-    """Create a console (debug interpreter). Empty BIOS/firmware use FreeBIOS and generated firmware. Optional rom loads it."""
+def console_create(nickname: str = "", bios9: str = "", bios7: str = "", firmware: str = "", rom: str = "", save: str = "", symbols: str = "") -> dict:
+    """Create a console (debug interpreter). Empty BIOS/firmware use FreeBIOS and generated firmware. Optional rom loads it.
+    Optional symbols is loaded into this console's symbol table (as symbols_load); new consoles otherwise start without symbols."""
     c = Console(bios9 or os.environ.get("MELONDS_BIOS9"), bios7 or os.environ.get("MELONDS_BIOS7"),
                 firmware or os.environ.get("MELONDS_FIRMWARE"), nickname or None)
     CONSOLES[c.id] = c
     if rom:
         c.load_rom(rom, save or None)
+    if symbols:
+        symbols_load(symbols, c.id)
     return {"console": c.id, "rom": c.rom}
 
 
 @server.tool()
 def console_destroy(console: int) -> str:
-    """Destroy a console."""
+    """Destroy a console, dropping its symbol table (and its game's watches when no other console runs that game)."""
     con(console).close()
     del CONSOLES[console]
+    SYMBOLS.pop(console, None)
+    prune_watches()
     return "destroyed"
 
 
@@ -142,8 +176,10 @@ def console_list() -> dict:
 
 @server.tool()
 def rom_load(path: str, console: int = 0, save: str = "") -> str:
-    """Load a ROM into a console and boot it (direct boot). save defaults to <rom>.sav (.sav.N for console N>0)."""
+    """Load a ROM into a console and boot it (direct boot). save defaults to <rom>.sav (.sav.N for console N>0).
+    The console then uses the watch list of that ROM's game."""
     con(console).load_rom(path, save or None)
+    prune_watches()
     return f"loaded {path}"
 
 
@@ -370,35 +406,38 @@ def ramsearch_list(limit: int = 100, console: int = 0) -> list[str]:
 
 @server.tool()
 def watch_add(name: str, address: str, type: str = "u32", cpu: int = 9, length: int = 0, note: str = "", console: int = 0) -> dict:
-    """Name an address. Types: u8 s8 u16 s16 u32 s32 fx32 fx16 (DS fixed point /4096), bytes, ascii, utf16 (with length)."""
-    WATCHES.add(name, addr_of(address, CONSOLES.get(console)), type, cpu, length, note)
+    """Name an address in the watch list of the console's game (consoles running the same ROM share it). Types: u8 s8 u16 s16 u32 s32 fx32 fx16 (DS fixed point /4096), bytes, ascii, utf16 (with length)."""
+    c = con(console)
+    watches_of(c, True).add(name, addr_of(address, c), type, cpu, length, note)
     return watch_read(console)
 
 
 @server.tool()
 def watch_remove(name: str, console: int = 0) -> dict:
     """Remove a named watch."""
-    WATCHES.remove(name)
+    watches_of(con(console)).remove(name)
     return watch_read(console)
 
 
 @server.tool()
 def watch_read(console: int = 0) -> dict:
     """Current values of all watches."""
-    return WATCHES.read(con(console))
+    c = con(console)
+    return watches_of(c).read(c)
 
 
 @server.tool()
-def watch_save(path: str) -> str:
-    """Save the watch list as JSON, to share findings."""
-    WATCHES.save(path)
-    return f"saved {len(WATCHES.items)} watches"
+def watch_save(path: str, console: int = 0) -> str:
+    """Save the console's game watch list as JSON, to share findings."""
+    w = watches_of(con(console))
+    w.save(path)
+    return f"saved {len(w.items)} watches"
 
 
 @server.tool()
-def watch_load(path: str) -> list[str]:
-    """Load (merge) a watch list saved by watch_save."""
-    return WATCHES.load(path)
+def watch_load(path: str, console: int = 0) -> list[str]:
+    """Load (merge) a watch list saved by watch_save into the console's game list."""
+    return watches_of(con(console), True).load(path)
 
 
 @server.tool()
@@ -616,22 +655,24 @@ def packets_read(limit: int = 100, console: int = 0) -> list[str]:
 
 
 @server.tool()
-def symbols_load(path: str) -> dict:
-    """Load symbols: a dsd config.yaml (or its directory, e.g. config/usa/arm9) or an 'addr name [size]' file.
-    Overlay symbols resolve only while that overlay's code is in RAM."""
-    return symbols.load(path)
+def symbols_load(path: str, console: int = 0) -> dict:
+    """Load symbols into one console's table: a dsd config.yaml (or its directory, e.g. config/usa/arm9) or an
+    'addr name [size]' file. Overlay symbols resolve only while that overlay's code is in RAM.
+    Tables are per console; a console id that does not exist yet gets its table when it is created."""
+    return SYMBOLS.setdefault(console, SymbolTable()).load(path)
 
 
 @server.tool()
 def symbol_lookup(query: str, console: int = 0) -> dict:
     """Address to symbol, or symbol to address."""
     c = CONSOLES.get(console)
+    t = syms(c) if c else SYMBOLS.get(console, NO_SYMBOLS)
     try:
         addr = int(query, 16)
-        s = symbols.lookup(addr, c)
+        s = t.lookup(addr, c)
         return {"addr": f"{addr:08x}", "symbol": describe(addr, c), "size": s.size if s else None}
     except ValueError:
-        s = symbols.resolve(query, c)
+        s = t.resolve(query, c)
         if not s:
             raise MelonError(f"unknown symbol {query}")
         return {"symbol": s.name, "addr": f"{s.addr:08x}", "size": s.size, "module": s.module, "thumb": s.thumb}
@@ -641,13 +682,15 @@ def symbol_lookup(query: str, console: int = 0) -> dict:
 def overlays_loaded(console: int = 0) -> list[str]:
     """Overlays whose code is currently in RAM (needs symbols_load of a dsd config)."""
     c = con(console)
-    return [symbols.overlays[i].name for i in symbols.loaded_overlays(c)]
+    t = syms(c)
+    return [t.overlays[i].name for i in t.loaded_overlays(c)]
 
 
 def main():
     native.lib().mds_set_local_dir(str(Path(os.environ.get("MELONDS_LOCAL_DIR", ".")).resolve()).encode())
-    if sym := os.environ.get("MELONDS_SYMBOLS"):
-        symbols.load(sym)
+    sym = os.environ.get("MELONDS_SYMBOLS", "")
     if rom := os.environ.get("MELONDS_ROM"):
-        console_create(rom=rom)
+        console_create(rom=rom, symbols=sym)  # the MELONDS_ROM console is console 0
+    elif sym:
+        symbols_load(sym, 0)
     server.run()

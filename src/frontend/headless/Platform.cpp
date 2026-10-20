@@ -390,8 +390,18 @@ int MP_SendAck(u8* data, int len, u64 timestamp, void* userdata)
     return MPInterface::Get().SendAck(Inst(userdata)->ID, data, len, timestamp);
 }
 
+// A blocking wireless receive (it waits up to the MP receive timeout for a partner's packet). While one is in
+// progress a partner waiting at an input_multi barrier is let go: it cannot answer from there.
+struct RecvPendingScope
+{
+    int ID;
+    explicit RecvPendingScope(int id) : ID(id) { Headless::Barriers().SetRecvPending(ID, true); }
+    ~RecvPendingScope() { Headless::Barriers().SetRecvPending(ID, false); }
+};
+
 int MP_RecvHostPacket(u8* data, u64* timestamp, void* userdata)
 {
+    RecvPendingScope pending(Inst(userdata)->ID);
     int len = MPInterface::Get().RecvHostPacket(Inst(userdata)->ID, data, timestamp);
     if (len > 0)
         Inst(userdata)->LogPacket(false, 1, data, len, *timestamp);
@@ -400,6 +410,7 @@ int MP_RecvHostPacket(u8* data, u64* timestamp, void* userdata)
 
 u16 MP_RecvReplies(u8* data, u64 timestamp, u16 aidmask, void* userdata)
 {
+    RecvPendingScope pending(Inst(userdata)->ID);
     return MPInterface::Get().RecvReplies(Inst(userdata)->ID, data, timestamp, aidmask);
 }
 
@@ -429,16 +440,22 @@ void Camera_CaptureFrame(int num, u32* frame, int width, int height, bool yuv, v
 
 void Mic_Start(void* userdata)
 {
+    if (userdata)
+        Inst(userdata)->Mic.Start();
 }
 
 void Mic_Stop(void* userdata)
 {
+    if (userdata)
+        Inst(userdata)->Mic.Stop();
 }
 
+// Returns 0 when nothing is queued, so melonDS holds its last sample.
 int Mic_ReadInput(s16* data, int maxlength, void* userdata)
 {
-    memset(data, 0, maxlength * sizeof(s16));
-    return maxlength;
+    if (!userdata || maxlength <= 0)
+        return 0;
+    return int(Inst(userdata)->Mic.Read(data, size_t(maxlength)));
 }
 
 AACDecoder* AAC_Init()

@@ -18,7 +18,7 @@
 
 #include "MemViewDialog.h"
 #include "debugger/DebugBridge.h"
-#include "debugger/DebugSymbols.h"
+#include "debugger/DebugSymbolsQt.h"
 #include "debugger/DebugTool.h"
 #include "debugger/DebugTools.h"
 #include "Platform.h"
@@ -993,7 +993,7 @@ void MemViewDialog::GoToAddress(const QString &text)
     QString rawAddr = text;
     uint32_t addr = 0;
 
-    if (!this->GetBridge()->symbols().parseAddress(text, addr))
+    if (!this->GetBridge()->symbols().parseAddress(SymStr(text), addr))
     {
         this->StripStringHex(&rawAddr);
 
@@ -1139,7 +1139,7 @@ void MemViewDialog::UpdateInfo()
             .arg((melonDS::s8)bytes[0]).arg(half).arg((melonDS::s16)half).arg(word).arg((melonDS::s32)word)
             .arg((melonDS::s32)word / 4096.0, 0, 'f', 4).arg(Hex((word >> 24) | ((word >> 8) & 0xFF00) | ((word << 8) & 0xFF0000) | (word << 24)));
     }
-    QString sym = this->Space <= DebugTools::memSpace_ARM7 ? bridge->symbols().describe(addr) : QString();
+    QString sym = this->Space <= DebugTools::memSpace_ARM7 ? SymStr(bridge->symbols().describe(addr)) : QString();
     if (!sym.isEmpty())
     {
         text += "  " + sym;
@@ -1155,7 +1155,7 @@ void MemViewDialog::UpdateInfo()
             DebugBridge* bridge = this->GetBridge();
             QString by = (writer & 0xFFFFFFF0) == 0xFFFFFFF0
                 ? QString("DMA%1").arg((writer >> 1) & 3)
-                : Hex(writer & ~1u) + " " + bridge->symbols().describe(writer & ~1u);
+                : Hex(writer & ~1u) + " " + SymStr(bridge->symbols().describe(writer & ~1u));
             this->InfoLabel->setText(text + "    last written by " + by);
         });
 }

@@ -74,11 +74,9 @@ set(SOURCES_QT_SDL
     ../lua_debug/LuaDebug.cpp
 
     debugger/DebugBridge.cpp
-    debugger/DebugSymbols.cpp
     debugger/DebugTool.cpp
     debugger/DebugTools.cpp
     debugger/DebuggerWindow.cpp
-    debugger/Disassembler.cpp
     debugger/DisasmView.cpp
     debugger/TraceWindow.cpp
     debugger/RamSearchWindow.cpp
@@ -235,13 +233,10 @@ if (MELONDS_AUTOMATION)
     target_compile_definitions(melonDS PRIVATE MELONDS_AUTOMATION)
 endif()
 
-pkg_check_modules(Capstone IMPORTED_TARGET capstone)
-if (Capstone_FOUND)
-    target_link_libraries(melonDS PRIVATE PkgConfig::Capstone)
-    target_compile_definitions(melonDS PRIVATE MELONDS_HAVE_CAPSTONE)
-else()
-    message(WARNING "capstone not found: the debugger shows raw opcodes instead of disassembly")
+if (NOT TARGET melonds_debug)
+    add_subdirectory("../debug_common" ${CMAKE_BINARY_DIR}/debug_common)
 endif()
+target_link_libraries(melonDS PRIVATE melonds_debug)
 
 target_link_libraries(melonDS PRIVATE core)
 target_link_libraries(melonDS PRIVATE PkgConfig::SDL2 PkgConfig::LibArchive PkgConfig::Zstd PkgConfig::Faad ${LUA_LIBRARIES})

@@ -37,7 +37,7 @@
 #include "DebugBridge.h"
 #include "FrameTools.h"
 #include "SPU.h"
-#include "DebugSymbols.h"
+#include "DebugSymbolsQt.h"
 #include "DebugTools.h"
 #include "EmuInstance.h"
 #include "EmuThread.h"
@@ -316,9 +316,9 @@ QString Automation::run(const QStringList& args)
     }
     if (c == "symbols")
     {
-        QString error;
-        if (!bridge->symbols().load(rest, error))
-            return "error: " + error;
+        std::string error;
+        if (!bridge->symbols().load(SymStr(rest), error))
+            return "error: " + SymStr(error);
         DebugTools::rememberSymbols(bridge, rest);
         emit bridge->symbolsChanged();
         return QString("ok %1").arg(bridge->symbols().set()->SymbolCount);
@@ -400,7 +400,7 @@ QString Automation::run(const QStringList& args)
     if (c == "runto" && args.size() > 1)
     {
         u32 addr;
-        if (!bridge->symbols().parseAddress(args[1], addr))
+        if (!bridge->symbols().parseAddress(SymStr(args[1]), addr))
             return "error: address";
         bridge->runTo(0, addr);
         return "ok";
@@ -408,7 +408,7 @@ QString Automation::run(const QStringList& args)
     if (c == "bp" && args.size() > 1)
     {
         u32 addr;
-        if (!bridge->symbols().parseAddress(args[1], addr))
+        if (!bridge->symbols().parseAddress(SymStr(args[1]), addr))
             return "error: address";
         int id = -1;
         bridge->run([&](NDS& nds) { id = nds.Debugger.AddBreakpoint(1, addr); });
@@ -417,7 +417,7 @@ QString Automation::run(const QStringList& args)
     if (c == "wp" && args.size() > 3)
     {
         u32 addr;
-        if (!bridge->symbols().parseAddress(args[1], addr))
+        if (!bridge->symbols().parseAddress(SymStr(args[1]), addr))
             return "error: address";
         u32 size = args[2].toUInt();
         u8 flags = (args[3].contains('r') ? Watch_Read : 0) | (args[3].contains('w') ? Watch_Write : 0);

@@ -29,3 +29,4 @@ freebios/bios*
 freebios/build/
 
 __pycache__/
+!src/frontend/debug_common/

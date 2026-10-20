@@ -489,6 +489,7 @@ void NDS::Reset()
     ARM9Timestamp = 0; ARM9Target = 0;
     ARM7Timestamp = 0; ARM7Target = 0;
     SysTimestamp = 0;
+    TimelineValid = false;
 
     InitTimings();
 
@@ -765,6 +766,7 @@ bool NDS::DoSavestate(Savestate* file)
         // 'dept of redundancy dept'
         // but we do need to update the mappings
         MapSharedWRAM(WRAMCnt);
+        TimelineValid = false;
 
         InitTimings();
         SetGBASlotTimings();
@@ -1198,11 +1200,31 @@ void NDS::CancelEvent(u32 id)
 void NDS::TouchScreen(u16 x, u16 y)
 {
     SPI.GetTSC()->SetTouchCoords(x, y);
+    TimelineValid = true; TimelineDown = true; TimelineX = x; TimelineY = y;
 }
 
 void NDS::ReleaseScreen()
 {
     SPI.GetTSC()->SetTouchCoords(0x000, 0xFFF);
+    TimelineValid = true; TimelineDown = false;
+}
+
+void NDS::SyncTouchTimeline()
+{
+    if (!Timeline) return;
+
+    // called from ARM7 accesses: ARM7Timestamp and FrameStartTimestamp are both system cycles
+    u64 now = (ARM7Timestamp > FrameStartTimestamp) ? (ARM7Timestamp - FrameStartTimestamp) : 0;
+
+    u16 x = 0, y = 0;
+    bool down = Timeline->TouchAt(now, x, y);
+
+    // the controller only needs to hear about changes
+    if (TimelineValid && down == TimelineDown && (!down || (x == TimelineX && y == TimelineY)))
+        return;
+
+    if (down) TouchScreen(x, y);
+    else ReleaseScreen();
 }
 
 
@@ -3694,7 +3716,7 @@ u8 NDS::ARM7IORead8(u32 addr)
     case 0x04000133: return KeyCnt[1] >> 8;
     case 0x04000134: return RCnt & 0xFF;
     case 0x04000135: return RCnt >> 8;
-    case 0x04000136: return (KeyInput >> 16) & 0xFF;
+    case 0x04000136: SyncTouchTimeline(); return (KeyInput >> 16) & 0xFF;
     case 0x04000137: return KeyInput >> 24;
 
     case 0x04000138: return RTC.Read() & 0xFF;
@@ -3759,7 +3781,7 @@ u16 NDS::ARM7IORead16(u32 addr)
     case 0x04000130: return KeyInput & 0xFFFF;
     case 0x04000132: return KeyCnt[1];
     case 0x04000134: return RCnt;
-    case 0x04000136: return KeyInput >> 16;
+    case 0x04000136: SyncTouchTimeline(); return KeyInput >> 16;
 
     case 0x04000138: return RTC.Read();
 
@@ -3831,7 +3853,7 @@ u32 NDS::ARM7IORead32(u32 addr)
     case 0x0400010C: return TimerGetCounter(7) | (Timers[7].Cnt << 16);
 
     case 0x04000130: return (KeyInput & 0xFFFF) | (KeyCnt[1] << 16);
-    case 0x04000134: return RCnt | (KeyInput & 0xFFFF0000);
+    case 0x04000134: SyncTouchTimeline(); return RCnt | (KeyInput & 0xFFFF0000);
     case 0x04000138: return RTC.Read();
 
     case 0x04000180: return IPCSync7;

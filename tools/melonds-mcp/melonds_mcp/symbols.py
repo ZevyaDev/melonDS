@@ -3,7 +3,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import yaml
+
 
 SYMBOL_LINE = re.compile(r"^(\S+)\s+kind:(\w+)(?:\(([^)]*)\))?\s+addr:(0x[0-9a-fA-F]+)")
 SAMPLE_WINDOWS = 8
@@ -109,6 +109,7 @@ class SymbolTable:
         }
 
     def _load_dsd(self, config_path):
+        import yaml
         cfg = yaml.safe_load(config_path.read_text())
         root = config_path.parent
         self.static, self.overlays = [], {}

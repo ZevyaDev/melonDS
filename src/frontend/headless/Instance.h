@@ -21,14 +21,20 @@
 
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "Commands.h"
+#include "DebugSymbols.h"
+#include "Input.h"
+#include "MicFifo.h"
 #include "NDS.h"
 #include "Net.h"
+#include "Subs.h"
 
 namespace Headless
 {
@@ -66,9 +72,13 @@ public:
     ~Instance();
 
     const int ID;
+    // The id the console presents to the outside: its slot plus the process-wide instance base.
+    // Drives the firmware MAC address, the save-file suffix and emu.getconsoleid().
+    int EffectiveID() const;
     std::unique_ptr<melonDS::NDS> NDS;
     std::unique_ptr<LuaHost> Lua;
 
+    const std::string& GetSavePath() const { return SavePath; }
     bool LoadROM(const std::string& path, const std::string& savePath, std::string& error);
     void Reset();
 
@@ -78,6 +88,10 @@ public:
     RunState GetState();
     void Interrupt();
     bool TakeBreak(melonDS::BreakEvent& out);
+
+    // Run fn on this console's emulator thread (inline if already there) and wait.
+    // False if the console is being destroyed and fn did not run.
+    bool Call(const std::function<void(Instance&)>& fn);
 
     bool SaveState(const std::string& path, std::string& error);
     bool LoadState(const std::string& path, std::string& error);
@@ -89,7 +103,15 @@ public:
     void WriteSave(const melonDS::u8* data, melonDS::u32 len);
     void LogPacket(bool sent, melonDS::u8 type, const melonDS::u8* data, int len, melonDS::u64 timestamp);
 
+    // True while the emulator thread is blocked at a frame boundary in Wait mode.
+    bool WaitingForInput();
+
     melonDS::u64 FramesRun = 0;
+    InputQueue Input;
+    Subscriptions Subs;     // frame events for the socket server's subscriptions
+    TouchTimeline TouchLine;
+    MicFifo Mic;
+    DebugSymbols Symbols;   // this console's symbol table; the server thread only
 
 private:
     std::string SavePath;
@@ -101,6 +123,9 @@ private:
     melonDS::u32 FramesLeft = 0;
     bool Quit = false;
     bool BreakPending = false;
+    bool Waiting = false;           // blocked for input (guarded by Lock)
+    bool WaitInterrupt = false;     // Interrupt() arrived while Waiting
+    bool BarrierEvent = false;      // a barrier partner arrived, dropped out or entered a wireless receive
     melonDS::BreakEvent LastBreak {};
 
     std::mutex PacketLock;
@@ -108,9 +133,20 @@ private:
     size_t PacketCapacity = 0;
     std::deque<PacketRecord> Packets;
 
+    CommandQueue Commands;
+
     void ThreadMain();
     void Park(const melonDS::BreakEvent& ev);
+    bool AcquireInput(AppliedInput& out);
+    bool AwaitBarrier(uint32_t group);
 };
+
+// Offset added to every console's id for MAC and save numbering. Process-wide; it can only
+// change while no console exists. SetInstanceBase returns false for a negative base.
+int InstanceBase();
+bool SetInstanceBase(int base);
+// "<rom>.sav" for effective id 0, "<rom>.sav.N+1" otherwise.
+std::string DefaultSavePath(const std::string& romPath, int effectiveId);
 
 melonDS::Net& Network();
 const std::string& LocalDirectory();

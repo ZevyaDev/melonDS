@@ -22,7 +22,7 @@
 #include <QThread>
 
 #include "DebugBridge.h"
-#include "DebugSymbols.h"
+#include "DebugSymbolsQt.h"
 #include "FrameTools.h"
 #include "LogWindow.h"
 #include "EmuInstance.h"

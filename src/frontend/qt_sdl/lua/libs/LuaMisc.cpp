@@ -113,6 +113,15 @@ int Lua_Getsystemid(lua_State* L)
 }
 AddEmuFunction(Lua_Getsystemid,getsystemid);
 
+// The Qt frontend has no instance base: the id is the EmuInstance's own.
+int Lua_Getconsoleid(lua_State* L)
+{
+    LuaBundle* bundle = get_bundle(L);
+    lua_pushinteger(L,bundle->getEmuInstance()->getInstanceID());
+    return 1;
+}
+AddEmuFunction(Lua_Getconsoleid,getconsoleid);
+
 int Lua_Framecount(lua_State* L)
 {
     LuaBundle* bundle = get_bundle(L);

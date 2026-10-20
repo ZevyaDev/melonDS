@@ -24,6 +24,8 @@
 
 #include <lua.hpp>
 
+#include "Input.h"
+
 namespace Headless
 {
 
@@ -45,13 +47,20 @@ public:
 
     void Print(const std::string& text);
 
+    // Input set by the script is gathered here and submitted as one payload when the script
+    // yields (or the hook or exec returns).
+    InputState& EditInput();
+    InputState CurrentInput() const;
+    void FlushInput();
+
     Instance& Inst;
-    unsigned Keys = 0;
 
 private:
     lua_State* L = nullptr;
     lua_State* Main = nullptr;
     int MainRef = LUA_NOREF;
+    InputState Pending;
+    bool PendingActive = false;
     std::mutex OutputLock;
     std::string Output;
 
