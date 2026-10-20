@@ -71,6 +71,9 @@ not, and a console without a ROM has its own. The list is dropped when no consol
 more. `watch_save` and `watch_load` take `console` and use that console's list; the JSON format is unchanged.
 
 The GDB stub (`mds_gdb`, ARM9 3333 / ARM7 3334) also works in the headless build, watchpoints included.
+It listens on 127.0.0.1; `Console.gdb(host="0.0.0.0")` (`mds_gdb_host`) opens it to the network, as
+`native.serve(host=...)` and `melonds_server --host` do for the socket server (both warn: there is no
+authentication). The C API reference is `docs/headless-api.md`.
 
 ## Lua
 
