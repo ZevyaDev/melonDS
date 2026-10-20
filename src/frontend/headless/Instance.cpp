@@ -149,6 +149,8 @@ Instance::Instance(int id, const Config& config, std::string& error) : ID(id)
 
 Instance::~Instance()
 {
+    if (!NDS)       // the constructor failed before the console existed (bad BIOS or firmware)
+        return;
     {
         std::lock_guard lock(Lock);
         Quit = true;
@@ -341,6 +343,7 @@ void Instance::ThreadMain()
             NDS->RunFrame();
             FramesRun++;
             Lua->OnFrameEnd();
+            Subs.Publish(*this, applied);
             {
                 std::lock_guard lock(Lock);
                 if (FramesLeft)

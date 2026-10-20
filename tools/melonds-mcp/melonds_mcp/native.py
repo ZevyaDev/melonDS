@@ -148,6 +148,12 @@ def _load():
         "mds_packets": (c_int, [c_int, c_int, c_int]),
         "mds_packets_take": (c_int, [c_int, POINTER(MdsPacket), POINTER(c_uint8), c_int, c_int]),
     }
+    sig |= {
+        "mds_serve": (c_int, [c_int, c_int, POINTER(c_int)]),
+        "mds_serve_stop": (None, []),
+        "mds_serve_wait": (c_int, [c_int]),
+        "mds_serve_name": (None, [c_char_p]),
+    }
     for name, (res, args) in sig.items():
         fn = getattr(lib, name)
         fn.restype = res
@@ -204,6 +210,25 @@ def mp_timeout(ms=-1):
 
 def set_pacing(fps):
     lib().mds_set_pacing(fps)
+
+
+def serve(port=0, port_range=0, name=None):
+    """Start the socket server thread (flags low 16 bits = port range, 0 = default 32).
+    port 0 lets the OS pick. Returns the bound port."""
+    if name:
+        lib().mds_serve_name(name.encode())
+    bound = c_int(0)
+    _check(lib().mds_serve(port, port_range, ctypes.byref(bound)))
+    return bound.value
+
+
+def serve_stop():
+    lib().mds_serve_stop()
+
+
+def serve_wait(timeout_ms=0):
+    """1 once a client has sent shutdown, else 0 after timeout_ms."""
+    return lib().mds_serve_wait(timeout_ms)
 
 
 def run_group(consoles, frames, timeout_ms):

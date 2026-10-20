@@ -549,23 +549,31 @@ struct IdReply
     template <class A> void Visit(A& a) { a.Io(Seq); a.Io(Id); }
 };
 
-// data {u32 seq, u16 count, u16 ids[count]}. Reply to console_list.
+// data {u32 seq, u16 count, count x {u16 id, u8 state (0 idle, 1 running, 2 parked), u64 frames}}.
+// Reply to console_list (frames = the console's frame count now).
+struct ConsoleInfo
+{
+    uint16_t Id = 0;
+    uint8_t State = 0;
+    uint64_t Frames = 0;
+};
+
 struct ConsoleListReply
 {
     static constexpr MsgType Type = MsgType::data;
     uint32_t Seq = 0;
-    std::vector<uint16_t> Ids;
+    std::vector<ConsoleInfo> Consoles;
     template <class A> void Visit(A& a)
     {
         a.Io(Seq);
-        a.template List<uint16_t>(Ids, 2, [](auto& x, uint16_t& v) { x.Io(v); });
+        a.template List<uint16_t>(Consoles, 11, [](auto& x, ConsoleInfo& c) { x.Io(c.Id); x.Io(c.State); x.Io(c.Frames); });
     }
 };
 
 // ---------------------------------------------------------------------------
 // Session
 
-// hello request: {u32 seq, u32 protocolVersion, u16 defaultConsole (0xFFFF = lowest),
+// hello (optional: a client that skips it gets the defaults) request: {u32 seq, u32 protocolVersion, u16 defaultConsole (0xFFFF = lowest),
 //                 u8 emptyQueue (0 repeat, 1 neutral, 2 wait), u8 reserved,
 //                 u16 stallTimeoutFrames (repeat mode; default 15, 0 = never)}
 struct Hello
@@ -642,7 +650,9 @@ struct ConsoleCreateReply
     template <class A> void Visit(A& a) { a.Io(Seq); a.Io(Id); }
 };
 
-// console_destroy, console_list (reply ConsoleListReply), reset, shutdown: {u32 seq}; reply ok
+// console_destroy, console_list (reply ConsoleListReply), reset, shutdown: {u32 seq}; reply ok. console_destroy
+// sends a console_gone event first. reset and rom_load clear the input queue and send input_queue(0) first.
+// shutdown: ok, then the server closes the connection and mds_serve_wait() returns 1 for the host process.
 typedef SeqOnly<MsgType::console_destroy> ConsoleDestroy;
 typedef SeqOnly<MsgType::console_list> ConsoleList;
 typedef SeqOnly<MsgType::reset> Reset;
@@ -666,7 +676,9 @@ inline void IoIds(A& a, std::vector<uint16_t>& ids)
     a.template List<uint16_t>(ids, 2, [](auto& x, uint16_t& v) { x.Io(v); });
 }
 
-// run: {u32 seq, u32 frames, u16 count, u16 ids[count]}; reply ok when every console has run
+// run: {u32 seq, u32 frames, u16 count, u16 ids[count]}. The ok reply is DEFERRED until every named
+// console (empty list = all) has stopped: finished its frames or parked at a break (then the others are
+// interrupted and a break event precedes the reply). Other messages are served meanwhile.
 struct Run
 {
     static constexpr MsgType Type = MsgType::run;
@@ -676,7 +688,8 @@ struct Run
     template <class A> void Visit(A& a) { a.Io(Seq); a.Io(Frames); IoIds(a, Consoles); }
 };
 
-// live_start: {u32 seq, u32 fps, u16 count, u16 ids[count]}; reply ok
+// live_start: {u32 seq, u32 fps, u16 count, u16 ids[count]}; starts the consoles (empty = all) with no end and
+// sets the process pacing to fps (0 = unlimited); reply ok at once
 struct LiveStart
 {
     static constexpr MsgType Type = MsgType::live_start;
@@ -686,7 +699,8 @@ struct LiveStart
     template <class A> void Visit(A& a) { a.Io(Seq); a.Io(Fps); IoIds(a, Consoles); }
 };
 
-// live_stop: {u32 seq, u16 count, u16 ids[count]}; reply ok
+// live_stop: {u32 seq, u16 count, u16 ids[count]}; stops at the next frame boundary; reply ok once every named
+// console (empty = all) has stopped
 struct LiveStop
 {
     static constexpr MsgType Type = MsgType::live_stop;
@@ -695,10 +709,11 @@ struct LiveStop
     template <class A> void Visit(A& a) { a.Io(Seq); IoIds(a, Consoles); }
 };
 
-// pause: {u32 seq}; reply ok
+// pause: {u32 seq}; stops the header console at the next frame boundary; reply ok once it has stopped
 typedef SeqOnly<MsgType::pause> Pause;
 
-// step: {u32 seq, u8 cpu, u32 count}; reply ok
+// step: {u32 seq, u8 cpu, u32 count}; the console must be stopped. Arms the step and runs the console until it
+// parks on it (at most 120 frames); reply ok (deferred, as run) once it has stopped, after the break event.
 struct Step
 {
     static constexpr MsgType Type = MsgType::step;
@@ -967,7 +982,8 @@ struct MemorySearchReply
 
 // text_find: {u32 seq, u8 cpu, u32 start, u32 length, string text (UTF-8), u8 encodings, u32 limit}
 //   Reply data: {u32 seq, u8 truncated, u32 count, count x {u32 address, u8 encoding}}
-//   where encoding is one of EncAscii, EncUtf16le, EncUtf8.
+//   where encoding is one of EncAscii, EncUtf16le, EncUtf8. Hits ascend by address then encoding. Pure ASCII text
+//   has the same bytes in ASCII and UTF-8: it is reported once, as EncAscii when that is selected.
 struct TextFind
 {
     static constexpr MsgType Type = MsgType::text_find;
@@ -1043,6 +1059,9 @@ struct SubBlock
     std::vector<std::vector<uint8_t>> Ranges; // one entry per subscribed range, in subscription order
 };
 
+// A console only sends frame events while the client has a subscription on it (zero ranges = plain per-frame
+// notifications). waitingForInput: Wait mode with an empty queue, i.e. the console stops at the next frame
+// boundary until input arrives. dropped: frame events discarded for back-pressure (Outbox) before this one.
 // frame: {u32 seq=0, u64 frame, u32 appliedSeq, u8 inputApplied, u8 waitingForInput,
 //         u16 queueDepth, u32 dropped (frame events dropped for back-pressure since the last one),
 //         u16 subCount, subCount x {u32 subId, u16 rangeCount, rangeCount x {u32 len, bytes}}}

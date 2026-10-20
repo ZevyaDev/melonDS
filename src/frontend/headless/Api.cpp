@@ -24,9 +24,11 @@
 #include <mutex>
 
 #include "melonds_api.h"
+#include "ApiInternal.h"
 #include "Instance.h"
 #include "LuaHost.h"
 #include "MPInterface.h"
+#include "Server.h"
 
 using namespace melonDS;
 using namespace Headless;
@@ -50,6 +52,10 @@ std::mutex SlotsLock;
 std::map<int, Slot> Slots;
 thread_local std::string LastError;
 bool MPReady = false;
+
+std::mutex HookLock;
+std::function<void(Instance&)> CreatedHook;
+std::function<void(int)> DestroyedHook;
 
 int Fail(const std::string& error)
 {
@@ -203,8 +209,18 @@ int mds_create(const char* bios9, const char* bios7, const char* firmware, const
     if (!error.empty())
         return Fail(error);
 
-    std::lock_guard lock(SlotsLock);
-    Slots[id].Inst = std::move(inst);
+    Instance* created = inst.get();
+    {
+        std::lock_guard lock(SlotsLock);
+        Slots[id].Inst = std::move(inst);
+    }
+    std::function<void(Instance&)> hook;
+    {
+        std::lock_guard lock(HookLock);
+        hook = CreatedHook;
+    }
+    if (hook)
+        hook(*created);
     return id;
 }
 
@@ -220,6 +236,13 @@ void mds_destroy(int id)
         Slots.erase(it);
     }
     inst.reset();
+    std::function<void(int)> hook;
+    {
+        std::lock_guard lock(HookLock);
+        hook = DestroyedHook;
+    }
+    if (hook)
+        hook(id);
 }
 
 int mds_load_rom(int id, const char* rom, const char* save)
@@ -516,18 +539,7 @@ int mds_read(int id, int cpu, uint32_t addr, uint32_t len, uint8_t* out)
     if (!s)
         return -1;
     return OnEmu(s, [&](Instance& inst, std::string&) {
-        melonDS::NDS& nds = *inst.NDS;
-        int n = cpu == 7 || cpu == 1;
-        ARMv5& arm9 = *nds.ARM9;
-        for (u32 i = 0; i < len; i++)
-        {
-            u32 a = addr + i;
-            bool tcm = !n && (a < arm9.ITCMSize || (a & arm9.DTCMMask) == arm9.DTCMBase);
-            if ((a >> 24) == 0x02 && !tcm)
-                out[i] = nds.MainRAM[a & nds.MainRAMMask];
-            else
-                out[i] = nds.Debugger.Peek(n, a, 1);
-        }
+        Api::ReadGuest(inst, cpu, addr, len, out);
         return 0;
     });
 }
@@ -879,6 +891,79 @@ int mds_packets_take(int id, mds_packet* headers, uint8_t* data, int max_packets
     }
     s->Packets.erase(s->Packets.begin(), s->Packets.begin() + n);
     return n;
+}
+
+int mds_serve(int port, int flags, int* bound)
+{
+    if (port < 0 || port > 65535)
+        return Fail("bad port");
+    std::string error;
+    int actual = 0;
+    if (!ServerStart(port, flags & 0xFFFF, actual, error))
+        return Fail(error);
+    if (bound)
+        *bound = actual;
+    return 0;
+}
+
+void mds_serve_stop(void)
+{
+    ServerStop();
+}
+
+int mds_serve_wait(int timeout_ms)
+{
+    return ServerWait(timeout_ms);
+}
+
+void mds_serve_name(const char* name)
+{
+    ServerSetName(name ? name : "");
+}
+
+}
+
+namespace Headless::Api
+{
+
+Instance* FindInstance(int id)
+{
+    std::lock_guard lock(SlotsLock);
+    auto it = Slots.find(id);
+    return it == Slots.end() ? nullptr : it->second.Inst.get();
+}
+
+std::vector<int> ConsoleIds()
+{
+    std::lock_guard lock(SlotsLock);
+    std::vector<int> ids;
+    for (auto& [id, slot] : Slots)
+        if (slot.Inst)
+            ids.push_back(id);
+    return ids;
+}
+
+void SetConsoleHooks(std::function<void(Instance&)> created, std::function<void(int)> destroyed)
+{
+    std::lock_guard lock(HookLock);
+    CreatedHook = std::move(created);
+    DestroyedHook = std::move(destroyed);
+}
+
+void ReadGuest(Instance& inst, int cpu, uint32_t addr, uint32_t len, uint8_t* out)
+{
+    melonDS::NDS& nds = *inst.NDS;
+    int n = cpu == 7 || cpu == 1;
+    ARMv5& arm9 = *nds.ARM9;
+    for (u32 i = 0; i < len; i++)
+    {
+        u32 a = addr + i;
+        bool tcm = !n && (a < arm9.ITCMSize || (a & arm9.DTCMMask) == arm9.DTCMBase);
+        if ((a >> 24) == 0x02 && !tcm)
+            out[i] = nds.MainRAM[a & nds.MainRAMMask];
+        else
+            out[i] = nds.Debugger.Peek(n, a, 1);
+    }
 }
 
 }

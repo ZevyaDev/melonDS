@@ -13,9 +13,13 @@ add_library(melonds_headless SHARED
     Instance.cpp
     LuaHost.cpp
     MicFifo.cpp
+    Outbox.cpp
     Platform.cpp
     Protocol.cpp
+    Search.cpp
+    Server.cpp
     Socket.cpp
+    Subs.cpp
     ../lua_debug/LuaDebug.cpp
 )
 
@@ -42,6 +46,10 @@ add_executable(headless_tests
     tests/CommandQueueTests.cpp
     tests/ProtocolTests.cpp
     tests/SocketTests.cpp
+    tests/OutboxTests.cpp
+    tests/SearchTests.cpp
+    Outbox.cpp
+    Search.cpp
     Protocol.cpp
     Socket.cpp
     tests/InputQueueTests.cpp

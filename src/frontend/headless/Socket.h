@@ -59,6 +59,10 @@ Socket ConnectLoopback(uint16_t port);
 // socket. Returns false on error or peer close.
 bool SendAll(Socket s, const void* data, size_t len);
 
+// One send() call: > 0 bytes accepted, 0 peer closed, < 0 error (or would block on a
+// non-blocking socket; check WouldBlock()). Never waits.
+int Send(Socket s, const void* data, size_t len);
+
 // recv(): > 0 bytes read, 0 peer closed, < 0 error (or would block on a
 // non-blocking socket; check WouldBlock()).
 int Recv(Socket s, void* buf, size_t len);

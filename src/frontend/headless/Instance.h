@@ -33,6 +33,7 @@
 #include "MicFifo.h"
 #include "NDS.h"
 #include "Net.h"
+#include "Subs.h"
 
 namespace Headless
 {
@@ -102,6 +103,7 @@ public:
 
     melonDS::u64 FramesRun = 0;
     InputQueue Input;
+    Subscriptions Subs;     // frame events for the socket server's subscriptions
     TouchTimeline TouchLine;
     MicFifo Mic;
 

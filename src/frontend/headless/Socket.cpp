@@ -186,6 +186,16 @@ bool SendAll(Socket s, const void* data, size_t len)
     return true;
 }
 
+int Send(Socket s, const void* data, size_t len)
+{
+#ifdef MSG_NOSIGNAL
+    const int flags = MSG_NOSIGNAL;
+#else
+    const int flags = 0;
+#endif
+    return (int)send(NATIVE(s), (const char*)data, (int)std::min<size_t>(len, 1 << 20), flags);
+}
+
 int Recv(Socket s, void* buf, size_t len)
 {
     return (int)recv(NATIVE(s), (char*)buf, (int)std::min<size_t>(len, 1 << 20), 0);

@@ -144,3 +144,35 @@ TEST(socket_send_all_large)
     CloseSocket(c);
     CloseSocket(l);
 }
+
+TEST(socket_send_reports_would_block_on_full_buffer)
+{
+    uint16_t port = 0;
+    Socket listener = BindFirstFree(0, 1, port);
+    CHECK(listener != InvalidSocket);
+    Socket client = ConnectLoopback(port);
+    CHECK(client != InvalidSocket);
+    Socket server = Accept(listener);
+    CHECK(server != InvalidSocket);
+    CHECK(SetNonBlocking(server, true));
+    std::vector<uint8_t> chunk(1 << 16, 0x5A);
+    size_t total = 0;
+    bool blocked = false;
+    for (int i = 0; i < 4096 && !blocked; i++)      // the peer never reads
+    {
+        int n = Send(server, chunk.data(), chunk.size());
+        if (n > 0)
+            total += size_t(n);
+        else
+        {
+            CHECK(n < 0);
+            CHECK(WouldBlock());
+            blocked = true;
+        }
+    }
+    CHECK(blocked);
+    CHECK(total > 0);
+    CloseSocket(server);
+    CloseSocket(client);
+    CloseSocket(listener);
+}

@@ -193,6 +193,19 @@ MDS_API int mds_lua_output(int id, char* out, int max);
 MDS_API int mds_packets(int id, int enabled, int capacity);
 MDS_API int mds_packets_take(int id, mds_packet* headers, uint8_t* data, int max_packets, int max_data);
 
+// Socket server (protocol: Protocol.h). One server thread per process serves every console.
+// port 0 lets the OS pick; otherwise the first free port in [port, port + range) is used,
+// where range is flags & 0xFFFF (0 = 32, 1 = strict). Returns 0 and the bound port, or -1
+// (mds_error: "no free port in A-B", "server already running").
+MDS_API int mds_serve(int port, int flags, int* bound);
+// Stops the thread, closes the sockets and drops the client. Consoles keep their state.
+MDS_API void mds_serve_stop(void);
+// Waits up to timeout_ms (< 0 = forever) for a client's `shutdown` message: 1 if one was
+// received since mds_serve, else 0. The owner then calls mds_serve_stop and exits.
+MDS_API int mds_serve_wait(int timeout_ms);
+// Name returned in the hello reply (default "melonds"). Call before or after mds_serve.
+MDS_API void mds_serve_name(const char* name);
+
 #ifdef __cplusplus
 }
 #endif
