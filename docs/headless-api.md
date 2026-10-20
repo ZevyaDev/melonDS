@@ -11,8 +11,9 @@ reading the code but no test covers them. Claims marked *(verified)* were checke
 one-console experiment against this branch's DLL. Bugs and surprises are collected at the end, in
 [Known issues and surprises](#11-known-issues-and-surprises).
 
-This revision describes **API level 2**, the `fix/api-quirks` branch (see
-[Version and features](#version-and-features) for what changed from level 1).
+This revision describes **API level 3**: the `fix/api-quirks` changes (level 2) plus Action Replay
+cheat codes from the `feature/cheats` branch (see [Version and features](#version-and-features) for
+what changed at each level).
 
 Contents
 
@@ -22,6 +23,7 @@ Contents
 4. [Memory and CPU](#4-memory-and-cpu)
 5. [Debugging](#5-debugging)
 6. [Savestates](#6-savestates)
+6a. [Action Replay cheat codes](#6a-action-replay-cheat-codes)
 7. [Lua](#7-lua)
 8. [GDB stub and socket server](#8-gdb-stub-and-socket-server)
 9. [Python equivalents](#9-python-equivalents)
@@ -74,7 +76,7 @@ The calls fall into three groups by what they need:
 | Needs | Calls |
 | --- | --- |
 | no console | `mds_version`, `mds_has`, `mds_error`, `mds_set_local_dir`, `mds_set_log_level`, `mds_set_pacing`, `mds_mp_timeout` (after the first `mds_create`), `mds_serve*`, `mds_set_instance_base` (no console may exist), `mds_instance_base` |
-| any state | `mds_destroy`, `mds_stop_after`, `mds_interrupt` (debugger), `mds_state`, `mds_take_break`, `mds_frames`, `mds_wait`, `mds_screen`, `mds_set_keys`, `mds_touch`, `mds_set_lid`, all `mds_input_*`, `mds_debug_recv_pending`, `mds_read`, `mds_write`, `mds_savestate`/`mds_loadstate` (accepted, but fail unless idle), `mds_lua_output`, `mds_packets`, `mds_packets_take`, `mds_mac`, `mds_save_path` |
+| any state | `mds_destroy`, `mds_stop_after`, `mds_interrupt` (debugger), `mds_state`, `mds_take_break`, `mds_frames`, `mds_wait`, `mds_screen`, `mds_set_keys`, `mds_touch`, `mds_set_lid`, all `mds_input_*`, `mds_debug_recv_pending`, `mds_read`, `mds_write`, all `mds_cheat_*`, `mds_savestate`/`mds_loadstate` (accepted, but fail unless idle), `mds_lua_output`, `mds_packets`, `mds_packets_take`, `mds_mac`, `mds_save_path` |
 | stopped (idle **or** parked; fails with `console N is running`) | `mds_set_rtc`, `mds_get_rtc`, `mds_run`, `mds_start`, `mds_get_regs`, `mds_set_reg`, `mds_lua_run`, `mds_lua_exec`, `mds_lua_stop`, and the debugger calls: `mds_gdb`, `mds_gdb_host`, `mds_bp_add`, `mds_wp_add`, `mds_point_remove`, `mds_point_enable`, `mds_point_list`, `mds_step`, `mds_trace`, `mds_trace_take`, `mds_calls`, `mds_callstack`, `mds_callcounts_take`, `mds_coverage`, `mds_coverage_take`, `mds_lastwriter`, `mds_lastwriter_get`, `mds_lastwriter_query` |
 | idle only | `mds_load_rom` ("loading a ROM needs an idle console"), `mds_reset` ("reset needs an idle console"), `mds_savestate`, `mds_loadstate` ("savestates need a frame boundary; finish the frame first") |
 
@@ -85,7 +87,7 @@ debugger (debug = 0)` (see [section 2](#creating-and-destroying)).
 ### Which calls block
 
 - **Command-queue calls** (everything that reads or changes the console: `mds_read`, `mds_write`,
-  `mds_screen`, `mds_get_regs`, the debugger calls, `mds_load_rom`, `mds_reset`, the savestate
+  `mds_screen`, `mds_get_regs`, the `mds_cheat_*` calls, the debugger calls, `mds_load_rom`, `mds_reset`, the savestate
   calls, `mds_mac`, the RTC calls, `mds_gdb`, and `mds_lua_run`/`mds_lua_exec`/`mds_lua_stop`)
   block until the emulator thread has run them: immediately when idle or parked, up to one frame
   when running. If the emulator thread is itself blocked (inside
@@ -145,6 +147,7 @@ does this: `native.api_version()`, `native.has(name)` (see [section 9](#9-python
 | --- | --- | --- |
 | 1 | up to the IPC merge (`merge/ipc`) | everything in the C API before this table existed; `mds_version` returned 1 throughout, as functions were added |
 | 2 | `fix/api-quirks` | `mds_has`, `mds_serve_host`, `mds_gdb_host`, `mds_lastwriter_query`; the behaviour changes named by the features below |
+| 3 | `feature/cheats` | `mds_cheat_add`, `mds_cheat_remove`, `mds_cheat_enable`, `mds_cheat_clear`, `mds_cheat_list`, `mds_cheat_get` (feature `cheats`); a state load or ROM load clears the console's codes |
 
 Features of level 2 (`mds_has` also answers 1 for every exported function name, `"mds_serve_host"`,
 `"mds_read"`, ...):
@@ -164,6 +167,12 @@ Features of level 2 (`mds_has` also answers 1 for every exported function name, 
 | `mic_noise_emulated` | level-mic noise is seeded from the emulated frame, which states carry |
 | `serve_host` | `mds_serve_host`, `melonds_server --host` ([section 8](#8-gdb-stub-and-socket-server)) |
 | `gdb_host` | `mds_gdb_host`; the GDB stub listens on 127.0.0.1 by default |
+
+Feature of level 3:
+
+| feature | meaning |
+| --- | --- |
+| `cheats` | the `mds_cheat_*` calls: Action Replay codes run by the core's engine every frame ([section 6a](#6a-action-replay-cheat-codes)) |
 
 ### Wireless between consoles, and one console per process
 
@@ -968,6 +977,9 @@ What it does not contain (and what happens on load):
 
 - The process frame counter (`mds_frames`), the input log, the input mode and stall timeout, and
   Lua state are frontend state and are not touched by a load.
+- Action Replay codes: the cheat list is not saved, and a successful load **clears** it (level 3;
+  [section 6a](#6a-action-replay-cheat-codes)). What the codes already wrote to memory is RAM like
+  any other and is in the state.
 - Debugger data: a load clears what described the execution before it (call stacks, a pending
   watchpoint hit, last-writer records) and keeps points, logs and armed requests (see the table in
   [section 5](#persistence-of-debugger-data)).
@@ -982,6 +994,121 @@ Determinism: with 14.1 and later, a save, run, load, run sequence reproduces a r
 recorded with 14.1). With 14.2 the input held at the save, the pen and the mic samples also carry
 over, so a run that relies on the repeat rule after a load, or feeds the microphone, reproduces too.
 Keep to one console per process and set the RTC after loading (the state carries its own clock).
+
+---
+
+## 6a. Action Replay cheat codes
+
+```c
+typedef struct {
+    int32_t cheat;      /* the code's id in this console's list */
+    int32_t enabled;
+    int32_t words;      /* code words: two per line */
+    char name[116];     /* NUL-terminated, cut short if longer */
+} mds_cheat;
+
+int mds_cheat_add(int id, const char* name, const char* code, int enabled);
+int mds_cheat_remove(int id, int cheat);
+int mds_cheat_enable(int id, int cheat, int enabled);
+int mds_cheat_clear(int id);
+int mds_cheat_list(int id, mds_cheat* out, int max);
+int mds_cheat_get(int id, int cheat, char* name, int name_max, uint32_t* words, int max_words);
+```
+
+API level 3, feature `cheats`. Each console has a list of Action Replay (AR DS) codes that melonDS's
+own cheat engine (`src/AREngine.cpp`, the engine the Qt frontend's Cheats dialog feeds) runs. The
+library adds nothing to the engine: a code here does exactly what it does in the Qt frontend.
+
+**The calls.** All six work in any state and on a console created with `debug = 0` (cheats are not
+a debugger feature). They run on the emulator thread through the command queue, so a change never
+races the engine: on a running console it lands at the next frame boundary, on an idle or parked
+one at once.
+
+- `mds_cheat_add` checks the text, appends the code to the list (enabled when `enabled != 0`) and
+  returns its id: 1, 2, ... per console, never reused (not after a remove, a clear or a load).
+  `name` may be NULL (stored as ""); it is a label only and need not be unique.
+- `mds_cheat_remove` / `mds_cheat_enable` take that id; an unknown one fails with `no cheat N`.
+- `mds_cheat_clear` empties the list and returns how many codes it held.
+- `mds_cheat_list` copies up to `max` entries in list order and returns the number copied; `name`
+  is cut to 115 bytes.
+- `mds_cheat_get` copies one code's whole name (at most `name_max - 1` bytes and a NUL; `name` may be
+  NULL when `name_max` is 0) and up to `max_words` of its words, and returns its word count (which
+  may exceed `max_words`). The words are the parsed code, so the text comes back normalised
+  (`%08X %08X` per line).
+
+Negative `max`, `name_max` or `max_words` fail (`... must not be negative`).
+
+**Code text.** One `XXXXXXXX YYYYYYYY` line per pair of words: two 8-digit hex words, any case,
+separated by spaces or tabs; CR LF or LF line ends; blank lines are skipped. Nothing else is
+accepted (no `0x`, no comments, no codes run together on one line). Before anything is added, the code
+is checked as the engine will read it, and a bad one fails with `mds_error` = `cheat: ` plus the
+reason, naming the line:
+
+| Error (after `cheat: `) | Cause |
+| --- | --- |
+| `the code is empty (no "XXXXXXXX YYYYYYYY" lines)` | no code lines, or `code` is NULL (`cheat: no code text`) |
+| `line N: expected two 8-digit hex words ("XXXXXXXX YYYYYYYY"), got "..."` | a malformed line |
+| `line N: opcode C4 (offset = address of the code) is not supported by melonDS's AR engine` | the engine logs and stops at C4 |
+| `line N: unknown opcode XX (melonDS's AR engine would stop there)` | C1-C3, C7-CF, DD-DF |
+| `line N: unknown D4 data operation XX (00-08 exist)` | the engine would skip it with a warning |
+| `line N: the E opcode copies B bytes (L lines of data) but only M lines follow` | an `E` (copy parameter bytes) line without its data; the engine would read past the code |
+| `the code is longer than 4096 lines` / `the name is longer than 4096 bytes` | limits |
+
+The opcodes the engine runs (`00`-`BF` writes and conditions, `C0` loop, `C5` counter, `C6`, `D0`-`DC`,
+`E` copy, `F` memory copy) are as in GBAtek's "DS Cheat Action Replay"; the engine's comments in
+`AREngine.cpp` say which. Data lines of an `E` code are data and are not checked.
+
+**When codes run.** Not at the frame boundary: inside the frame, when the **ARM7 takes an IRQ while
+the VBlank IRQ is pending and enabled** (`ARM::TriggerIRQ`, `IF & IE` has bit 0), which is how an AR
+cartridge hooks the ARM7's VBlank handler. The VBlank IRQ is raised at scanline 192 of the 263 a
+frame has (melonDS's frames run from line 0 to 262), so in a game codes run once per frame, about
+73% of the way through it, before the ARM7's own handler runs. Consequences:
+
+- A game (or test program) that never enables the ARM7 VBlank IRQ, or keeps IRQs masked, never runs
+  the codes. FreeBIOS with no cart is such a case: the tests in `tools/melonds-mcp/tests/test_cheats.py`
+  run an ARM7 program that enables the IRQ.
+- If the ARM7 takes a second IRQ before it acknowledges VBlank, the codes run again in that frame
+  (the engine's rule; a game's handler normally acknowledges at once).
+- Codes run in list order; within a code the engine resets its offset and data registers each time
+  it starts the code. The `C5` counter is per run, not kept between frames.
+- A code added, enabled or removed takes effect from the next VBlank IRQ the ARM7 takes. Removing or
+  disabling a code does **not** undo what it wrote: a patched instruction stays patched until the
+  game (or an overlay load) rewrites it.
+- The writes use the ARM7's bus (`NDS::ARM7Write*`), so codes see and write memory as the ARM7 does:
+  main RAM, shared WRAM as mapped to the ARM7, ARM7 WRAM and I/O. ARM9 TCM is not reachable.
+- Timing is emulated time, so codes are as deterministic as the rest of the run: the same state, the
+  same codes added at the same point and the same input give the same result every time.
+
+**Codes and the debugger.** The engine's writes bypass the CPU access hooks: they **do not trigger
+watchpoints** and are **not recorded by the last-writer table** *(verified:
+`test_cheat_writes_bypass_watchpoints_and_last_writer`)*. Call counts, call stacks, coverage, traces and
+breakpoints keep working while codes run, but they describe the code that actually ran: **a code that
+patches game code changes which functions run** (a patched `BL` calls something else, a patched
+branch skips a function), so a call count or coverage diff of a run with such a code shows the
+patched function missing (or a new one present) because of the code, not because of the input. Mark
+such runs (dq9-re records the codes in every output and scenario sidecar). The test
+`test_call_counts_and_coverage_follow_the_patch` patches a `BL` and checks that counts and coverage
+move to the new target, and stay there after the code is removed.
+
+**Codes and savestates.** The cheat list is **not part of a savestate**: `mds_savestate` writes no
+codes, and a **successful `mds_loadstate` clears the list** (a rejected load keeps it). A state
+then describes a run completely: loading it and playing the same input gives the same result no
+matter what codes were added before the load. A client that wants codes after a load **re-adds them
+after loading** (the dq9-re harness adds them right after each load, before the inputs). What the
+codes wrote before the state was saved is ordinary memory and is in the state: a state saved while a
+code patched game code keeps that patch, and runs from it behave patched until the game rewrites the
+code, even with no codes in the list.
+
+| Event | Cheat list |
+| --- | --- |
+| `mds_loadstate` (success) | cleared |
+| `mds_loadstate` (rejected) | kept |
+| `mds_load_rom` | cleared (codes are written for one game) |
+| `mds_reset` | kept (a power cycle with the AR cartridge still in) |
+| `mds_savestate` | not saved |
+
+Lua and the socket server have no cheat calls yet; a code added through the C API also runs for
+them.
 
 ---
 
@@ -1193,6 +1320,9 @@ melonds_headless library"). `native.has(name)` and `native.api_version()` tell w
 | `mds_coverage` / `_take` | `coverage(enabled=True)` / `take_coverage(cpu=9)` -> sorted list |
 | `mds_lastwriter` / `_query` | `track_writers(enabled=True)` / `last_writer(addr)` -> None (no record), `(pc, cpu)` or `("dma", channel, cpu)`; raises `MelonError` for errors (tracking off, running, no debugger). With a level-1 library it falls back to `mds_lastwriter_get`, where errors also give None |
 | `mds_savestate` / `mds_loadstate` | `save_state(path)` / `load_state(path)` |
+| `mds_cheat_add` | `add_cheat(code, name="", enabled=True)` -> id; `code` is the text or a list of lines |
+| `mds_cheat_remove` / `_enable` / `_clear` | `remove_cheat(id)` / `enable_cheat(id, enabled=True)` / `clear_cheats()` -> count |
+| `mds_cheat_list` + `mds_cheat_get` | `cheats()` -> list of `{"id", "name", "enabled", "words", "code"}` (`code`: the text, normalised); `cheat(id)` -> one |
 | `mds_lua_run` / `_exec` / `_stop` | `lua_run(source, is_file=False)` / `lua_exec(code)` (returns the output) / `lua_stop()` |
 | `mds_lua_output` | `lua_output()` -> str |
 | `mds_packets` / `_take` | `packet_log(enabled=True, capacity=4096)` / `take_packets()` -> list of dicts |
@@ -1310,6 +1440,16 @@ cb, vb = profile("work/base.mst", [["B"]] + [[]] * 59, 60)
 only_b = {f: n for f, n in cb.items() if f not in ca}        # functions called only in B
 changed = {f: (ca[f], cb[f]) for f in ca.keys() & cb.keys() if ca[f] != cb[f]}
 new_code = sorted(vb - va)                                   # instructions run only in B (catches tail calls, jump tables)
+```
+
+### Apply an Action Replay code after loading a state
+
+```python
+c.load_state("work/field.mst")                  # a load clears the cheat list
+gold = c.add_cheat("020F6D48 0098967F", "max gold")
+c.run(2)                                        # the code runs at the ARM7's VBlank IRQ in each frame
+c.enable_cheat(gold, False)                     # stops writing; what it wrote stays
+print(c.cheats())
 ```
 
 ### Read an input log
