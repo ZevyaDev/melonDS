@@ -33,6 +33,15 @@ constexpr size_t MaxParkedStacks = 64;
 constexpr size_t MaxSeedDepth = 64;
 constexpr u32 MaxPrologueScan = 0x1000;
 constexpr u32 MaxPrologueOffset = 0x20;
+constexpr u32 MaxResumeOffset = 0x1000;
+constexpr u32 ThreadInfoMain = 0x027FFFA0;
+constexpr u32 ThreadInfoSub = 0x027FFFA4;
+constexpr u32 ThreadSavedSP = 0x38;
+constexpr u32 ThreadSavedLR = 0x3C;
+constexpr u32 ThreadSavedPC = 0x40;
+constexpr u32 ThreadNext = 0x68;
+constexpr u32 MaxThreads = 64;
+constexpr size_t MaxWifiInjected = 256;
 
 static bool IsIndirectJump(u32 instr, bool thumb);
 static bool WritesPC(u32 instr, bool thumb);
@@ -101,7 +110,44 @@ bool Debugger::Remove(int id)
         RebuildPages();
         return true;
     }
+    auto hook = std::find_if(WifiHooks.begin(), WifiHooks.end(), [id](const auto& h) { return h.first == id; });
+    if (hook != WifiHooks.end())
+    {
+        WifiHooks.erase(hook);
+        return true;
+    }
     return false;
+}
+
+int Debugger::AddWifiHook(WifiCallback callback)
+{
+    WifiHooks.push_back({NextID, std::move(callback)});
+    return NextID++;
+}
+
+bool Debugger::RunWifiHooks(WifiFrame& frame)
+{
+    auto hooks = WifiHooks;
+    for (auto& [id, callback] : hooks)
+        if (!callback(frame))
+            return false;
+    return true;
+}
+
+void Debugger::InjectWifi(std::vector<u8> frame, u8 rate)
+{
+    if (WifiInjected.size() >= MaxWifiInjected)
+        WifiInjected.pop_front();
+    WifiInjected.push_back({false, rate, 0, 0, std::move(frame)});
+}
+
+bool Debugger::TakeWifiInjection(WifiFrame& frame)
+{
+    if (WifiInjected.empty())
+        return false;
+    frame = std::move(WifiInjected.front());
+    WifiInjected.pop_front();
+    return true;
 }
 
 bool Debugger::SetEnabled(int id, bool enabled)
@@ -270,7 +316,32 @@ std::vector<CallFrame> Debugger::GetCallStack(u8 cpu) const
 
 std::vector<std::pair<u32, std::vector<CallFrame>>> Debugger::GetThreadStacks(u8 cpu) const
 {
-    return {ParkedStacks[cpu & 1].begin(), ParkedStacks[cpu & 1].end()};
+    u8 n = cpu & 1;
+    std::vector<std::pair<u32, std::vector<CallFrame>>> out(ParkedStacks[n].begin(), ParkedStacks[n].end());
+    u32 info = Peek(n, n ? ThreadInfoSub : ThreadInfoMain, 4);
+    if ((info >> 24) != 0x02 && (info >> 24) != 0x03)
+        return out;
+    u32 current = Peek(n, info + 4, 4);
+    u32 thread = Peek(n, info + 8, 4);
+    for (u32 i = 0; i < MaxThreads && ((thread >> 24) == 0x02 || (thread >> 24) == 0x03); i++)
+    {
+        if (thread != current)
+        {
+            u32 cpsr = Peek(n, thread, 4);
+            u32 sp = Peek(n, thread + ThreadSavedSP, 4);
+            u32 lr = Peek(n, thread + ThreadSavedLR, 4);
+            u32 pc = Peek(n, thread + ThreadSavedPC, 4) - 4;
+            auto tracked = std::find_if(out.begin(), out.end(), [sp](const auto& s) { return s.first == sp; });
+            CallFrame top;
+            if (tracked == out.end())
+                out.push_back({sp, UnwindThread(n, pc, sp, lr, cpsr)});
+            else if (!tracked->second.empty() && tracked->second.back().SP == sp
+                && ResumeFrame(n, pc, sp, lr, cpsr & 0x1F, top))
+                tracked->second.back() = top;
+        }
+        thread = Peek(n, thread + ThreadNext, 4);
+    }
+    return out;
 }
 
 std::unordered_map<u32, u64> Debugger::DrainCallCounts(u8 cpu)
@@ -684,19 +755,70 @@ void Debugger::SeedBelow(u8 n)
     if (bottom.Exception || IsExceptionMode(bottom.Mode) || !CallBefore(n, bottom.Return | thumb, site, target))
         return;
     std::vector<CallFrame> found;
-    u32 pc = bottom.Site, sp = bottom.SP, ret;
+    UnwindCallers(n, bottom.Site, thumb, bottom.SP, bottom.Mode, found);
+    for (auto& frame : found)
+        KnownEntries[n].insert(frame.Entry);
+    stack.insert(stack.begin(), found.rbegin(), found.rend());
+    if (stack.size() > MaxCallDepth)
+        stack.erase(stack.begin(), stack.begin() + (stack.size() - MaxCallDepth));
+}
+
+void Debugger::UnwindCallers(u8 n, u32 pc, bool thumb, u32 sp, u8 mode, std::vector<CallFrame>& found) const
+{
+    u32 ret;
     CallFrame frame;
-    while (found.size() < MaxSeedDepth && UnwindFrame(n, pc, thumb, sp, bottom.Mode, frame, ret) && frame.SP > sp)
+    while (found.size() < MaxSeedDepth && UnwindFrame(n, pc, thumb, sp, mode, frame, ret) && frame.SP > sp)
     {
         found.push_back(frame);
-        KnownEntries[n].insert(frame.Entry);
         pc = frame.Site;
         sp = frame.SP;
         thumb = ret & 1;
     }
-    stack.insert(stack.begin(), found.rbegin(), found.rend());
-    if (stack.size() > MaxCallDepth)
-        stack.erase(stack.begin(), stack.begin() + (stack.size() - MaxCallDepth));
+}
+
+bool Debugger::ResumeFrame(u8 n, u32 pc, u32 sp, u32 lr, u8 mode, CallFrame& frame) const
+{
+    u32 site, target;
+    if (CallBefore(n, lr, site, target) != 1)
+        return false;
+    target &= ~1u;
+    if (pc < target || pc - target >= MaxResumeOffset)
+        return false;
+    frame = {site, target, lr & ~1u, sp, mode, false};
+    return true;
+}
+
+std::vector<CallFrame> Debugger::UnwindThread(u8 n, u32 pc, u32 sp, u32 lr, u32 cpsr) const
+{
+    std::vector<CallFrame> found;
+    u8 mode = cpsr & 0x1F;
+    bool thumb = cpsr & 0x20;
+    CallFrame frame;
+    u32 ret;
+    if (UnwindFrame(n, pc, thumb, sp, mode, frame, ret))
+        thumb = ret & 1;
+    else if (ResumeFrame(n, pc, sp, lr, mode, frame))
+        thumb = lr & 1;
+    else
+        return found;
+    found.push_back(frame);
+    UnwindCallers(n, frame.Site, thumb, frame.SP, mode, found);
+    std::reverse(found.begin(), found.end());
+    return found;
+}
+
+void Debugger::ResumeContext(ARM& cpu, u32 pc, bool loaded)
+{
+    u8 n = cpu.Num;
+    auto& stack = CallStack[n];
+    u32 sp = cpu.R[13];
+    CallFrame frame;
+    if (!ResumeFrame(n, pc, sp, cpu.R[14], cpu.CPSR & 0x1F, frame))
+        return;
+    if (!stack.empty() && stack.back().SP == sp)
+        stack.back() = frame;
+    else if (stack.empty() && loaded)
+        PushFrame(n, frame);
 }
 
 void Debugger::PushFrame(u8 n, const CallFrame& frame)
@@ -726,7 +848,8 @@ void Debugger::TrackEntry(ARM& cpu, u32 pc, u32 prev)
         JumpTarget[n] = pc;
     if (!stack.empty() && stack.back().Entry == pc)
         return;
-    if (pc != next && lr == next && pc != lr)
+    bool literalReturn = !PrevThumb[n] && (Prev2Instr[n] & 0x0F7FF000) == 0x051FE000 && IsIndirectJump(PrevInstr[n], false);
+    if (pc != next && pc != lr && (lr == next || literalReturn))
     {
         PushFrame(n, {prev, pc, lr, sp, mode, false});
         return;
@@ -803,6 +926,12 @@ void Debugger::UnwindCalls(ARM& cpu, u32 pc)
         {
             CallStack[n] = std::move(ex.Stack);
             SwitchStacks(n, ex.SP, sp);
+            ResumeContext(cpu, pc, false);
+            if (CallStack[n].empty())
+            {
+                CallStack[n] = UnwindThread(n, pc, sp, cpu.R[14], cpu.CPSR);
+                SeedPending[n] = CallStack[n].empty();
+            }
         }
         LastSP[n][(mode == 0x1F ? 0x10 : mode) & 0xF] = sp;
         LastMode[n] = mode;
@@ -815,6 +944,8 @@ void Debugger::UnwindCalls(ARM& cpu, u32 pc)
         bool unwound = sp > last && !stack.empty() && sp <= stack.front().SP;
         if (loaded || (!IsStackAdjust(PrevInstr[n], PrevThumb[n]) && !unwound))
             SwitchStacks(n, last, sp);
+        if (loaded)
+            ResumeContext(cpu, pc, true);
     }
     last = sp;
     LastMode[n] = mode;
@@ -858,6 +989,7 @@ void Debugger::OnInstr(ARM& cpu, u32 pc)
     }
     bool vector = IsExceptionMode(cpu.CPSR & 0x1F) && pc - cpu.ExceptionBase < 0x20;
     bool jumped = !vector && pc != prev + (PrevThumb[n] ? 2 : 4) && WritesPC(PrevInstr[n], PrevThumb[n]);
+    Prev2Instr[n] = PrevInstr[n];
     PrevInstr[n] = cpu.NextInstr[0];
     PrevThumb[n] = cpu.CPSR & 0x20;
 

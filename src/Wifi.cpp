@@ -659,30 +659,46 @@ void Wifi::TXSendFrame(const TXSlot* slot, int num)
     if (CurChannel == 0) return;
     TXBuffer[9] = CurChannel;
 
+    if (num == 1)
+        *(u16*)&TXBuffer[12 + 24+2] = MPClientMask;
+    else if (num == 4)
+        *(u64*)&TXBuffer[0xC + 24] = USCounter;
+    bool send = !NDS.Debugger.WifiHooked() || HookFrame(true, TXBuffer, len, sizeof(TXBuffer));
+
     switch (num)
     {
     case 0:
     case 2:
     case 3:
+        if (!send) break;
         Platform::MP_SendPacket(TXBuffer, 12+len, USTimestamp, NDS.UserData);
         if (!IsMP) WifiAP->SendPacket(TXBuffer, 12+len);
         break;
 
     case 1:
-        *(u16*)&TXBuffer[12 + 24+2] = MPClientMask;
-        Platform::MP_SendCmd(TXBuffer, 12+len, USTimestamp, NDS.UserData);
+        if (send) Platform::MP_SendCmd(TXBuffer, 12+len, USTimestamp, NDS.UserData);
         break;
 
     case 5:
         IncrementTXCount(slot);
-        Platform::MP_SendReply(TXBuffer, 12+len, USTimestamp, IOPORT(W_AIDLow), NDS.UserData);
+        if (send) Platform::MP_SendReply(TXBuffer, 12+len, USTimestamp, IOPORT(W_AIDLow), NDS.UserData);
         break;
 
     case 4:
-        *(u64*)&TXBuffer[0xC + 24] = USCounter;
-        Platform::MP_SendPacket(TXBuffer, 12+len, USTimestamp, NDS.UserData);
+        if (send) Platform::MP_SendPacket(TXBuffer, 12+len, USTimestamp, NDS.UserData);
         break;
     }
+}
+
+bool Wifi::HookFrame(bool tx, u8* buf, int& len, int capacity)
+{
+    WifiFrame frame {tx, buf[8], buf[9], USTimestamp, std::vector<u8>(buf + 12, buf + 12 + len)};
+    if (!NDS.Debugger.RunWifiHooks(frame))
+        return false;
+    len = std::min<int>(frame.Data.size(), capacity - 12);
+    memcpy(buf + 12, frame.Data.data(), len);
+    *(u16*)&buf[10] = len;
+    return true;
 }
 
 void Wifi::StartTX_LocN(int nslot, int loc)
@@ -836,7 +852,10 @@ void Wifi::SendMPDefaultReply()
     *(u16*)&reply[0xC + 0x16] = IOPORT(W_TXSeqNo) << 4;
     *(u32*)&reply[0xC + 0x18] = 0;
 
-    int txlen = Platform::MP_SendReply(reply, 12+28, USTimestamp, IOPORT(W_AIDLow), NDS.UserData);
+    int len = 28;
+    if (NDS.Debugger.WifiHooked() && !HookFrame(true, reply, len, sizeof(reply)))
+        return;
+    int txlen = Platform::MP_SendReply(reply, 12+len, USTimestamp, IOPORT(W_AIDLow), NDS.UserData);
     WIFI_LOG("wifi: sent %d/40 bytes of MP default reply\n", txlen);
 }
 
@@ -946,7 +965,10 @@ void Wifi::SendMPAck(u16 cmdcount, u16 clientfail)
         *(u32*)&ack[0] = PreambleLen(TXSlots[1].Rate);
     }
 
-    int txlen = Platform::MP_SendAck(ack, 12+32, USTimestamp, NDS.UserData);
+    int len = 32;
+    if (NDS.Debugger.WifiHooked() && !HookFrame(true, ack, len, sizeof(ack)))
+        return;
+    int txlen = Platform::MP_SendAck(ack, 12+len, USTimestamp, NDS.UserData);
     WIFI_LOG("wifi: sent %d/44 bytes of MP ack, %d %d\n", txlen, ComStatus, RXTime);
 }
 
@@ -1547,8 +1569,13 @@ void Wifi::MPClientReplyRX(int client)
 
     txrate = reply[8];
 
+    // TODO rework RX system so we don't need this (by reading directly into MPClientReplies)
+    memcpy(RXBuffer, reply, 12+framelen);
+    if (NDS.Debugger.WifiHooked() && !HookFrame(false, RXBuffer, framelen, sizeof(RXBuffer)))
+        return;
+
     // TODO: what are the maximum crop values?
-    u16 framectl = *(u16*)&reply[12];
+    u16 framectl = *(u16*)&RXBuffer[12];
     if (framectl & (1<<14))
     {
         framelen -= (IOPORT(W_RXLenCrop) >> 7) & 0x1FE;
@@ -1558,9 +1585,6 @@ void Wifi::MPClientReplyRX(int client)
         framelen -= (IOPORT(W_RXLenCrop) << 1) & 0x1FE;
 
     if (framelen < 0) framelen = 0;
-
-    // TODO rework RX system so we don't need this (by reading directly into MPClientReplies)
-    memcpy(RXBuffer, reply, 12+framelen);
 
     *(u16*)&RXBuffer[6] = txrate;
     *(u16*)&RXBuffer[8] = framelen;
@@ -1590,7 +1614,18 @@ bool Wifi::CheckRX(int type) // 0=regular 1=MP replies 2=MP host frames
     {
         timestamp = 0;
 
-        if (type == 0)
+        WifiFrame injected;
+        if (type == 0 && NDS.Debugger.TakeWifiInjection(injected))
+        {
+            int len = std::min<int>(injected.Data.size(), sizeof(RXBuffer) - 12);
+            memset(RXBuffer, 0, 12);
+            RXBuffer[8] = injected.Rate;
+            RXBuffer[9] = CurChannel;
+            *(u16*)&RXBuffer[10] = len;
+            memcpy(&RXBuffer[12], injected.Data.data(), len);
+            rxlen = 12 + len;
+        }
+        else if (type == 0)
         {
             rxlen = Platform::MP_RecvPacket(RXBuffer, &timestamp, NDS.UserData);
             if ((rxlen <= 0) && (!IsMP))
@@ -1623,6 +1658,13 @@ bool Wifi::CheckRX(int type) // 0=regular 1=MP replies 2=MP host frames
         {
             Log(LogLevel::Debug, "received frame but bad channel %d (expected %d)\n", chan, CurChannel);
             continue;
+        }
+
+        if (NDS.Debugger.WifiHooked())
+        {
+            if (!HookFrame(false, RXBuffer, framelen, sizeof(RXBuffer)))
+                continue;
+            rxlen = 12 + framelen;
         }
 
         // hack: ignore MP frames if not engaged in a MP comm

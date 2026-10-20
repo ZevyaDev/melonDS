@@ -94,6 +94,17 @@ The Qt console has #1671's API plus the debugger tables from the headless build:
 `debugger.*` (`callstack`, `threadstacks`, `trackcalls`, `callcounts`, `coverage`, `trace`, `trackwriters`,
 `lastwriter`, `pause`, `step`, `resume`, `peek`).
 
+`wifi.hook(fn, name)` installs a local wireless driver: `fn` sees every frame the console sends or
+receives (MP commands, replies and acks, beacons, management and data frames, local play and
+Nintendo WFC alike) as `{tx, data, rate, channel, time}`, where `data` is the 802.11 frame with its
+FCS. Return `false` to drop the frame or a string to replace it. `wifi.inject(data, rate)` delivers a
+frame as if it had been received. `wifi.decode(data)` returns the 802.11 header (type, subtype,
+flags, addresses, sequence), the Nintendo MP fields (`kind` `mpcmd`/`mpreply`/`mpack`, client
+mask and time, command count, failed clients, payload), WEP IV and ICV, LLC/SNAP and ethertype for
+data frames, and fixed fields and elements (SSID, channel, the Nintendo vendor element) for
+management frames. Wifi hooks also run with JIT on; remove them with `event.unregisterbyid` or
+`unregisterbyname`.
+
 Memory hooks run on the emulator thread at the instruction that hit them, so `emu.getregister`
 there is exact. `gui`, `forms`, `input`, `client`, `savestate` and `console` are refused inside a
 hook: set a variable there and act on it in `_Update`.

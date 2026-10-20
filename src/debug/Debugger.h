@@ -21,6 +21,7 @@
 
 #include <array>
 #include <atomic>
+#include <deque>
 #include <functional>
 #include <map>
 #include <unordered_map>
@@ -70,6 +71,17 @@ struct BreakEvent
 };
 
 using BreakCallback = std::function<bool(const BreakEvent&)>;
+
+struct WifiFrame
+{
+    bool TX;
+    u8 Rate;
+    u8 Channel;
+    u64 Timestamp;
+    std::vector<u8> Data;
+};
+
+using WifiCallback = std::function<bool(WifiFrame&)>;
 
 struct Breakpoint
 {
@@ -121,6 +133,11 @@ public:
 
     int AddBreakpoint(u8 cpuMask, u32 addr, BreakCallback callback = nullptr);
     int AddWatchpoint(u8 cpuMask, u32 start, u32 size, u8 flags, BreakCallback callback = nullptr);
+    int AddWifiHook(WifiCallback callback);
+    bool WifiHooked() const { return !WifiHooks.empty(); }
+    bool RunWifiHooks(WifiFrame& frame);
+    void InjectWifi(std::vector<u8> frame, u8 rate);
+    bool TakeWifiInjection(WifiFrame& frame);
     bool Remove(int id);
     bool SetEnabled(int id, bool enabled);
     void ClearAll();
@@ -175,6 +192,8 @@ private:
     int NextID = 1;
     std::vector<Breakpoint> Breakpoints;
     std::vector<Watchpoint> Watchpoints;
+    std::vector<std::pair<int, WifiCallback>> WifiHooks;
+    std::deque<WifiFrame> WifiInjected;
     std::array<std::vector<u8>, 2> ExecPages;
     std::array<std::vector<u8>, 2> WatchPages;
     std::function<void(const BreakEvent&)> Handler;
@@ -199,6 +218,7 @@ private:
     std::array<u8, 2> LastMode {};
     std::array<u32, 2> PrevInstr {};
     std::array<u32, 2> JumpTarget {};
+    std::array<u32, 2> Prev2Instr {};
     std::array<StepMode, 2> StepModes {};
     std::array<size_t, 2> StepDepth {};
     std::array<CallFrame, 2> StepFrame {};
@@ -230,6 +250,10 @@ private:
     void WatchHit(u8 n, u32 addr, u8 size, u32 value, bool write, u8 dma);
     void SwitchStacks(u8 n, u32 oldSP, u32 newSP);
     void PushFrame(u8 n, const CallFrame& frame);
+    void ResumeContext(ARM& cpu, u32 pc, bool loaded);
+    void UnwindCallers(u8 n, u32 pc, bool thumb, u32 sp, u8 mode, std::vector<CallFrame>& found) const;
+    bool ResumeFrame(u8 n, u32 pc, u32 sp, u32 lr, u8 mode, CallFrame& frame) const;
+    std::vector<CallFrame> UnwindThread(u8 n, u32 pc, u32 sp, u32 lr, u32 cpsr) const;
     bool StepDone(ARM& cpu, u32 pc, bool jumped) const;
     void TrackEntry(ARM& cpu, u32 pc, u32 prev);
     void SeedBelow(u8 n);
