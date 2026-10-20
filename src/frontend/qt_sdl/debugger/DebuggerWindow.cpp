@@ -285,6 +285,8 @@ void DebuggerWindow::buildToolbar()
     bar->addSeparator();
     bar->addAction("Symbols...", this, &DebuggerWindow::loadSymbols)
         ->setToolTip("Load a dsd config.yaml (or a folder holding one), or a text file of 'address name [size]' lines");
+    bar->addAction("Labels...", this, &DebuggerWindow::loadLabels)
+        ->setToolTip("Layer a text file of 'address name [module]' lines over the symbols; cancel the dialog to remove them");
     QAction* demangle = bar->addAction("Demangle");
     demangle->setCheckable(true);
     demangle->setChecked(Bridge->symbols().demangle());
@@ -844,6 +846,38 @@ void DebuggerWindow::loadSymbols()
         return;
     }
     DebugTools::rememberSymbols(Bridge, path);
+    emit Bridge->symbolsChanged();
+    refresh();
+    Disasm->reload();
+}
+
+void DebuggerWindow::loadLabels()
+{
+    DebugSymbols& symbols = Bridge->symbols();
+    QString path = QFileDialog::getOpenFileName(this, "Load labels", symbols.labelsSource(),
+        "Labels (*.txt *.labels);;All files (*)");
+    if (path.isEmpty())
+    {
+        if (symbols.labelsSource().isEmpty()
+            || QMessageBox::question(this, "melonDS", "Remove the labels from " + symbols.labelsSource() + "?")
+                   != QMessageBox::Yes)
+            return;
+        symbols.clearLabels();
+    }
+    else
+    {
+        QString error;
+        if (!symbols.loadLabels(path, error))
+        {
+            QMessageBox::warning(this, "melonDS", error);
+            return;
+        }
+        if (symbols.labelsUnmatched())
+            QMessageBox::information(this, "melonDS",
+                QString("%1 of %2 labels match no module in the loaded symbols and were skipped.")
+                    .arg(symbols.labelsUnmatched()).arg(symbols.labelCount()));
+    }
+    DebugTools::rememberLabels(Bridge, path);
     emit Bridge->symbolsChanged();
     refresh();
     Disasm->reload();

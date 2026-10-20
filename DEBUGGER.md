@@ -18,6 +18,11 @@ by every tool.
 
 - Overlays are detected by comparing RAM with `arm9_overlays/*.bin` from the extract that the
   config's `rom_config` points to; only loaded overlays' names are shown.
+- Labels... layers a text file of `address name [module]` lines (`#` starts a comment) over the
+  loaded symbols, also remembered per game code. A label renames the symbol that starts at that
+  address in that module (`main`, an autoload or `ovNNN`; default: the static module covering
+  the address) or adds one; the old name still works in Go to. Overlay labels show only while
+  the overlay is loaded. Cancel the dialog to remove the labels.
 - C++ names are demangled (Demangle toggles it). Go to, breakpoint and watch fields accept an
   address, a symbol in either form, or `symbol+0x10`.
 

@@ -45,6 +45,7 @@ public:
         QString Kind;
         int Module;
         bool Thumb;
+        QString Original; // name before a label replaced it; still resolves
     };
 
     struct Module
@@ -71,7 +72,16 @@ public:
     bool load(const QString& path, QString& error);
     void clear();
     bool empty() const { return !Cur || Cur->Modules.empty(); }
-    QString source() const { return Cur ? Cur->Source : QString(); }
+    QString source() const { return Base ? Base->Source : QString(); }
+
+    // Labels: a text file of "address name [module]" lines applied on top of the loaded symbols.
+    // A label renames the symbol starting at that address in that module (main, an autoload or
+    // ovNNN; default: the static module covering the address) or adds one.
+    bool loadLabels(const QString& path, QString& error);
+    void clearLabels();
+    QString labelsSource() const { return LabelSource; }
+    int labelCount() const { return (int)Labels.size(); }
+    int labelsUnmatched() const { return Unmatched; }
     std::shared_ptr<const Set> set() const { return Cur; }
 
     static std::vector<int> detect(const Set& set, melonDS::NDS& nds);
@@ -91,7 +101,20 @@ public:
     bool parseAddress(const QString& text, melonDS::u32& out) const;
 
 private:
-    std::shared_ptr<const Set> Cur;
+    struct Label
+    {
+        melonDS::u32 Addr;
+        QString Name;
+        QString Module;
+    };
+
+    void rebuild();
+
+    std::shared_ptr<const Set> Base; // as loaded
+    std::shared_ptr<const Set> Cur;  // Base with Labels applied
+    std::vector<Label> Labels;
+    QString LabelSource;
+    int Unmatched = 0;
     std::vector<int> Loaded;
     bool Demangle = true;
 };

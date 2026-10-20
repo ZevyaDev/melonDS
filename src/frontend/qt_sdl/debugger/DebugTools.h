@@ -45,6 +45,7 @@ void showDisassembly(DebugBridge* bridge, QWidget* parent, melonDS::u32 addr);
 void showMemory(DebugBridge* bridge, QWidget* parent, MemSpace space, melonDS::u32 addr);
 void autoLoadSymbols(DebugBridge* bridge);
 void rememberSymbols(DebugBridge* bridge, const QString& path);
+void rememberLabels(DebugBridge* bridge, const QString& path);
 QWidget* openByName(const QString& name, DebugBridge* bridge, QWidget* parent);
 
 template <typename T>

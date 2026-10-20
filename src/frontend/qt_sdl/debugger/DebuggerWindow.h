@@ -135,6 +135,7 @@ private:
     void editRegister(int cpu, int row);
     void setPC(melonDS::u32 addr);
     void loadSymbols();
+    void loadLabels();
     void autoLoadSymbols();
     QString describeBreak(const melonDS::BreakEvent& ev) const;
 };

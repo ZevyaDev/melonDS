@@ -323,6 +323,34 @@ void Index(DebugSymbols::Module& mod)
     }
 }
 
+// Sort every module and rebuild the name index; run after the symbols change.
+void Finalize(DebugSymbols::Set& set)
+{
+    set.ByName.clear();
+    set.SymbolCount = 0;
+    for (int m = 0; m < (int)set.Modules.size(); m++)
+    {
+        DebugSymbols::Module& mod = set.Modules[m];
+        Index(mod);
+        for (int s = 0; s < (int)mod.Symbols.size(); s++)
+        {
+            DebugSymbols::Symbol& sym = mod.Symbols[s];
+            sym.Pretty = DemangleName(sym.Name);
+            set.ByName.insert(sym.Name, {m, s});
+            if (sym.Pretty != sym.Name)
+            {
+                set.ByName.insert(sym.Pretty, {m, s});
+                int paren = sym.Pretty.indexOf('(');
+                if (paren > 0)
+                    set.ByName.insert(sym.Pretty.left(paren), {m, s});
+            }
+            if (!sym.Original.isEmpty())
+                set.ByName.insert(sym.Original, {m, s});
+        }
+        set.SymbolCount += (int)mod.Symbols.size();
+    }
+}
+
 }
 
 const DebugSymbols::Symbol* DebugSymbols::Module::find(u32 addr) const
@@ -438,38 +466,123 @@ bool DebugSymbols::load(const QString& rawPath, QString& error)
         set->Modules.push_back(std::move(mod));
     }
 
-    for (int m = 0; m < (int)set->Modules.size(); m++)
-    {
-        Module& mod = set->Modules[m];
-        Index(mod);
-        for (int s = 0; s < (int)mod.Symbols.size(); s++)
-        {
-            Symbol& sym = mod.Symbols[s];
-            sym.Pretty = DemangleName(sym.Name);
-            set->ByName.insert(sym.Name, {m, s});
-            if (sym.Pretty != sym.Name)
-            {
-                set->ByName.insert(sym.Pretty, {m, s});
-                int paren = sym.Pretty.indexOf('(');
-                if (paren > 0)
-                    set->ByName.insert(sym.Pretty.left(paren), {m, s});
-            }
-        }
-        set->SymbolCount += (int)mod.Symbols.size();
-    }
+    Finalize(*set);
     if (!set->SymbolCount)
     {
         error = "no symbols in " + path;
         return false;
     }
-    Cur = set;
+    Base = set;
+    rebuild();
     Loaded.clear();
     return true;
 }
 
+bool DebugSymbols::loadLabels(const QString& path, QString& error)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+    {
+        error = "cannot read " + path;
+        return false;
+    }
+    std::vector<Label> labels;
+    for (QByteArray line : f.readAll().split('\n'))
+    {
+        int hash = line.indexOf('#');
+        if (hash >= 0)
+            line.truncate(hash);
+        QList<QByteArray> parts = line.simplified().split(' ');
+        if (parts.size() < 2)
+            continue;
+        QByteArray addrText = parts[0];
+        if (addrText.startsWith("0x") || addrText.startsWith("0X"))
+            addrText = addrText.mid(2);
+        bool ok;
+        u32 addr = addrText.toUInt(&ok, 16);
+        if (!ok)
+            continue;
+        labels.push_back({addr, QString::fromUtf8(parts[1]), parts.size() > 2 ? QString::fromUtf8(parts[2]) : QString()});
+    }
+    if (labels.empty())
+    {
+        error = "no labels in " + path;
+        return false;
+    }
+    Labels = std::move(labels);
+    LabelSource = path;
+    rebuild();
+    return true;
+}
+
+void DebugSymbols::clearLabels()
+{
+    Labels.clear();
+    LabelSource.clear();
+    rebuild();
+}
+
+void DebugSymbols::rebuild()
+{
+    Unmatched = 0;
+    if (Labels.empty())
+    {
+        Cur = Base;
+        return;
+    }
+    auto set = Base ? std::make_shared<Set>(*Base) : std::make_shared<Set>();
+    if (!Base)
+    {
+        set->Source = LabelSource;
+        set->Modules.push_back(Module{"labels"});
+    }
+    for (const Label& label : Labels)
+    {
+        u32 addr = label.Addr & ~1u;
+        int m = -1;
+        for (int i = 0; i < (int)set->Modules.size() && m < 0; i++)
+        {
+            const Module& mod = set->Modules[i];
+            if (!label.Module.isEmpty() ? mod.Name.compare(label.Module, Qt::CaseInsensitive) == 0
+                                        : mod.Overlay < 0 && mod.covers(addr))
+                m = i;
+        }
+        if (m < 0 && label.Module.isEmpty() && !Base)
+            m = 0;
+        if (m < 0)
+        {
+            Unmatched++;
+            continue;
+        }
+        Module& mod = set->Modules[m];
+        auto it = std::find_if(mod.Symbols.begin(), mod.Symbols.end(), [addr](const Symbol& s) { return s.Addr == addr; });
+        if (it != mod.Symbols.end())
+        {
+            if (it->Original.isEmpty())
+                it->Original = it->Name;
+            it->Name = label.Name;
+        }
+        else
+        {
+            Symbol sym {};
+            sym.Addr = addr;
+            sym.Thumb = label.Addr & 1;
+            sym.Name = label.Name;
+            sym.Kind = "label";
+            sym.Module = m;
+            mod.Symbols.push_back(std::move(sym));
+        }
+    }
+    Finalize(*set);
+    Cur = set;
+}
+
 void DebugSymbols::clear()
 {
+    Base.reset();
     Cur.reset();
+    Labels.clear();
+    LabelSource.clear();
     Loaded.clear();
 }
 
