@@ -12,6 +12,7 @@ add_library(melonds_headless SHARED
     InputApply.cpp
     Instance.cpp
     LuaHost.cpp
+    MicFifo.cpp
     Platform.cpp
     Protocol.cpp
     Socket.cpp
@@ -44,12 +45,16 @@ add_executable(headless_tests
     Protocol.cpp
     Socket.cpp
     tests/InputQueueTests.cpp
+    tests/MicFifoTests.cpp
+    tests/TouchTimelineTests.cpp
+    MicFifo.cpp
     Commands.cpp
     Input.cpp
 )
 find_package(Threads REQUIRED)
 target_include_directories(headless_tests PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests")
 target_link_libraries(headless_tests PRIVATE Threads::Threads)
 if (WIN32)

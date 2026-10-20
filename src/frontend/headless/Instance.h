@@ -30,6 +30,7 @@
 
 #include "Commands.h"
 #include "Input.h"
+#include "MicFifo.h"
 #include "NDS.h"
 #include "Net.h"
 
@@ -101,6 +102,8 @@ public:
 
     melonDS::u64 FramesRun = 0;
     InputQueue Input;
+    TouchTimeline TouchLine;
+    MicFifo Mic;
 
 private:
     std::string SavePath;

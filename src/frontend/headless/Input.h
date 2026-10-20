@@ -27,6 +27,8 @@
 #include <string>
 #include <vector>
 
+#include "InputTimeline.h"
+
 namespace melonDS { class NDS; }
 
 namespace Headless
@@ -160,10 +162,33 @@ private:
     void WakeUp();
 };
 
+// The touch points of the frame being run, as the core's InputTimeline. Each point holds from its
+// offset until the next; before the first one, and after the last one in later frames, the state
+// the previous frame ended in holds. Emulator thread only.
+class TouchTimeline : public melonDS::InputTimeline
+{
+public:
+    void Reset();                                       // released, as after a console reset
+    void Begin(const std::vector<TouchPoint>& points);  // a frame is about to start
+    bool StateAt(uint32_t offset, uint16_t& x, uint16_t& y) const;
+    bool TouchAt(melonDS::u64 cyclesSinceFrameStart, melonDS::u16& x, melonDS::u16& y) override;
+
+private:
+    struct State
+    {
+        bool Down = false;
+        uint16_t X = 0, Y = 0;
+    };
+
+    std::vector<TouchPoint> Points;
+    State Initial;      // before the first point of this frame
+    State Final;        // after the last point; the next frame's Initial
+};
+
 // NDS-facing appliers (InputApply.cpp), run on the emulator thread at the start of a frame.
 void ApplyButtons(melonDS::NDS& nds, const AppliedInput& in);
 void ApplyLid(melonDS::NDS& nds, const AppliedInput& in);
-void ApplyTouch(melonDS::NDS& nds, const AppliedInput& in);
+void ApplyTouch(melonDS::NDS& nds, TouchTimeline& line, const AppliedInput& in);
 void ApplyMic(Instance& inst, const AppliedInput& in);
 void ApplyInput(Instance& inst, const AppliedInput& in);
 

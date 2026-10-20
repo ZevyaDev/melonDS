@@ -261,6 +261,46 @@ InputState InputQueue::NewestState() const
     return s;
 }
 
+void TouchTimeline::Reset()
+{
+    Points.clear();
+    Initial = {};
+    Final = {};
+}
+
+void TouchTimeline::Begin(const std::vector<TouchPoint>& points)
+{
+    Points = points;
+    Initial = Final;
+    if (!Points.empty())
+    {
+        const TouchPoint& t = Points.back();
+        Final = {t.Down != 0, t.X, t.Y};
+    }
+}
+
+bool TouchTimeline::StateAt(uint32_t offset, uint16_t& x, uint16_t& y) const
+{
+    const State* s = &Initial;
+    State cur;
+    for (const TouchPoint& t : Points)
+    {
+        if (t.Offset > offset)
+            break;
+        cur = {t.Down != 0, t.X, t.Y};
+        s = &cur;
+    }
+    x = s->X;
+    y = s->Y;
+    return s->Down;
+}
+
+bool TouchTimeline::TouchAt(melonDS::u64 cyclesSinceFrameStart, melonDS::u16& x, melonDS::u16& y)
+{
+    uint32_t offset = cyclesSinceFrameStart > UINT32_MAX ? UINT32_MAX : (uint32_t)cyclesSinceFrameStart;
+    return StateAt(offset, x, y);
+}
+
 std::vector<InputLogEntry> InputQueue::ReadLog(uint64_t fromFrame, size_t max) const
 {
     std::lock_guard lock(Lock);

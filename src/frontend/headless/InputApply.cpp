@@ -38,29 +38,45 @@ void ApplyLid(NDS& nds, const AppliedInput& in)
         nds.SetLidClosed(closed);
 }
 
-// Plan step 3 replaces this with the sub-frame timeline; for now only the pen state at the end
-// of the frame is applied, at the start of it.
-void ApplyTouch(NDS& nds, const AppliedInput& in)
+// The points become the frame's timeline, which the core consults whenever the ARM7 samples the
+// touch controller. The state at the start of the frame is also applied directly, so anything
+// that reads the controller without going through the timeline sees a coherent pen.
+void ApplyTouch(NDS& nds, TouchTimeline& line, const AppliedInput& in)
 {
-    if (in.Touch.empty())
-        return;
-    const TouchPoint& t = in.Touch.back();
-    if (t.Down)
-        nds.TouchScreen(t.X, t.Y);
+    line.Begin(in.Touch);
+    uint16_t x, y;
+    if (line.StateAt(0, x, y))
+        nds.TouchScreen(x, y);
     else
         nds.ReleaseScreen();
 }
 
-// Plan step 4.
+// Samples go to the console's mic FIFO, which melonDS drains as it wants them. While the mic is
+// off (the game has not sampled it, or it timed out) they are dropped. The active flag follows
+// the core's own Mic_Start/Mic_Stop calls, including those made by a savestate load.
 void ApplyMic(Instance& inst, const AppliedInput& in)
 {
+    if (!inst.Mic.Active())
+        return;
+
+    if (in.MicKind == 1)
+    {
+        if (!in.Mic.empty())
+            inst.Mic.Push(in.Mic.data(), in.Mic.size());
+    }
+    else if (in.MicKind == 2)
+    {
+        std::vector<int16_t> noise;
+        GenerateMicNoise(inst.FramesRun, in.MicLevel, noise);
+        inst.Mic.Push(noise.data(), noise.size());
+    }
 }
 
 void ApplyInput(Instance& inst, const AppliedInput& in)
 {
     ApplyButtons(*inst.NDS, in);
     ApplyLid(*inst.NDS, in);
-    ApplyTouch(*inst.NDS, in);
+    ApplyTouch(*inst.NDS, inst.TouchLine, in);
     ApplyMic(inst, in);
 }
 

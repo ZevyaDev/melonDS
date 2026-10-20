@@ -418,6 +418,10 @@ void TSC::Write(u8 val)
         ControlByte = val;
         DataPos = 1;
 
+        // a conversion of X or Y reads the pen at the current time
+        if ((ControlByte & 0x70) == 0x10 || (ControlByte & 0x70) == 0x50)
+            NDS.SyncTouchTimeline();
+
         switch (ControlByte & 0x70)
         {
         case 0x10: ConvResult = TouchY; break;

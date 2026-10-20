@@ -129,6 +129,7 @@ Instance::Instance(int id, const Config& config, std::string& error) : ID(id)
     NDS = std::make_unique<melonDS::NDS>(std::move(args), this);
     NDS->SetRenderer(std::make_unique<SoftRenderer>(*NDS));
     NDS->Reset();
+    NDS->SetInputTimeline(&TouchLine);
     NDS->Debugger.SetBreakHandler([this](const BreakEvent& ev) { Park(ev); });
     Network().RegisterInstance(ID);
     Lua = std::make_unique<LuaHost>(*this);
@@ -208,6 +209,8 @@ void Instance::Reset()
     NDS->Start();
     FramesRun = 0;
     Input.Reset();
+    TouchLine.Reset();
+    Mic.Clear();
     Lua->OnReset();
 }
 
@@ -453,6 +456,7 @@ bool Instance::LoadState(const std::string& path, std::string& error)
         return false;
     }
     Input.Clear();
+    Mic.Clear();    // the load itself calls Mic_Start/Mic_Stop to match the saved state
     Savestate backup;
     NDS->DoSavestate(&backup);
     Savestate state(data.data(), data.size(), false);

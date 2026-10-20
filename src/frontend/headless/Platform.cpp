@@ -429,16 +429,22 @@ void Camera_CaptureFrame(int num, u32* frame, int width, int height, bool yuv, v
 
 void Mic_Start(void* userdata)
 {
+    if (userdata)
+        Inst(userdata)->Mic.Start();
 }
 
 void Mic_Stop(void* userdata)
 {
+    if (userdata)
+        Inst(userdata)->Mic.Stop();
 }
 
+// Returns 0 when nothing is queued, so melonDS holds its last sample.
 int Mic_ReadInput(s16* data, int maxlength, void* userdata)
 {
-    memset(data, 0, maxlength * sizeof(s16));
-    return maxlength;
+    if (!userdata || maxlength <= 0)
+        return 0;
+    return int(Inst(userdata)->Mic.Read(data, size_t(maxlength)));
 }
 
 AACDecoder* AAC_Init()
