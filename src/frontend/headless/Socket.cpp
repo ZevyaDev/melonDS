@@ -70,7 +70,40 @@ static void SetNoDelay(Socket s)
     setsockopt(NATIVE(s), IPPROTO_TCP, TCP_NODELAY, (const char*)&on, sizeof on);
 }
 
-Socket BindFirstFree(uint16_t preferred, uint16_t range, uint16_t& bound)
+bool ParseIPv4(const std::string& text, uint32_t& out)
+{
+    if (text == "localhost")
+    {
+        out = 0x7F000001u;
+        return true;
+    }
+    uint32_t value = 0;
+    int parts = 0;
+    size_t i = 0;
+    while (parts < 4)
+    {
+        size_t start = i;
+        uint32_t part = 0;
+        while (i < text.size() && text[i] >= '0' && text[i] <= '9' && i - start < 3)
+            part = part * 10 + uint32_t(text[i++] - '0');
+        if (i == start || part > 255)
+            return false;
+        value = (value << 8) | part;
+        parts++;
+        if (parts < 4)
+        {
+            if (i >= text.size() || text[i] != '.')
+                return false;
+            i++;
+        }
+    }
+    if (i != text.size())
+        return false;
+    out = value;
+    return true;
+}
+
+Socket BindFirstFree(uint16_t preferred, uint16_t range, uint16_t& bound, uint32_t address)
 {
     EnsureStarted();
     uint32_t span = range == 0 ? 1 : range;
@@ -91,7 +124,7 @@ Socket BindFirstFree(uint16_t preferred, uint16_t range, uint16_t& bound)
         sockaddr_in a = {};
         a.sin_family = AF_INET;
         a.sin_port = htons(uint16_t(p));
-        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        a.sin_addr.s_addr = htonl(address);
         if (bind(NATIVE(s), (sockaddr*)&a, sizeof a) == 0 && listen(NATIVE(s), 1) == 0)
         {
             SockLen len = sizeof a;

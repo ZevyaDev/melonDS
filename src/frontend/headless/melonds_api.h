@@ -111,6 +111,8 @@ MDS_API int mds_get_rtc(int id, int* out);
 MDS_API int mds_run(const int* ids, int count, uint32_t frames, int timeout_ms, int* states);
 MDS_API int mds_wait(const int* ids, int count, int timeout_ms, int* states);
 MDS_API int mds_gdb(int id, int port9, int port7, int break_on_start);
+// mds_gdb listening on host (an IPv4 address; NULL or "" = 127.0.0.1, "0.0.0.0" = every interface).
+MDS_API int mds_gdb_host(int id, const char* host, int port9, int port7, int break_on_start);
 MDS_API int mds_start(int id, uint32_t frames);
 MDS_API int mds_stop_after(int id, uint32_t frames);
 MDS_API int mds_interrupt(int id);
@@ -219,11 +221,14 @@ MDS_API int mds_packets(int id, int enabled, int capacity);
 MDS_API int mds_packets_take(int id, mds_packet* headers, uint8_t* data, int max_packets, int max_data);
 
 // Reference: docs/headless-api.md, section 8 (socket server, instance base).
-// Socket server (protocol: Protocol.h). One server thread per process serves every console.
+// Socket server (protocol: Protocol.h). One server thread per process serves every console, on 127.0.0.1.
 // port 0 lets the OS pick; otherwise the first free port in [port, port + range) is used,
 // where range is flags & 0xFFFF (0 = 32, 1 = strict). Returns 0 and the bound port, or -1
 // (mds_error: "no free port in A-B", "server already running").
 MDS_API int mds_serve(int port, int flags, int* bound);
+// mds_serve listening on host (an IPv4 address; NULL or "" = 127.0.0.1, the default; "0.0.0.0" = every
+// interface, which prints a warning: anyone who can reach the port controls the emulator).
+MDS_API int mds_serve_host(const char* host, int port, int flags, int* bound);
 // Stops the thread, closes the sockets and drops the client. Consoles keep their state.
 MDS_API void mds_serve_stop(void);
 // Waits up to timeout_ms (< 0 = forever) for a client's `shutdown` message: 1 if one was

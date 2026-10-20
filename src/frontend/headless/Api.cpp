@@ -17,6 +17,7 @@
 */
 
 #include <algorithm>
+#include <cstdio>
 #include <chrono>
 #include <cstring>
 #include <map>
@@ -29,6 +30,7 @@
 #include "LuaHost.h"
 #include "MPInterface.h"
 #include "Server.h"
+#include "Socket.h"
 
 using namespace melonDS;
 using namespace Headless;
@@ -402,15 +404,31 @@ int mds_wait(const int* ids, int count, int timeout_ms, int* states)
 
 int mds_gdb(int id, int port9, int port7, int break_on_start)
 {
-    Slot* s = Stopped(id);
+    return mds_gdb_host(id, nullptr, port9, port7, break_on_start);
+}
+
+int mds_gdb_host(int id, const char* host, int port9, int port7, int break_on_start)
+{
+    Slot* s = StoppedDebug(id);
     if (!s)
         return -1;
 #ifdef GDBSTUB_ENABLED
+    std::string address = host && *host ? host : "127.0.0.1";
+    uint32_t ip;
+    if (!Net::ParseIPv4(address, ip))
+        return Fail("bad host: " + address + " (an IPv4 address such as 127.0.0.1 or 0.0.0.0)");
     if (port9 <= 0 && port7 <= 0)
-        s->Inst->NDS->SetGdbArgs(std::nullopt);
-    else
-        s->Inst->NDS->SetGdbArgs(GDBArgs{(u16)port7, (u16)port9, break_on_start != 0, break_on_start != 0});
-    return 0;
+        return OnEmu(s, [&](Instance& inst, std::string&) {
+            inst.NDS->SetGdbArgs(std::nullopt);
+            return 0;
+        });
+    // GdbStub::Init warns (log level Warn) when the address is not loopback
+    return OnEmu(s, [&](Instance& inst, std::string&) {
+        GDBArgs args {(u16)port7, (u16)port9, break_on_start != 0, break_on_start != 0};
+        args.BindAddress = address;
+        inst.NDS->SetGdbArgs(args);
+        return 0;
+    });
 #else
     return Fail("built without the GDB stub");
 #endif
@@ -1024,12 +1042,24 @@ int mds_packets_take(int id, mds_packet* headers, uint8_t* data, int max_packets
 
 int mds_serve(int port, int flags, int* bound)
 {
+    return mds_serve_host(nullptr, port, flags, bound);
+}
+
+int mds_serve_host(const char* host, int port, int flags, int* bound)
+{
     if (port < 0 || port > 65535)
         return Fail("bad port");
+    std::string address = host && *host ? host : "127.0.0.1";
+    uint32_t ip;
+    if (!Net::ParseIPv4(address, ip))
+        return Fail("bad host: " + address + " (an IPv4 address such as 127.0.0.1 or 0.0.0.0)");
     std::string error;
     int actual = 0;
-    if (!ServerStart(port, flags & 0xFFFF, actual, error))
+    if (!ServerStart(ip, port, flags & 0xFFFF, actual, error))
         return Fail(error);
+    if ((ip >> 24) != 127)
+        fprintf(stderr, "melonDS: warning: the socket server listens on %s:%d, not loopback: anyone who can "
+                "reach this machine can control the emulator\n", address.c_str(), actual);
     if (bound)
         *bound = actual;
     return 0;

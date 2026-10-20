@@ -19,6 +19,7 @@
 #ifndef HEADLESS_SERVER_H
 #define HEADLESS_SERVER_H
 
+#include <cstdint>
 #include <string>
 
 namespace Headless
@@ -27,8 +28,9 @@ namespace Headless
 // The process's socket server (Protocol.h). One server thread, one client at a time,
 // serving every console in the process. These back mds_serve and friends.
 
+// address: IPv4 in host byte order (0x7F000001 = 127.0.0.1, the default; 0 = every interface).
 // port 0: the OS picks. Otherwise the first free port in [port, port + range), range 0 = 32.
-bool ServerStart(int port, int range, int& bound, std::string& error);
+bool ServerStart(uint32_t address, int port, int range, int& bound, std::string& error);
 void ServerStop();
 // 1 once a client has sent `shutdown` (since ServerStart), else 0 after timeoutMs (< 0 = forever).
 int ServerWait(int timeoutMs);

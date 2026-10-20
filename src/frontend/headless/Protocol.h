@@ -23,7 +23,8 @@
     melonds_server wire protocol, version 1. This header is the specification;
     the Python client follows it field for field.
 
-    Transport: one TCP connection to 127.0.0.1. Everything is little-endian.
+    Transport: one TCP connection, to 127.0.0.1 by default (mds_serve_host and melonds_server --host can
+    listen on another IPv4 address). Everything is little-endian.
     Nothing relies on struct memory layout: every message is an explicit field
     list, written and read by Writer/Reader below. Types: u8/u16/u32/u64
     unsigned, i32 signed two's complement, string = u32 byte length + UTF-8

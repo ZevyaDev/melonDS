@@ -25,6 +25,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace Headless::Net
 {
@@ -39,14 +40,18 @@ constexpr Socket InvalidSocket = -1;
 
 void CloseSocket(Socket s);
 
-// Bind 127.0.0.1 on the first free port in [preferred, preferred + range) and
-// listen with a backlog of 1. preferred == 0 lets the OS choose; range == 1
+// Parse a dotted IPv4 address ("127.0.0.1", "0.0.0.0"; "localhost" is accepted for
+// 127.0.0.1) into host byte order. False if it is not one.
+bool ParseIPv4(const std::string& text, uint32_t& out);
+
+// Bind `address` (host byte order; 0x7F000001 = 127.0.0.1, the default) on the first
+// free port in [preferred, preferred + range) and listen with a backlog of 1. preferred == 0 lets the OS choose; range == 1
 // means strict (no searching). Returns the listening socket and stores the
 // real port in `bound`, or returns InvalidSocket if every port is taken.
 // Ports are claimed exclusively: a port already held by another listener is
 // never shared (SO_EXCLUSIVEADDRUSE on Windows, plain SO_REUSEADDR semantics
 // on POSIX, where it only skips TIME_WAIT).
-Socket BindFirstFree(uint16_t preferred, uint16_t range, uint16_t& bound);
+Socket BindFirstFree(uint16_t preferred, uint16_t range, uint16_t& bound, uint32_t address = 0x7F000001u);
 
 // Accept one pending connection (blocking unless the listener is
 // non-blocking). Returns InvalidSocket on failure. TCP_NODELAY is set.

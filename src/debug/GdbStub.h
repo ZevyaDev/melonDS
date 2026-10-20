@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <sys/types.h>
 #include <map>
+#include <string>
 #include <vector>
 
 #include "../types.h"
@@ -125,7 +126,8 @@ public:
 	GdbStub(StubCallbacks* cb);
 	~GdbStub();
 
-	bool Init(int port);
+	// Listen on host:port; host is an IPv4 address ("127.0.0.1" by default, "0.0.0.0" for every interface).
+	bool Init(int port, const std::string& host = "127.0.0.1");
 	void Close();
 
 	StubState Poll(bool wait = false);

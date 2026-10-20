@@ -150,7 +150,7 @@ class Server
 public:
     ~Server() { Stop(); }
 
-    bool Start(int port, int range, int& bound, std::string& error);
+    bool Start(uint32_t address, int port, int range, int& bound, std::string& error);
     void Stop();
     int Wait(int timeoutMs);
     void SetName(const std::string& name)
@@ -306,7 +306,7 @@ std::mutex TheServerLock;
 // ----------------------------------------------------------------------------
 // Start / stop
 
-bool Server::Start(int port, int range, int& bound, std::string& error)
+bool Server::Start(uint32_t address, int port, int range, int& bound, std::string& error)
 {
     if (Running())
     {
@@ -315,7 +315,7 @@ bool Server::Start(int port, int range, int& bound, std::string& error)
     }
     uint16_t actual = 0;
     uint32_t span = port == 0 ? 1 : (range <= 0 ? 32 : std::min(range, 65535));
-    Listener = Net::BindFirstFree(uint16_t(port), uint16_t(span), actual);
+    Listener = Net::BindFirstFree(uint16_t(port), uint16_t(span), actual, address);
     if (Listener == Net::InvalidSocket)
     {
         error = "no free port in " + std::to_string(port) + "-" + std::to_string(std::min<uint32_t>(65535, port + span - 1));
@@ -1788,12 +1788,12 @@ void Server::Handle(const P::Message& m)
 
 }   // anonymous namespace
 
-bool ServerStart(int port, int range, int& bound, std::string& error)
+bool ServerStart(uint32_t address, int port, int range, int& bound, std::string& error)
 {
     std::lock_guard lock(TheServerLock);
     if (!TheServer)
         TheServer = new Server();       // lives as long as the process: never joined during unload
-    return TheServer->Start(port, range, bound, error);
+    return TheServer->Start(address, port, range, bound, error);
 }
 
 void ServerStop()

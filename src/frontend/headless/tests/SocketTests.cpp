@@ -176,3 +176,34 @@ TEST(socket_send_reports_would_block_on_full_buffer)
     CloseSocket(client);
     CloseSocket(listener);
 }
+
+TEST(socket_parse_ipv4)
+{
+    uint32_t ip = 0;
+    CHECK(ParseIPv4("127.0.0.1", ip));
+    CHECK(ip == 0x7F000001u);
+    CHECK(ParseIPv4("0.0.0.0", ip));
+    CHECK(ip == 0u);
+    CHECK(ParseIPv4("192.168.1.20", ip));
+    CHECK(ip == 0xC0A80114u);
+    CHECK(ParseIPv4("localhost", ip));
+    CHECK(ip == 0x7F000001u);
+    CHECK(!ParseIPv4("", ip));
+    CHECK(!ParseIPv4("256.0.0.1", ip));
+    CHECK(!ParseIPv4("1.2.3", ip));
+    CHECK(!ParseIPv4("1.2.3.4.5", ip));
+    CHECK(!ParseIPv4("1.2.3.4 ", ip));
+    CHECK(!ParseIPv4("example.com", ip));
+}
+
+TEST(socket_binds_the_requested_address)
+{
+    uint16_t port = 0;
+    Socket s = BindFirstFree(0, 1, port, 0);     // 0.0.0.0: every interface
+    CHECK(s != InvalidSocket);
+    CHECK(LocalAddress(s) == 0u);
+    Socket c = ConnectLoopback(port);            // loopback is one of them
+    CHECK(c != InvalidSocket);
+    CloseSocket(c);
+    CloseSocket(s);
+}

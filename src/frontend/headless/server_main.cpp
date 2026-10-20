@@ -46,6 +46,8 @@ static const int MaxConsoles = 16;
 static const char* Usage =
     "Usage: melonds_server [options]\n"
     "\n"
+    "  --host ADDR         IPv4 address to listen on (default 127.0.0.1; 0.0.0.0 = every\n"
+    "                      interface: anyone who can reach the port controls the emulator)\n"
     "  --port N            preferred port (default 7777); 0 lets the OS pick\n"
     "  --port-range N      ports to try from --port (default 32); 1 fails instead of searching\n"
     "  --port-file PATH    write the bound port to PATH once listening\n"
@@ -71,6 +73,7 @@ struct Options
     std::string PortFile;
     long Consoles = 1;
     long InstanceBase = 0;
+    std::string Host = "127.0.0.1";
     std::string Rom, Save, Bios9, Bios7, Firmware, LocalDir, Name;
     bool Help = false;
 };
@@ -172,7 +175,8 @@ static std::string ParseArgs(int argc, char** argv, Options& o)
 
         try
         {
-            if (take("--port")) number("--port", 0, 65535, o.Port);
+            if (take("--host")) o.Host = value;
+            else if (take("--port")) number("--port", 0, 65535, o.Port);
             else if (take("--port-range")) number("--port-range", 1, 65535, o.PortRange);
             else if (take("--port-file")) o.PortFile = value;
             else if (take("--consoles")) number("--consoles", 1, MaxConsoles, o.Consoles);
@@ -251,7 +255,7 @@ static int Run(const Options& o)
     std::string name = o.Name.empty() ? "melonds" : o.Name;
     mds_serve_name(name.c_str());
     int bound = 0;
-    if (mds_serve((int)o.Port, (int)o.PortRange, &bound) < 0)
+    if (mds_serve_host(o.Host.c_str(), (int)o.Port, (int)o.PortRange, &bound) < 0)
     {
         std::string message = mds_error();
         return Fail(message, message.rfind("no free port", 0) == 0 ? 2 : 1);

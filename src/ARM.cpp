@@ -218,7 +218,7 @@ void ARM::SetGdbArgs(std::optional<GDBArgs> gdb)
     if (gdb)
     {
         int port = Num ? gdb->PortARM7 : gdb->PortARM9;
-        GdbStub.Init(port);
+        GdbStub.Init(port, gdb->BindAddress);
         BreakOnStartup = Num ? gdb->ARM7BreakOnStartup : gdb->ARM9BreakOnStartup;
     }
     IsSingleStep = false;
