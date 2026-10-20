@@ -717,7 +717,7 @@ QString DebuggerWindow::describeBreak(const BreakEvent& ev) const
         if (!target.isEmpty())
             what += " [" + target + "]";
         if (ev.DMAChannel != 0xFF)
-            return QString("%1 DMA%2 %3, CPU at %4").arg(cpuName).arg(ev.DMAChannel).arg(what).arg(where);
+            return QString("%1 DMA%2 %3 (watchpoint #%4)").arg(cpuName).arg(ev.DMAChannel).arg(what).arg(ev.ID);
         return QString("%1 watchpoint #%2: %3 by %4").arg(cpuName).arg(ev.ID).arg(what).arg(where);
     }
     case BreakKind::Step:
