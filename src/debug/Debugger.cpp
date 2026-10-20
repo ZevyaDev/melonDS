@@ -32,7 +32,6 @@ constexpr u32 StackSwitchDistance = 0x400;
 constexpr u32 StackMatchWindow = 0x200;
 constexpr size_t MaxParkedStacks = 64;
 constexpr u32 MainRAMWords = 0x400000 >> 2;
-constexpr u32 DMAWriterTag = 0xFFFFFFF0;
 
 Debugger::Debugger(melonDS::NDS& nds) noexcept : NDS(nds)
 {
@@ -149,7 +148,35 @@ void Debugger::CancelBreakRequests()
 
 void Debugger::Step(u8 cpu, u32 count)
 {
-    StepRemaining[cpu & 1] = count;
+    u8 n = cpu & 1;
+    // Parked inside this CPU's instruction hook, the instruction at the break has passed its hook already and
+    // runs on resume, so it is the first of the count. Otherwise the next hook call is for the first one, and
+    // the countdown reaching zero there would park before anything ran.
+    if (count && InstrBreakCPU != n && count != 0xFFFFFFFF)
+        count++;
+    StepRemaining[n] = count;
+    Rearm();
+}
+
+void Debugger::OnStateLoaded()
+{
+    for (int i = 0; i < 2; i++)
+    {
+        CallStack[i].clear();
+        ParkedStacks[i].clear();
+        Exceptions[i].clear();
+        LastSP[i] = {};
+        LastMode[i] = 0;
+        PrevInstr[i] = 0;
+        PrevThumb[i] = false;
+        PendingValid[i] = false;
+    }
+    ARM* cpus[2] = {NDS.ARM9, NDS.ARM7};
+    for (int i = 0; i < 2; i++)
+        CurPC[i] = cpus[i]->R[15] - ((cpus[i]->CPSR & 0x20) ? 2 : 4);
+    if (!LastWriter.empty())
+        std::fill(LastWriter.begin(), LastWriter.end(), 0);
+    CoverageLastBits = {};
     Rearm();
 }
 
@@ -570,7 +597,11 @@ void Debugger::OnInstr(ARM& cpu, u32 pc)
     }
 
     if (raise)
+    {
+        InstrBreakCPU = n;
         Raise(ev);
+        InstrBreakCPU = -1;
+    }
 }
 
 void Debugger::OnDMA(u8 n, u8 channel, u32 addr, u8 size, u32 value)
@@ -607,20 +638,37 @@ void Debugger::WatchHit(u8 n, u32 addr, u8 size, u32 value, bool write, u8 dma)
 
     if (!write)
         value = Peek(n, addr, size);
+    bool raiseDMA = false;
+    BreakEvent dmaEvent {};
     for (int id : hits)
     {
         auto it = std::find_if(Watchpoints.begin(), Watchpoints.end(), [id](const Watchpoint& w) { return w.ID == id; });
         if (it == Watchpoints.end())
             continue;
-        BreakEvent hit {write ? BreakKind::Write : BreakKind::Read, n, size, id, CurPC[n], addr, value, dma};
+        // A DMA write is not made by an instruction: its pc is the DMA tag, and it parks at once (the DMA
+        // is between two units, the CPUs between two instructions) instead of at the CPU's next instruction.
+        u32 pc = dma == 0xFF ? CurPC[n] : (DMAWriterTag | (dma << 1) | n);
+        BreakEvent hit {write ? BreakKind::Write : BreakKind::Read, n, size, id, pc, addr, value, dma};
         BreakCallback cb = it->Callback;
-        if ((!cb || cb(hit)) && !PendingValid[n])
+        if (cb && !cb(hit))
+            continue;
+        if (dma != 0xFF)
+        {
+            if (!raiseDMA)
+            {
+                dmaEvent = hit;
+                raiseDMA = true;
+            }
+        }
+        else if (!PendingValid[n])
         {
             Pending[n] = hit;
             PendingValid[n] = true;
             Armed[n] = true;
         }
     }
+    if (raiseDMA)
+        Raise(dmaEvent);
 }
 
 void Debugger::OnCall(ARM& cpu)

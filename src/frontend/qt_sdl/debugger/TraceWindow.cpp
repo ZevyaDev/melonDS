@@ -45,7 +45,6 @@
 using namespace melonDS;
 
 constexpr int MaxShownTrace = 20000;
-constexpr u32 DMAWriterTag = 0xFFFFFFF0;
 
 static QComboBox* CPUCombo(QWidget* parent, bool both)
 {

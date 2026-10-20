@@ -49,6 +49,9 @@ enum WatchFlags : u8
     Watch_Write = 2,
 };
 
+// The pc of a break or last-writer record made by DMA, not by an instruction: 0xFFFFFFF0 | channel << 1 | arm7.
+constexpr u32 DMAWriterTag = 0xFFFFFFF0;
+
 struct BreakEvent
 {
     BreakKind Kind;
@@ -124,7 +127,15 @@ public:
     void RequestService();
     void RequestBreak(u8 cpuMask);
     void CancelBreakRequests();
+    // Park the console after the CPU has executed count more instructions (0 disarms). Counted from the
+    // instruction the CPU is parked at when called during a break of that CPU's instruction hook, else from
+    // its next instruction, so count = n always executes n instructions.
     void Step(u8 cpu, u32 count);
+
+    // After a savestate load: drop what described the execution before it (call stacks, a pending
+    // watchpoint hit, the last-writer records). Points, the trace, call counts, coverage and armed
+    // steps/break requests are kept.
+    void OnStateLoaded();
 
     void SetTrace(u8 cpuMask, u32 start, u32 end, u32 capacity);
     std::vector<TraceEntry> DrainTrace();
@@ -138,6 +149,7 @@ public:
 
     void SetLastWriter(bool enabled);
     u32 GetLastWriter(u32 addr) const;
+    bool IsTrackingWriters() const { return !LastWriter.empty(); }
 
     u32 Peek(u8 cpu, u32 addr, u8 size) const;
     bool Poke(u8 cpu, u32 addr, u8 size, u32 value);
@@ -150,6 +162,7 @@ public:
 
     void OnInstr(ARM& cpu, u32 pc);
     void OnData(ARM& cpu, u32 addr, u8 size, u32 value, bool write);
+    // A DMA unit was written (called after the write, so a break sees the new memory).
     void OnDMA(u8 cpu, u8 channel, u32 addr, u8 size, u32 value);
     void OnCall(ARM& cpu);
     void OnException(ARM& cpu, u32 ret);
@@ -173,6 +186,7 @@ private:
     std::array<bool, 2> PendingValid {};
     std::array<BreakEvent, 2> Pending {};
     bool InBreak = false;
+    int InstrBreakCPU = -1;     // the CPU whose OnInstr is parked in Raise, else -1
 
     u8 TraceMask = 0;
     u32 TraceStart = 0, TraceEnd = 0;
