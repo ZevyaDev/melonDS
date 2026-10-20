@@ -137,6 +137,12 @@ static int GetSystemID(lua_State* L)
     return 1;
 }
 
+static int GetConsoleID(lua_State* L)
+{
+    lua_pushinteger(L, Host(L).Inst.EffectiveID());
+    return 1;
+}
+
 static int JoypadSet(lua_State* L)
 {
     luaL_checktype(L, 1, LUA_TTABLE);
@@ -271,6 +277,7 @@ void LuaHost::Open()
         {"framecount", FrameCount},
         {"frameadvance", FrameAdvance},
         {"getsystemid", GetSystemID},
+        {"getconsoleid", GetConsoleID},
         {nullptr, nullptr},
     };
     static const luaL_Reg joypadFuncs[] = {

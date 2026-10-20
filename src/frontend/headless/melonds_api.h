@@ -206,6 +206,16 @@ MDS_API int mds_serve_wait(int timeout_ms);
 // Name returned in the hello reply (default "melonds"). Call before or after mds_serve.
 MDS_API void mds_serve_name(const char* name);
 
+// Process-wide offset added to every console's id for MAC address and save-file numbering
+// (and reported by emu.getconsoleid()), so separate processes stay distinct. Default 0.
+// Must be set before any console is created: returns -1 (mds_error) if one exists or base < 0.
+MDS_API int mds_set_instance_base(int base);
+MDS_API int mds_instance_base(void);
+// Firmware MAC address of the console (6 bytes). Save file the console's last mds_load_rom
+// resolved to (returns its length, -1 if out is too small).
+MDS_API int mds_mac(int id, uint8_t* out);
+MDS_API int mds_save_path(int id, char* out, int max);
+
 #ifdef __cplusplus
 }
 #endif

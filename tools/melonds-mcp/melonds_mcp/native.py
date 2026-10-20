@@ -153,6 +153,10 @@ def _load():
         "mds_serve_stop": (None, []),
         "mds_serve_wait": (c_int, [c_int]),
         "mds_serve_name": (None, [c_char_p]),
+        "mds_set_instance_base": (c_int, [c_int]),
+        "mds_instance_base": (c_int, []),
+        "mds_mac": (c_int, [c_int, POINTER(c_uint8)]),
+        "mds_save_path": (c_int, [c_int, POINTER(c_char), c_int]),
     }
     for name, (res, args) in sig.items():
         fn = getattr(lib, name)
@@ -229,6 +233,16 @@ def serve_stop():
 def serve_wait(timeout_ms=0):
     """1 once a client has sent shutdown, else 0 after timeout_ms."""
     return lib().mds_serve_wait(timeout_ms)
+
+
+def set_instance_base(base):
+    """Process-wide offset for console ids (MAC, save numbering, emu.getconsoleid()). Call before
+    creating consoles."""
+    _check(lib().mds_set_instance_base(base))
+
+
+def instance_base():
+    return lib().mds_instance_base()
 
 
 def run_group(consoles, frames, timeout_ms):
@@ -455,6 +469,16 @@ class Console:
 
     def lua_stop(self):
         _check(lib().mds_lua_stop(self.id))
+
+    def mac(self):
+        buf = (c_uint8 * 6)()
+        _check(lib().mds_mac(self.id, buf))
+        return bytes(buf)
+
+    def save_path(self):
+        buf = ctypes.create_string_buffer(4096)
+        _check(lib().mds_save_path(self.id, buf, 4096))
+        return buf.value.decode()
 
     def lua_output(self):
         chunks, buf = [], (c_char * 65536)()

@@ -40,6 +40,14 @@ if (WIN32)
     target_link_options(melonds_headless PRIVATE -static-libgcc -static-libstdc++)
 endif()
 
+# Stand-alone server host; uses only the public C API
+add_executable(melonds_server server_main.cpp)
+target_include_directories(melonds_server PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(melonds_server PRIVATE melonds_headless)
+if (WIN32)
+    target_link_options(melonds_server PRIVATE -static-libgcc -static-libstdc++)
+endif()
+
 # Unit tests for the pure-logic sources (no NDS needed)
 add_executable(headless_tests
     tests/main.cpp
@@ -78,7 +86,8 @@ if (Python3_Interpreter_FOUND)
     set(MCP_DIR "${CMAKE_SOURCE_DIR}/tools/melonds-mcp")
     add_test(NAME python_integration
         COMMAND ${Python3_EXECUTABLE} -m unittest discover -s "${MCP_DIR}/tests" -t "${MCP_DIR}" -v)
-    set(PY_TEST_ENV "MELONDS_HEADLESS_LIB=$<TARGET_FILE:melonds_headless>")
+    set(PY_TEST_ENV "MELONDS_HEADLESS_LIB=$<TARGET_FILE:melonds_headless>"
+                    "MELONDS_SERVER_EXE=$<TARGET_FILE:melonds_server>")
     if (WIN32)
         get_filename_component(RUNTIME_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
         list(APPEND PY_TEST_ENV "MELONDS_DLL_DIRS=${RUNTIME_DIR}")

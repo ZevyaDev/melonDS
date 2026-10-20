@@ -921,6 +921,47 @@ void mds_serve_name(const char* name)
     ServerSetName(name ? name : "");
 }
 
+int mds_set_instance_base(int base)
+{
+    {
+        std::lock_guard lock(SlotsLock);
+        if (!Slots.empty())
+            return Fail("the instance base can only change while no console exists");
+    }
+    if (!SetInstanceBase(base))
+        return Fail("instance base must not be negative");
+    return 0;
+}
+
+int mds_instance_base(void)
+{
+    return InstanceBase();
+}
+
+int mds_mac(int id, uint8_t* out)
+{
+    Slot* s = Find(id);
+    if (!s)
+        return -1;
+    return OnEmu(s, [&](Instance& inst, std::string&) {
+        const auto& mac = inst.NDS->GetFirmware().GetHeader().MacAddr;
+        memcpy(out, mac.data(), 6);
+        return 0;
+    });
+}
+
+int mds_save_path(int id, char* out, int max)
+{
+    Slot* s = Find(id);
+    if (!s)
+        return -1;
+    const std::string& path = s->Inst->GetSavePath();
+    if (max <= 0 || (int)path.size() >= max)
+        return Fail("buffer too small");
+    memcpy(out, path.c_str(), path.size() + 1);
+    return (int)path.size();
+}
+
 }
 
 namespace Headless::Api

@@ -71,9 +71,13 @@ public:
     ~Instance();
 
     const int ID;
+    // The id the console presents to the outside: its slot plus the process-wide instance base.
+    // Drives the firmware MAC address, the save-file suffix and emu.getconsoleid().
+    int EffectiveID() const;
     std::unique_ptr<melonDS::NDS> NDS;
     std::unique_ptr<LuaHost> Lua;
 
+    const std::string& GetSavePath() const { return SavePath; }
     bool LoadROM(const std::string& path, const std::string& savePath, std::string& error);
     void Reset();
 
@@ -132,6 +136,13 @@ private:
     void Park(const melonDS::BreakEvent& ev);
     bool AcquireInput(AppliedInput& out);
 };
+
+// Offset added to every console's id for MAC and save numbering. Process-wide; it can only
+// change while no console exists. SetInstanceBase returns false for a negative base.
+int InstanceBase();
+bool SetInstanceBase(int base);
+// "<rom>.sav" for effective id 0, "<rom>.sav.N+1" otherwise.
+std::string DefaultSavePath(const std::string& romPath, int effectiveId);
 
 melonDS::Net& Network();
 const std::string& LocalDirectory();

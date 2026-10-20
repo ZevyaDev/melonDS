@@ -67,7 +67,7 @@ static std::unique_ptr<T> LoadBIOS(const std::string& path, std::string& error)
     return bios;
 }
 
-static void CustomizeFirmware(Firmware& firmware, int id, const std::string& nickname)
+static void CustomizeFirmware(Firmware& firmware, int effectiveId, const std::string& nickname)
 {
     auto& user = firmware.GetEffectiveUserData();
     if (!nickname.empty())
@@ -78,18 +78,46 @@ static void CustomizeFirmware(Firmware& firmware, int id, const std::string& nic
         user.NameLength = len;
     }
 
-    if (id > 0)
+    if (effectiveId > 0)
     {
         auto& header = firmware.GetHeader();
         MacAddress mac = header.MacAddr;
-        mac[3] += id;
-        mac[4] += id * 0x44;
-        mac[5] += id * 0x10;
+        mac[3] += effectiveId;
+        mac[4] += effectiveId * 0x44;
+        mac[5] += effectiveId * 0x10;
         mac[0] &= 0xFC;
         header.MacAddr = mac;
         header.UpdateChecksum();
     }
     firmware.UpdateChecksums();
+}
+
+static std::atomic<int> Base {0};
+
+int InstanceBase()
+{
+    return Base;
+}
+
+bool SetInstanceBase(int base)
+{
+    if (base < 0)
+        return false;
+    Base = base;
+    return true;
+}
+
+std::string DefaultSavePath(const std::string& romPath, int effectiveId)
+{
+    std::string save = fs::u8path(romPath).replace_extension(".sav").u8string();
+    if (effectiveId > 0)
+        save += "." + std::to_string(effectiveId + 1);
+    return save;
+}
+
+int Instance::EffectiveID() const
+{
+    return ID + InstanceBase();
 }
 
 Instance::Instance(int id, const Config& config, std::string& error) : ID(id)
@@ -124,7 +152,7 @@ Instance::Instance(int id, const Config& config, std::string& error) : ID(id)
         }
         args.Firmware = std::move(firmware);
     }
-    CustomizeFirmware(args.Firmware, id, config.Nickname);
+    CustomizeFirmware(args.Firmware, EffectiveID(), config.Nickname);
 
     NDS = std::make_unique<melonDS::NDS>(std::move(args), this);
     NDS->SetRenderer(std::make_unique<SoftRenderer>(*NDS));
@@ -175,9 +203,7 @@ bool Instance::LoadROM(const std::string& path, const std::string& savePath, std
         return false;
     }
 
-    SavePath = savePath.empty() ? (fs::u8path(path).replace_extension(".sav").u8string()) : savePath;
-    if (ID > 0 && savePath.empty())
-        SavePath += "." + std::to_string(ID + 1);
+    SavePath = savePath.empty() ? DefaultSavePath(path, EffectiveID()) : savePath;
 
     std::optional<NDSCart::NDSCartArgs> cartArgs;
     auto save = ReadFile(SavePath);
