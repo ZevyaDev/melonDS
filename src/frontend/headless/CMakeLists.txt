@@ -13,6 +13,8 @@ add_library(melonds_headless SHARED
     Instance.cpp
     LuaHost.cpp
     Platform.cpp
+    Protocol.cpp
+    Socket.cpp
     ../lua_debug/LuaDebug.cpp
 )
 
@@ -37,6 +39,10 @@ endif()
 add_executable(headless_tests
     tests/main.cpp
     tests/CommandQueueTests.cpp
+    tests/ProtocolTests.cpp
+    tests/SocketTests.cpp
+    Protocol.cpp
+    Socket.cpp
     tests/InputQueueTests.cpp
     Commands.cpp
     Input.cpp
@@ -47,6 +53,7 @@ target_include_directories(headless_tests PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/tests")
 target_link_libraries(headless_tests PRIVATE Threads::Threads)
 if (WIN32)
+    target_link_libraries(headless_tests PRIVATE ws2_32)
     target_link_options(headless_tests PRIVATE -static-libgcc -static-libstdc++)
 endif()
 add_test(NAME headless_unit COMMAND headless_tests)

@@ -1,0 +1,146 @@
+/*
+    Copyright 2016-2026 melonDS team
+
+    This file is part of melonDS.
+
+    melonDS is free software: you can redistribute it and/or modify it under
+    the terms of the GNU General Public License as published by the Free
+    Software Foundation, either version 3 of the License, or (at your option)
+    any later version.
+
+    melonDS is distributed in the hope that it will be useful, but WITHOUT ANY
+    WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+    FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License along
+    with melonDS. If not, see http://www.gnu.org/licenses/.
+*/
+
+#include <cstdint>
+#include <cstring>
+#include <thread>
+#include <vector>
+
+#include "TestHarness.h"
+#include "Socket.h"
+
+using namespace Headless::Net;
+
+TEST(socket_port_zero_picks_nonzero_port)
+{
+    uint16_t port = 0;
+    Socket s = BindFirstFree(0, 1, port);
+    CHECK(s != InvalidSocket);
+    CHECK(port != 0);
+    CloseSocket(s);
+}
+
+TEST(socket_next_port_when_taken)
+{
+    uint16_t base = 0;
+    Socket a = BindFirstFree(0, 1, base);
+    CHECK(a != InvalidSocket);
+    if (a == InvalidSocket)
+        return;
+    uint16_t second = 0;
+    Socket b = BindFirstFree(base, 8, second);
+    CHECK(b != InvalidSocket);
+    CHECK_EQ(second, base + 1);
+    CloseSocket(b);
+    CloseSocket(a);
+}
+
+TEST(socket_strict_range_fails_when_taken)
+{
+    uint16_t base = 0;
+    Socket a = BindFirstFree(0, 1, base);
+    CHECK(a != InvalidSocket);
+    if (a == InvalidSocket)
+        return;
+    uint16_t other = 1234;
+    Socket b = BindFirstFree(base, 1, other);
+    CHECK(b == InvalidSocket);
+    CloseSocket(a);
+}
+
+TEST(socket_port_reusable_after_close)
+{
+    uint16_t base = 0;
+    Socket a = BindFirstFree(0, 1, base);
+    CHECK(a != InvalidSocket);
+    CloseSocket(a);
+    uint16_t again = 0;
+    Socket b = BindFirstFree(base, 1, again);
+    CHECK(b != InvalidSocket);
+    CHECK_EQ(again, base);
+    CloseSocket(b);
+}
+
+TEST(socket_listens_on_loopback_only)
+{
+    uint16_t port = 0;
+    Socket s = BindFirstFree(0, 1, port);
+    CHECK(s != InvalidSocket);
+    CHECK(LocalAddress(s) == 0x7F000001u);
+    CloseSocket(s);
+}
+
+TEST(socket_connect_send_recv)
+{
+    uint16_t port = 0;
+    Socket l = BindFirstFree(0, 1, port);
+    CHECK(l != InvalidSocket);
+    Socket c = ConnectLoopback(port);
+    CHECK(c != InvalidSocket);
+    CHECK(WaitReadable(l, 2000));
+    Socket a = Accept(l);
+    CHECK(a != InvalidSocket);
+
+    const uint8_t msg[5] = {1, 2, 3, 4, 5};
+    CHECK(SendAll(c, msg, 5));
+    CHECK(WaitReadable(a, 2000));
+    uint8_t buf[16] = {};
+    int n = Recv(a, buf, sizeof buf);
+    CHECK_EQ(n, 5);
+    CHECK(std::memcmp(buf, msg, 5) == 0);
+
+    // nothing pending: not readable within a short wait
+    CHECK(!WaitReadable(a, 10));
+
+    // peer close -> Recv returns 0
+    CloseSocket(c);
+    CHECK(WaitReadable(a, 2000));
+    CHECK_EQ(Recv(a, buf, sizeof buf), 0);
+    CloseSocket(a);
+    CloseSocket(l);
+}
+
+TEST(socket_send_all_large)
+{
+    uint16_t port = 0;
+    Socket l = BindFirstFree(0, 1, port);
+    Socket c = ConnectLoopback(port);
+    WaitReadable(l, 2000);
+    Socket a = Accept(l);
+    CHECK(a != InvalidSocket);
+    std::vector<uint8_t> big(4 * 1024 * 1024);
+    for (size_t i = 0; i < big.size(); i++)
+        big[i] = uint8_t(i * 7);
+    bool sent = false;
+    std::thread t([&] { sent = SendAll(c, big.data(), big.size()); });
+    std::vector<uint8_t> got;
+    uint8_t buf[65536];
+    while (got.size() < big.size())
+    {
+        int n = Recv(a, buf, sizeof buf);
+        if (n <= 0)
+            break;
+        got.insert(got.end(), buf, buf + n);
+    }
+    t.join();
+    CHECK(sent);
+    CHECK(got == big);
+    CloseSocket(a);
+    CloseSocket(c);
+    CloseSocket(l);
+}
