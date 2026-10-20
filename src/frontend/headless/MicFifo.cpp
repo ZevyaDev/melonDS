@@ -58,6 +58,19 @@ void MicFifo::Clear()
     Samples.clear();
 }
 
+std::vector<int16_t> MicFifo::Snapshot() const
+{
+    std::lock_guard lock(Lock);
+    return std::vector<int16_t>(Samples.begin(), Samples.end());
+}
+
+void MicFifo::Restore(const std::vector<int16_t>& samples)
+{
+    std::lock_guard lock(Lock);
+    size_t skip = samples.size() > Capacity ? samples.size() - Capacity : 0;
+    Samples.assign(samples.begin() + skip, samples.end());
+}
+
 void MicFifo::Start()
 {
     std::lock_guard lock(Lock);

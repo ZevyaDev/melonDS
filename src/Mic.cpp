@@ -69,14 +69,27 @@ void Mic::DoSavestate(melonDS::Savestate *file)
     file->Var8(&StopMask);
     file->VarArray(StopCount, sizeof(StopCount));
 
+    // 14.2: the samples already taken from the platform, so a load does not drop them
+    bool buffered = file->Saving || file->IsAtLeastVersion(14, 2);
+    if (buffered)
+    {
+        file->VarArray(InputBuffer, sizeof(InputBuffer));
+        file->Var32(&InputBufferWritePos);
+        file->Var32(&InputBufferReadPos);
+        file->Var32(&InputBufferLevel);
+    }
+
     if (!file->Saving)
     {
         if (OpenMask)
         {
-            memset(InputBuffer, 0, sizeof(InputBuffer));
-            InputBufferWritePos = 0;
-            InputBufferReadPos = 0;
-            InputBufferLevel = 0;
+            if (!buffered)
+            {
+                memset(InputBuffer, 0, sizeof(InputBuffer));
+                InputBufferWritePos = 0;
+                InputBufferReadPos = 0;
+                InputBufferLevel = 0;
+            }
 
             Platform::Mic_Start(NDS.UserData);
         }

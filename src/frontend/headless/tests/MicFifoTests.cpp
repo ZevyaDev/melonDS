@@ -176,3 +176,29 @@ TEST(MicNoiseFramesTrackTheMicRate)
     }
     CHECK_EQ(total, size_t(1000ull * 560190 / 704));
 }
+
+TEST(MicFifoSnapshotAndRestore)
+{
+    MicFifo f;
+    auto a = Seq(1, 10);
+    f.Push(a.data(), a.size());
+    int16_t out[4];
+    f.Read(out, 4);
+    auto snap = f.Snapshot();
+    CHECK_EQ(snap.size(), size_t(6));
+    CHECK_EQ(int(snap[0]), 5);
+
+    MicFifo g;
+    g.Restore(snap);
+    CHECK_EQ(g.Size(), size_t(6));
+    CHECK_EQ(g.Read(out, 4), size_t(4));
+    CHECK_EQ(int(out[0]), 5);
+    CHECK_EQ(int(out[3]), 8);
+
+    // more than the capacity keeps the newest samples
+    std::vector<int16_t> big = Seq(0, MicFifo::Capacity + 10);
+    g.Restore(big);
+    CHECK_EQ(g.Size(), MicFifo::Capacity);
+    CHECK_EQ(g.Read(out, 1), size_t(1));
+    CHECK_EQ(int(out[0]), 10);
+}

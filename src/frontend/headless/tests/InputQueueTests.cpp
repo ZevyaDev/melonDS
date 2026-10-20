@@ -409,3 +409,31 @@ TEST(InputModifyAmendsNewestSetter)
     CHECK_EQ(a.Lid, (uint8_t)1);
     CHECK_EQ(a.Touch.back().X, (uint16_t)10);
 }
+
+// What a savestate load restores: the empty-queue rule repeats the restored state, and a client's stall
+// countdown continues where it was.
+TEST(InputHeldStateRestoresTheRepeatedInput)
+{
+    InputQueue a;
+    Put(a, Pay(1, 0x5, InputSource::Client));
+    AppliedInput in;
+    CHECK(a.Next(0, in));
+    CHECK(a.Next(1, in));       // one empty frame
+    InputQueue::Held held = a.GetHeld();
+    CHECK_EQ(held.Last.Buttons, (uint16_t)0x5);
+    CHECK_EQ(held.EmptyFrames, 1);
+
+    InputQueue b;
+    Put(b, Pay(2, 0x2, InputSource::Local));
+    CHECK(b.Next(0, in));
+    b.SetHeld(held);
+    b.SetStallTimeout(3);
+    CHECK(b.Next(1, in));       // empty frame 2 of 3: the restored state, still held
+    CHECK(!in.Consumed);
+    CHECK_EQ(in.Buttons, (uint16_t)0x5);
+    CHECK(in.Source == InputSource::Client);
+    CHECK(b.Next(2, in));       // 3 of 3
+    CHECK_EQ(in.Buttons, (uint16_t)0x5);
+    CHECK(b.Next(3, in));       // the fourth releases
+    CHECK_EQ(in.Buttons, (uint16_t)0);
+}

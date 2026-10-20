@@ -121,6 +121,8 @@ public:
     virtual void DoSavestate(Savestate* file) override;
 
     virtual void SetTouchCoords(u16 x, u16 y);
+    // The screen position last set while the pen was down (meaningless while it is up).
+    void GetTouchCoords(u16& x, u16& y) const { x = TouchX >> 4; y = TouchY >> 4; }
 
     virtual void Write(u8 val) override;
 

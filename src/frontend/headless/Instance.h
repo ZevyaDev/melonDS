@@ -107,6 +107,11 @@ public:
     bool WaitingForInput();
 
     melonDS::u64 FramesRun = 0;
+    // Frames since the last reset as the emulated console sees them: savestates carry it (FramesRun stays the
+    // process's count). Seeds the level-mic noise, so a frame gets the same noise with or without a load.
+    melonDS::u64 EmuFrame = 0;
+    // False for a console created with debug = 0: the debugger hooks never run, so the debugger calls fail.
+    bool DebugEnabled() const { return NDS->IsDebugMode(); }
     InputQueue Input;
     Subscriptions Subs;     // frame events for the socket server's subscriptions
     TouchTimeline TouchLine;
@@ -135,6 +140,9 @@ private:
 
     CommandQueue Commands;
 
+    bool LoadedHeadlessSection = false;
+
+    bool DoSavestateExtra(melonDS::Savestate* file);
     void ThreadMain();
     void Park(const melonDS::BreakEvent& ev);
     bool AcquireInput(AppliedInput& out);

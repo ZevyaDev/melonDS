@@ -163,6 +163,17 @@ public:
     bool Next(uint64_t frame, AppliedInput& out);
 
     InputState LastState() const;       // as applied
+
+    // What the empty-queue rule works from: the last applied state, where it came from and how many empty
+    // frames followed it. Savestates carry it (Instance::DoSavestateExtra).
+    struct Held
+    {
+        InputState Last;
+        InputSource LastSource = InputSource::Local;
+        int EmptyFrames = 0;
+    };
+    Held GetHeld() const;
+    void SetHeld(const Held& held);
     InputState NewestState() const;     // as it will be once the queue drains
 
     std::vector<InputLogEntry> ReadLog(uint64_t fromFrame, size_t max) const;
@@ -206,6 +217,11 @@ public:
     void Begin(const std::vector<TouchPoint>& points);  // a frame is about to start
     bool StateAt(uint32_t offset, uint16_t& x, uint16_t& y) const;
     bool TouchAt(melonDS::u64 cyclesSinceFrameStart, melonDS::u16& x, melonDS::u16& y) override;
+
+    // The pen state the last frame ended in (the next frame's state before its first point). Restore drops
+    // the current frame's points; savestates are taken at frame boundaries.
+    void FinalState(bool& down, uint16_t& x, uint16_t& y) const;
+    void Restore(bool down, uint16_t x, uint16_t y);
 
 private:
     struct State

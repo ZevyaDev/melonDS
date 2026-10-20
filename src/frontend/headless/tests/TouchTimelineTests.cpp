@@ -109,3 +109,19 @@ TEST(TouchTimelineReset)
     t.Begin({});
     CHECK_SAMPLE(t, 0, false, -1, -1);
 }
+
+TEST(TouchTimelineRestoreSetsTheNextFramesStartState)
+{
+    TouchTimeline t;
+    t.Begin({{0, 10, 20, 1}, {1000, 0, 0, 0}});      // pressed, then released mid-frame
+    bool down = true;
+    uint16_t x = 0, y = 0;
+    t.FinalState(down, x, y);
+    CHECK_EQ((int)down, 0);
+
+    TouchTimeline u;                                   // a load restores what the state saved
+    u.Restore(true, 30, 40);
+    u.Begin({});
+    CHECK_SAMPLE(u, 0, 1, 30, 40);
+    CHECK_SAMPLE(u, 500000, 1, 30, 40);
+}

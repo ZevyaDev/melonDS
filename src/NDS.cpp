@@ -753,7 +753,9 @@ bool NDS::DoSavestate(Savestate* file)
     file->Var32(&NumLagFrames);
     file->Bool32(&LagFrameFlag);
 
-    // TODO: save KeyInput????
+    // 14.2: KeyInput (buttons, pen-down and lid bits). Older states keep the current value, as before.
+    if (file->Saving || file->IsAtLeastVersion(14, 2))
+        file->Var32(&KeyInput);
     file->VarArray(KeyCnt, 2*sizeof(u16));
     file->Var16(&RCnt);
 
@@ -802,7 +804,14 @@ bool NDS::DoSavestate(Savestate* file)
 #ifdef JIT_ENABLED
         JIT.Reset();
 #endif
+
+        // whatever the debugger knew about the execution before the load no longer applies
+        Debugger.OnStateLoaded();
     }
+
+    // frontend sections (optional; a loader must cope with their absence)
+    if (SavestateExtra && !SavestateExtra(file))
+        return false;
 
     file->Finish();
 

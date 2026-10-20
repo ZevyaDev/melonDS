@@ -381,6 +381,13 @@ void TSC::DoSavestate(Savestate* file)
     file->Var8(&Data);
 
     file->Var16(&ConvResult);
+
+    // 14.2: the pen position the controller converts (the pen-down bit is in KeyInput, saved by NDS)
+    if (file->Saving || file->IsAtLeastVersion(14, 2))
+    {
+        file->Var16(&TouchX);
+        file->Var16(&TouchY);
+    }
 }
 
 void TSC::SetTouchCoords(u16 x, u16 y)

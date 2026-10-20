@@ -24,7 +24,7 @@ using namespace melonDS;
 namespace Headless
 {
 
-// KeyInput is not part of savestates, so keys are applied every frame, not only on change.
+// Keys are applied every frame, not only on change (savestates before 14.2 did not carry KeyInput).
 void ApplyButtons(NDS& nds, const AppliedInput& in)
 {
     nds.SetKeyMask(~in.Buttons & 0xFFF);
@@ -67,7 +67,7 @@ void ApplyMic(Instance& inst, const AppliedInput& in)
     else if (in.MicKind == 2)
     {
         std::vector<int16_t> noise;
-        GenerateMicNoise(inst.FramesRun, in.MicLevel, noise);
+        GenerateMicNoise(inst.EmuFrame, in.MicLevel, noise);
         inst.Mic.Push(noise.data(), noise.size());
     }
 }

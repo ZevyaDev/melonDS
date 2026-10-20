@@ -158,6 +158,7 @@ Instance::Instance(int id, const Config& config, std::string& error) : ID(id)
     NDS->SetRenderer(std::make_unique<SoftRenderer>(*NDS));
     NDS->Reset();
     NDS->SetInputTimeline(&TouchLine);
+    NDS->SetSavestateExtra([this](Savestate* file) { return DoSavestateExtra(file); });
     NDS->Debugger.SetBreakHandler([this](const BreakEvent& ev) { Park(ev); });
     Network().RegisterInstance(ID);
     Lua = std::make_unique<LuaHost>(*this);
@@ -243,6 +244,7 @@ void Instance::Reset()
         NDS->SetupDirectBoot(ROMName);
     NDS->Start();
     FramesRun = 0;
+    EmuFrame = 0;
     Input.Reset();
     TouchLine.Reset();
     Mic.Clear();
@@ -375,6 +377,7 @@ void Instance::ThreadMain()
             ApplyInput(*this, applied);
             NDS->RunFrame();
             FramesRun++;
+            EmuFrame++;
             Lua->OnFrameEnd();
             Subs.Publish(*this, applied);
             {
@@ -573,12 +576,86 @@ bool Instance::LoadState(const std::string& path, std::string& error)
     Savestate backup;
     NDS->DoSavestate(&backup);
     Savestate state(data.data(), data.size(), false);
+    LoadedHeadlessSection = false;
     if (state.Error || !NDS->DoSavestate(&state) || state.Error)
     {
         Savestate restore(backup.Buffer(), backup.Length(), false);
         NDS->DoSavestate(&restore);
         error = "savestate rejected: " + path;
         return false;
+    }
+    if (!LoadedHeadlessSection && state.IsAtLeastVersion(14, 2))
+    {
+        // A 14.2 state from another frontend: the held input is what the console's registers say.
+        u32 keys = NDS->KeyInput;
+        InputQueue::Held held;
+        held.Last.Buttons = (~keys & 0x3FF) | (((~keys >> 16) & 3) << 10);
+        held.Last.Lid = (keys >> 23) & 1;
+        held.Last.TouchDown = !(keys & (1 << 22));
+        if (held.Last.TouchDown)
+            NDS->SPI.GetTSC()->GetTouchCoords(held.Last.TouchX, held.Last.TouchY);
+        Input.SetHeld(held);
+        TouchLine.Restore(held.Last.TouchDown, held.Last.TouchX, held.Last.TouchY);
+    }
+    // Older states carry no input: the held input and EmuFrame stay as they were before the load.
+    return true;
+}
+
+// The headless frontend's own section ("HDLS", after the core's): the input the empty-queue rule holds, the
+// pen state the touch timeline ended the frame in, the emulated frame count and the mic samples queued for
+// the core. Version 1. States without it (older ones, or from another frontend) load without touching these.
+bool Instance::DoSavestateExtra(Savestate* file)
+{
+    constexpr u32 Version = 1;
+    if (!file->Saving && !file->HasSection("HDLS"))
+        return true;
+    file->Section("HDLS");
+    u32 version = Version;
+    file->Var32(&version);
+
+    InputQueue::Held held = Input.GetHeld();
+    bool down = false;
+    u16 x = 0, y = 0;
+    TouchLine.FinalState(down, x, y);
+    u8 source = (u8)held.LastSource;
+    u32 empty = (u32)held.EmptyFrames;
+    u8 penDown = down;
+    std::vector<int16_t> mic = Mic.Snapshot();
+    u32 micCount = mic.size();
+    u64 frame = EmuFrame;
+
+    file->Var16(&held.Last.Buttons);
+    file->Var8(&held.Last.Lid);
+    file->Var8(&held.Last.TouchDown);
+    file->Var16(&held.Last.TouchX);
+    file->Var16(&held.Last.TouchY);
+    file->Var8(&source);
+    file->Var32(&empty);
+    file->Var8(&penDown);
+    file->Var16(&x);
+    file->Var16(&y);
+    file->Var64(&frame);
+    file->Var32(&micCount);
+    if (!file->Saving)
+    {
+        if (micCount > MicFifo::Capacity)
+            return false;
+        mic.resize(micCount);
+    }
+    if (micCount)
+        file->VarArray(mic.data(), micCount * sizeof(int16_t));
+    if (file->Error)
+        return false;
+
+    if (!file->Saving)
+    {
+        held.LastSource = source == (u8)InputSource::Client ? InputSource::Client : InputSource::Local;
+        held.EmptyFrames = (int)empty;
+        Input.SetHeld(held);
+        TouchLine.Restore(penDown != 0, x, y);
+        EmuFrame = frame;
+        Mic.Restore(mic);
+        LoadedHeadlessSection = true;
     }
     return true;
 }

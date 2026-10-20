@@ -25,7 +25,7 @@
 #include "types.h"
 
 #define SAVESTATE_MAJOR 14
-#define SAVESTATE_MINOR 1
+#define SAVESTATE_MINOR 2
 
 // bitmask for the savestate config word
 enum
@@ -52,6 +52,8 @@ public:
     u32 CurSection;
 
     void Section(const char* magic);
+    // Loading: whether the state has this section (frontends add optional sections of their own).
+    [[nodiscard]] bool HasSection(const char* magic) const { return !Saving && FindSection(magic) != NO_SECTION; }
 
     void Var8(u8* var)
     {

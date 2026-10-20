@@ -41,6 +41,9 @@ public:
     size_t Read(int16_t* dst, size_t max);      // returns how many were copied, 0 when empty
     size_t Size() const;
     void Clear();
+    // The queued samples, oldest first, and putting them back (savestates; Instance::DoSavestateExtra).
+    std::vector<int16_t> Snapshot() const;
+    void Restore(const std::vector<int16_t>& samples);
 
     // The core's view of the microphone. Stop also empties the FIFO.
     void Start();
@@ -58,7 +61,8 @@ private:
 size_t MicNoiseSamplesForFrame(uint64_t frame);
 
 // One frame of noise for a level payload: xorshift32 seeded from the frame number alone, so the
-// same frame gives the same samples on every console and every replay. Samples are uniform in
+// same frame gives the same samples on every console and every replay. The caller passes the console's
+// emulated frame (Instance::EmuFrame, which savestates carry), not the process's frame count. Samples are uniform in
 // [-level/2, level/2], so level 65535 is full scale and level 0 is silence.
 void GenerateMicNoise(uint64_t frame, uint16_t level, std::vector<int16_t>& out);
 

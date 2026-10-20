@@ -392,8 +392,8 @@ u32 Savestate::FindSection(const char* magic) const
         offset += section_length;
     }
 
-    // We've reached the end of the file without finding the requested section...
-    Log(LogLevel::Error, "savestate: section %s not found. blarg\n", magic);
+    // We've reached the end of the file without finding the requested section (Section() logs it;
+    // HasSection asks about optional sections, which may be absent)
     return NO_SECTION;
 }
 

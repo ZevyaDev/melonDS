@@ -360,6 +360,20 @@ InputState InputQueue::LastState() const
     return Last;
 }
 
+InputQueue::Held InputQueue::GetHeld() const
+{
+    std::lock_guard lock(Lock);
+    return {Last, LastSource, EmptyFrames};
+}
+
+void InputQueue::SetHeld(const Held& held)
+{
+    std::lock_guard lock(Lock);
+    Last = held.Last;
+    LastSource = held.LastSource;
+    EmptyFrames = held.EmptyFrames;
+}
+
 InputState InputQueue::NewestState() const
 {
     std::lock_guard lock(Lock);
@@ -385,6 +399,20 @@ void TouchTimeline::Begin(const std::vector<TouchPoint>& points)
         const TouchPoint& t = Points.back();
         Final = {t.Down != 0, t.X, t.Y};
     }
+}
+
+void TouchTimeline::FinalState(bool& down, uint16_t& x, uint16_t& y) const
+{
+    down = Final.Down;
+    x = Final.X;
+    y = Final.Y;
+}
+
+void TouchTimeline::Restore(bool down, uint16_t x, uint16_t y)
+{
+    Points.clear();
+    Final = {down, x, y};
+    Initial = Final;
 }
 
 bool TouchTimeline::StateAt(uint32_t offset, uint16_t& x, uint16_t& y) const
