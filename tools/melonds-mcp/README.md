@@ -85,3 +85,36 @@ BizHawk-style API, the same names as the Qt Lua console where they overlap.
 Hook callbacks receive `(addr, value, pc)`. Returning `true` stops the console, which makes any
 hook a conditional breakpoint. The script body runs as a coroutine; `emu.frameadvance()` yields
 one frame.
+
+## Command line (`melonds`)
+
+Agents drive a running `melonds_server` with one command per job. Each command connects, acts, prints
+JSON on stdout and disconnects; failures print `{"error": code, "message": text}` and exit with 1.
+Run it as `python -m melonds_mcp.cli <command>` (or `melonds <command>` after `pip install -e`). The CLI
+needs only the standard library.
+
+    python -m melonds_mcp.cli launch --port 0 --name p1 --rom game.nds --port-file p1.port
+    MELONDS_PORT=<port>      # or pass --port N / --port-file FILE to every command
+    python -m melonds_mcp.cli input "A*4 w20 Down*30"
+    python -m melonds_mcp.cli read PlayerHp 4 --as u32 --symbols config/arm9.txt
+    python -m melonds_mcp.cli screenshot shot.png
+    python -m melonds_mcp.cli shutdown
+
+What a disconnect keeps and drops: console state, breakpoints, trace/coverage buffers, Lua scripts and
+server-side symbols stay; subscriptions, live mode and queued input do not. So `input` queues and runs
+in one command, and `live start` takes `--frames` or `--seconds`.
+
+State files live in `$MELONDS_CLI_HOME` (default `~/.melonds-cli`): `state.json` remembers the symbol file
+per `<server name>/<console id>` (set by `symbols load` or `--symbols`), `watches/<GAME>.json` holds the
+watch list per game (game code from the cart header at 0x027FFE0C, `nocart` without one; `--game` overrides),
+`logs/` has the output of launched servers. Address arguments accept `0x..`, decimal or `Symbol[+off]`.
+
+Sequence syntax for `input`: `A*4 w20 Down*30` (key names case-insensitive, `A+B` together, `*N` frames,
+default 4, `wN` waits). Touch: `touch:X,Y*N`, alone or with keys (`A+touch:10,20*5`). A touch is
+released by the next token without one; a sequence that ends touching gets one trailing release frame.
+
+Commands: `launch attach shutdown consoles(list|create|destroy) reset rom-load run live(start|stop) pause step
+input input-log state(save|load) subscribe screenshot read write search find-text regs set-reg
+symbols(load|clear|lookup) watch(add|remove|list|read) points(list|bp|wp|remove|enable|disable)
+trace(config|read) calls(track|stack|counts) coverage(track|read) last-writer(track|get) packets(track|read)
+lua(exec|run|stop)`. `--help` on any of them lists its options. Skills for agents are in `skills/`.

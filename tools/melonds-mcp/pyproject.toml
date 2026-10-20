@@ -6,7 +6,11 @@ dependencies = ["mcp", "capstone", "pillow", "pyyaml", "numpy"]
 
 [project.scripts]
 melonds-mcp = "melonds_mcp.server:main"
+melonds = "melonds_mcp.cli.main:main"
 
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["melonds_mcp*"]
