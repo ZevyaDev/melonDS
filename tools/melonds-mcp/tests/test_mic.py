@@ -192,3 +192,45 @@ class MicLifecycle(MicTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MicAcrossLoad(MicTest):
+    """The same state and inputs give the same mic samples whether or not a state load happened: the noise is
+    seeded from the emulated frame (which states carry), and the samples queued in the FIFO and in the core's
+    buffer are saved with the state."""
+
+    def scenario_with_load(self, first, detour, rest):
+        import os
+        import tempfile
+        c = native.Console()
+        c.reset()
+        self.addCleanup(c.close)
+        self.start_sampler(c, LINES * 12)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "mic.mln")
+            for p in first:
+                c.submit_input(**p)
+            c.run(len(first))
+            c.save_state(path)
+            for p in detour:
+                c.submit_input(**p)
+            c.run(len(detour))
+            c.load_state(path)
+            for p in rest:
+                c.submit_input(**p)
+            c.run(len(rest))
+        return self.log(c)
+
+    def test_level_noise_is_the_same_after_a_load(self):
+        pay = [{"mic_level": 40000}] * 10
+        straight = self.run_scenario(pay, 10)
+        loaded = self.scenario_with_load(pay[:5], [{"mic_level": 1000}] * 3, pay[5:])
+        self.assertGreater(len({v for _, v in straight}), 20)
+        self.assertEqual(loaded, straight)
+
+    def test_samples_queued_at_the_save_survive_the_load(self):
+        ramp = [(i * 80) - 32000 for i in range(796)]
+        pay = [{"mic": ramp}] * 10
+        straight = self.run_scenario(pay, 10)
+        loaded = self.scenario_with_load(pay[:5], [{"mic": [0x7000] * 796}] * 2, pay[5:])
+        self.assertEqual(loaded, straight)

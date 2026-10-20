@@ -13,6 +13,8 @@ IDLE, RUNNING, PARKED = 0, 1, 2
 BREAK_KINDS = ["exec", "read", "write", "step", "request", "fault"]
 KEYS = ["A", "B", "Select", "Start", "Right", "Left", "Up", "Down", "R", "L", "X", "Y"]
 WATCH_READ, WATCH_WRITE = 1, 2
+# pc of a DMA watchpoint break and tag of a DMA last-writer record: DMA_TAG | channel << 1 | (1 for ARM7)
+DMA_TAG = 0xFFFFFFF0
 
 
 class MdsBreak(Structure):
@@ -85,6 +87,115 @@ def _find_library():
     raise MelonError("melonds_headless library not found; set MELONDS_HEADLESS_LIB")
 
 
+# Every function's ctypes signature. Functions are bound on first use (_Lib), so the wrapper loads a library
+# that lacks some of them (an older build) and only a call to a missing one fails.
+_SIGNATURES = {
+    "mds_version": (c_int, []),
+    "mds_error": (c_char_p, []),
+    "mds_set_local_dir": (None, [c_char_p]),
+    "mds_set_log_level": (None, [c_int]),
+    "mds_mp_timeout": (c_int, [c_int]),
+    "mds_set_pacing": (None, [c_int]),
+    "mds_create": (c_int, [c_char_p, c_char_p, c_char_p, c_char_p, c_int]),
+    "mds_destroy": (None, [c_int]),
+    "mds_load_rom": (c_int, [c_int, c_char_p, c_char_p]),
+    "mds_reset": (c_int, [c_int]),
+    "mds_set_rtc": (c_int, [c_int, c_int, c_int, c_int, c_int, c_int, c_int]),
+    "mds_get_rtc": (c_int, [c_int, POINTER(c_int)]),
+    "mds_run": (c_int, [POINTER(c_int), c_int, c_uint32, c_int, POINTER(c_int)]),
+    "mds_wait": (c_int, [POINTER(c_int), c_int, c_int, POINTER(c_int)]),
+    "mds_gdb": (c_int, [c_int, c_int, c_int, c_int]),
+    "mds_start": (c_int, [c_int, c_uint32]),
+    "mds_stop_after": (c_int, [c_int, c_uint32]),
+    "mds_interrupt": (c_int, [c_int]),
+    "mds_state": (c_int, [c_int]),
+    "mds_take_break": (c_int, [c_int, POINTER(MdsBreak)]),
+    "mds_frames": (c_uint64, [c_int]),
+    "mds_screen": (c_int, [c_int, POINTER(c_uint32)]),
+    "mds_set_keys": (c_int, [c_int, c_uint32]),
+    "mds_touch": (c_int, [c_int, c_int, c_int]),
+    "mds_set_lid": (c_int, [c_int, c_int]),
+    "mds_input_submit": (c_int, [c_int, POINTER(MdsInput), POINTER(MdsTouchPoint), POINTER(c_int16)]),
+    "mds_input_submit_multi": (c_int, [POINTER(c_int), c_int, POINTER(MdsInput), POINTER(POINTER(MdsTouchPoint)),
+                                       POINTER(POINTER(c_int16)), POINTER(c_int)]),
+    "mds_debug_recv_pending": (c_int, [c_int, c_int]),
+    "mds_input_mode": (c_int, [c_int, c_int, c_int]),
+    "mds_input_depth": (c_int, [c_int]),
+    "mds_input_waiting": (c_int, [c_int]),
+    "mds_input_clear": (c_int, [c_int]),
+    "mds_input_log": (c_int, [c_int, c_uint64, POINTER(MdsInputLogEntry), c_int]),
+    "mds_read": (c_int, [c_int, c_int, c_uint32, c_uint32, POINTER(c_uint8)]),
+    "mds_write": (c_int, [c_int, c_int, c_uint32, c_uint32, POINTER(c_uint8)]),
+    "mds_get_regs": (c_int, [c_int, c_int, POINTER(c_uint32)]),
+    "mds_set_reg": (c_int, [c_int, c_int, c_int, c_uint32]),
+    "mds_bp_add": (c_int, [c_int, c_uint32, c_uint32]),
+    "mds_wp_add": (c_int, [c_int, c_uint32, c_uint32, c_uint32, c_uint32]),
+    "mds_point_remove": (c_int, [c_int, c_int]),
+    "mds_point_enable": (c_int, [c_int, c_int, c_int]),
+    "mds_point_list": (c_int, [c_int, POINTER(MdsPoint), c_int]),
+    "mds_step": (c_int, [c_int, c_int, c_uint32]),
+    "mds_trace": (c_int, [c_int, c_uint32, c_uint32, c_uint32, c_uint32]),
+    "mds_trace_take": (c_int, [c_int, POINTER(MdsTrace), c_int]),
+    "mds_calls": (c_int, [c_int, c_int]),
+    "mds_callstack": (c_int, [c_int, c_int, POINTER(MdsFrame), c_int]),
+    "mds_callcounts_take": (c_int, [c_int, c_int, POINTER(c_uint32), POINTER(c_uint64), c_int]),
+    "mds_coverage": (c_int, [c_int, c_int]),
+    "mds_coverage_take": (c_int, [c_int, c_int, POINTER(c_uint32), c_int]),
+    "mds_lastwriter": (c_int, [c_int, c_int]),
+    "mds_lastwriter_get": (c_uint32, [c_int, c_uint32]),
+    "mds_savestate": (c_int, [c_int, c_char_p]),
+    "mds_loadstate": (c_int, [c_int, c_char_p]),
+    "mds_lua_run": (c_int, [c_int, c_char_p, c_int]),
+    "mds_lua_exec": (c_int, [c_int, c_char_p]),
+    "mds_lua_stop": (c_int, [c_int]),
+    "mds_lua_output": (c_int, [c_int, POINTER(c_char), c_int]),
+    "mds_packets": (c_int, [c_int, c_int, c_int]),
+    "mds_packets_take": (c_int, [c_int, POINTER(MdsPacket), POINTER(c_uint8), c_int, c_int]),
+}
+_SIGNATURES |= {
+    "mds_serve": (c_int, [c_int, c_int, POINTER(c_int)]),
+    "mds_serve_stop": (None, []),
+    "mds_serve_wait": (c_int, [c_int]),
+    "mds_serve_name": (None, [c_char_p]),
+    "mds_set_instance_base": (c_int, [c_int]),
+    "mds_instance_base": (c_int, []),
+    "mds_mac": (c_int, [c_int, POINTER(c_uint8)]),
+    "mds_save_path": (c_int, [c_int, POINTER(c_char), c_int]),
+}
+# API level 2 (fix/api-quirks)
+_SIGNATURES |= {
+    "mds_has": (c_int, [c_char_p]),
+    "mds_serve_host": (c_int, [c_char_p, c_int, c_int, POINTER(c_int)]),
+    "mds_gdb_host": (c_int, [c_int, c_char_p, c_int, c_int, c_int]),
+    "mds_lastwriter_query": (c_int, [c_int, c_uint32, POINTER(c_uint32), POINTER(c_int)]),
+}
+
+
+class _Lib:
+    """The loaded library. Attribute access binds the function with its signature the first time; a function
+    the library does not export raises MelonError then, not when the library is loaded."""
+
+    def __init__(self, cdll):
+        self._cdll = cdll
+
+    def has_symbol(self, name):
+        try:
+            getattr(self._cdll, name)
+            return True
+        except AttributeError:
+            return False
+
+    def __getattr__(self, name):
+        try:
+            fn = getattr(self._cdll, name)
+        except AttributeError:
+            raise MelonError(f"{name} is not exported by this melonds_headless library (an older build?)") from None
+        if name in _SIGNATURES:
+            fn.restype, fn.argtypes = _SIGNATURES[name]
+        setattr(self, name, fn)
+        return fn
+
+
 def _load():
     path = _find_library()
     if sys.platform == "win32":
@@ -92,85 +203,7 @@ def _load():
             if extra and os.path.isdir(extra):
                 os.add_dll_directory(extra)
         os.add_dll_directory(str(path.parent))
-    lib = ctypes.CDLL(str(path))
-    sig = {
-        "mds_version": (c_int, []),
-        "mds_error": (c_char_p, []),
-        "mds_set_local_dir": (None, [c_char_p]),
-        "mds_set_log_level": (None, [c_int]),
-        "mds_mp_timeout": (c_int, [c_int]),
-        "mds_set_pacing": (None, [c_int]),
-        "mds_create": (c_int, [c_char_p, c_char_p, c_char_p, c_char_p, c_int]),
-        "mds_destroy": (None, [c_int]),
-        "mds_load_rom": (c_int, [c_int, c_char_p, c_char_p]),
-        "mds_reset": (c_int, [c_int]),
-        "mds_set_rtc": (c_int, [c_int, c_int, c_int, c_int, c_int, c_int, c_int]),
-        "mds_get_rtc": (c_int, [c_int, POINTER(c_int)]),
-        "mds_run": (c_int, [POINTER(c_int), c_int, c_uint32, c_int, POINTER(c_int)]),
-        "mds_wait": (c_int, [POINTER(c_int), c_int, c_int, POINTER(c_int)]),
-        "mds_gdb": (c_int, [c_int, c_int, c_int, c_int]),
-        "mds_start": (c_int, [c_int, c_uint32]),
-        "mds_stop_after": (c_int, [c_int, c_uint32]),
-        "mds_interrupt": (c_int, [c_int]),
-        "mds_state": (c_int, [c_int]),
-        "mds_take_break": (c_int, [c_int, POINTER(MdsBreak)]),
-        "mds_frames": (c_uint64, [c_int]),
-        "mds_screen": (c_int, [c_int, POINTER(c_uint32)]),
-        "mds_set_keys": (c_int, [c_int, c_uint32]),
-        "mds_touch": (c_int, [c_int, c_int, c_int]),
-        "mds_set_lid": (c_int, [c_int, c_int]),
-        "mds_input_submit": (c_int, [c_int, POINTER(MdsInput), POINTER(MdsTouchPoint), POINTER(c_int16)]),
-        "mds_input_submit_multi": (c_int, [POINTER(c_int), c_int, POINTER(MdsInput), POINTER(POINTER(MdsTouchPoint)),
-                                           POINTER(POINTER(c_int16)), POINTER(c_int)]),
-        "mds_debug_recv_pending": (c_int, [c_int, c_int]),
-        "mds_input_mode": (c_int, [c_int, c_int, c_int]),
-        "mds_input_depth": (c_int, [c_int]),
-        "mds_input_waiting": (c_int, [c_int]),
-        "mds_input_clear": (c_int, [c_int]),
-        "mds_input_log": (c_int, [c_int, c_uint64, POINTER(MdsInputLogEntry), c_int]),
-        "mds_read": (c_int, [c_int, c_int, c_uint32, c_uint32, POINTER(c_uint8)]),
-        "mds_write": (c_int, [c_int, c_int, c_uint32, c_uint32, POINTER(c_uint8)]),
-        "mds_get_regs": (c_int, [c_int, c_int, POINTER(c_uint32)]),
-        "mds_set_reg": (c_int, [c_int, c_int, c_int, c_uint32]),
-        "mds_bp_add": (c_int, [c_int, c_uint32, c_uint32]),
-        "mds_wp_add": (c_int, [c_int, c_uint32, c_uint32, c_uint32, c_uint32]),
-        "mds_point_remove": (c_int, [c_int, c_int]),
-        "mds_point_enable": (c_int, [c_int, c_int, c_int]),
-        "mds_point_list": (c_int, [c_int, POINTER(MdsPoint), c_int]),
-        "mds_step": (c_int, [c_int, c_int, c_uint32]),
-        "mds_trace": (c_int, [c_int, c_uint32, c_uint32, c_uint32, c_uint32]),
-        "mds_trace_take": (c_int, [c_int, POINTER(MdsTrace), c_int]),
-        "mds_calls": (c_int, [c_int, c_int]),
-        "mds_callstack": (c_int, [c_int, c_int, POINTER(MdsFrame), c_int]),
-        "mds_callcounts_take": (c_int, [c_int, c_int, POINTER(c_uint32), POINTER(c_uint64), c_int]),
-        "mds_coverage": (c_int, [c_int, c_int]),
-        "mds_coverage_take": (c_int, [c_int, c_int, POINTER(c_uint32), c_int]),
-        "mds_lastwriter": (c_int, [c_int, c_int]),
-        "mds_lastwriter_get": (c_uint32, [c_int, c_uint32]),
-        "mds_savestate": (c_int, [c_int, c_char_p]),
-        "mds_loadstate": (c_int, [c_int, c_char_p]),
-        "mds_lua_run": (c_int, [c_int, c_char_p, c_int]),
-        "mds_lua_exec": (c_int, [c_int, c_char_p]),
-        "mds_lua_stop": (c_int, [c_int]),
-        "mds_lua_output": (c_int, [c_int, POINTER(c_char), c_int]),
-        "mds_packets": (c_int, [c_int, c_int, c_int]),
-        "mds_packets_take": (c_int, [c_int, POINTER(MdsPacket), POINTER(c_uint8), c_int, c_int]),
-    }
-    sig |= {
-        "mds_serve": (c_int, [c_int, c_int, POINTER(c_int)]),
-        "mds_serve_stop": (None, []),
-        "mds_serve_wait": (c_int, [c_int]),
-        "mds_serve_name": (None, [c_char_p]),
-        "mds_set_instance_base": (c_int, [c_int]),
-        "mds_instance_base": (c_int, []),
-        "mds_mac": (c_int, [c_int, POINTER(c_uint8)]),
-        "mds_save_path": (c_int, [c_int, POINTER(c_char), c_int]),
-    }
-    for name, (res, args) in sig.items():
-        fn = getattr(lib, name)
-        fn.restype = res
-        fn.argtypes = args
-    return lib
+    return _Lib(ctypes.CDLL(str(path)))
 
 
 _lib = None
@@ -216,6 +249,20 @@ def _mask(cpu):
     return 2 if _cpu(cpu) == 7 else 1
 
 
+def api_version():
+    """The library's API level (mds_version): 1 up to the IPC merge, 2 from fix/api-quirks."""
+    return lib().mds_version()
+
+
+def has(name):
+    """Whether the library has a feature (e.g. "serve_host", "dma_break"; docs/headless-api.md, section 1) or
+    exports a function ("mds_serve_host"). Libraries older than API level 2 have no feature list: there only
+    function names can be answered."""
+    if lib().has_symbol("mds_has"):
+        return bool(lib().mds_has(name.encode()))
+    return name.startswith("mds_") and lib().has_symbol(name)
+
+
 def mp_timeout(ms=-1):
     return _check(lib().mds_mp_timeout(ms))
 
@@ -224,13 +271,17 @@ def set_pacing(fps):
     lib().mds_set_pacing(fps)
 
 
-def serve(port=0, port_range=0, name=None):
+def serve(port=0, port_range=0, name=None, host=None):
     """Start the socket server thread (flags low 16 bits = port range, 0 = default 32).
-    port 0 lets the OS pick. Returns the bound port."""
+    port 0 lets the OS pick. host: the IPv4 address to listen on (None = 127.0.0.1; "0.0.0.0" = every
+    interface, so anyone who can reach the port controls the emulator). Returns the bound port."""
     if name:
         lib().mds_serve_name(name.encode())
     bound = c_int(0)
-    _check(lib().mds_serve(port, port_range, ctypes.byref(bound)))
+    if host is None:
+        _check(lib().mds_serve(port, port_range, ctypes.byref(bound)))
+    else:
+        _check(lib().mds_serve_host(host.encode(), port, port_range, ctypes.byref(bound)))
     return bound.value
 
 
@@ -364,8 +415,13 @@ class Console:
     def interrupt(self):
         _check(lib().mds_interrupt(self.id))
 
-    def gdb(self, port9=3333, port7=3334, break_on_start=False):
-        _check(lib().mds_gdb(self.id, port9, port7, int(break_on_start)))
+    def gdb(self, port9=3333, port7=3334, break_on_start=False, host=None):
+        """Start the GDB stubs (both ports <= 0 stops them). host: the IPv4 address they listen on (None =
+        127.0.0.1)."""
+        if host is None:
+            _check(lib().mds_gdb(self.id, port9, port7, int(break_on_start)))
+        else:
+            _check(lib().mds_gdb_host(self.id, host.encode(), port9, port7, int(break_on_start)))
 
     def start(self, frames=0xFFFFFFFF):
         _check(lib().mds_start(self.id, frames))
@@ -511,10 +567,19 @@ class Console:
         _check(lib().mds_lastwriter(self.id, int(enabled)))
 
     def last_writer(self, addr):
-        w = lib().mds_lastwriter_get(self.id, addr)
+        """None if nothing wrote the word since tracking started; (pc, cpu) for an instruction; ("dma", channel,
+        cpu) for a DMA write. Raises MelonError for errors (tracking off, running, no debugger). With a library
+        older than API level 2 errors cannot be told apart and also give None."""
+        if not lib().has_symbol("mds_lastwriter_query"):
+            w = lib().mds_lastwriter_get(self.id, addr)
+        else:
+            raw, dma = c_uint32(0), c_int(-1)
+            if _check(lib().mds_lastwriter_query(self.id, addr, ctypes.byref(raw), ctypes.byref(dma))) == 0:
+                return None
+            w = raw.value
         if w == 0:
             return None
-        if w >= 0xFFFFFFF0:
+        if w >= DMA_TAG:
             return ("dma", (w >> 1) & 3, 7 if w & 1 else 9)
         return (w & ~1, 7 if w & 1 else 9)
 

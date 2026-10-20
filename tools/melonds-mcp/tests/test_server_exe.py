@@ -236,6 +236,26 @@ class ServerExeTest(unittest.TestCase):
             self.assertTrue(line.startswith("MELONDS_ERROR "), (args, line))
             self.assertEqual(s.wait(), 1, args)
 
+    def test_host_option_listens_elsewhere_and_warns(self):
+        s = self.start("--port", 0, "--host", "0.0.0.0")
+        self.assertEqual(self.connect(s).hello().port, s.port)      # loopback is one of every interface
+        deadline = time.time() + 5
+        while "not loopback" not in "".join(s.err) and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertIn("not loopback", "".join(s.err))
+
+    def test_default_host_does_not_warn(self):
+        s = self.start("--port", 0)
+        self.connect(s).hello()
+        time.sleep(0.2)
+        self.assertNotIn("not loopback", "".join(s.err))
+
+    def test_bad_host(self):
+        s = self.start("--port", 0, "--host", "nowhere", ready=False)
+        line = s.line()
+        self.assertTrue(line.startswith("MELONDS_ERROR bad host"), line)
+        self.assertEqual(s.wait(), 1)
+
     def test_bad_bios(self):
         bad = Path(self.tmp.name) / "bios.bin"
         bad.write_bytes(b"nope")
