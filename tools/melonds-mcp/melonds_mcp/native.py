@@ -3,6 +3,7 @@ import os
 import sys
 from ctypes import POINTER, Structure, c_char, c_char_p, c_int, c_int32, c_uint8, c_uint32, c_uint64
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 IDLE, RUNNING, PARKED = 0, 1, 2
@@ -80,6 +81,8 @@ def _load():
         "mds_destroy": (None, [c_int]),
         "mds_load_rom": (c_int, [c_int, c_char_p, c_char_p]),
         "mds_reset": (c_int, [c_int]),
+        "mds_set_rtc": (c_int, [c_int, c_int, c_int, c_int, c_int, c_int, c_int]),
+        "mds_get_rtc": (c_int, [c_int, POINTER(c_int)]),
         "mds_run": (c_int, [POINTER(c_int), c_int, c_uint32, c_int, POINTER(c_int)]),
         "mds_wait": (c_int, [POINTER(c_int), c_int, c_int, POINTER(c_int)]),
         "mds_gdb": (c_int, [c_int, c_int, c_int, c_int]),
@@ -200,6 +203,15 @@ class Console:
 
     def reset(self):
         _check(lib().mds_reset(self.id))
+
+    def set_rtc(self, when):
+        """Set the clock from a datetime (year 2000-2099). The console must be stopped."""
+        _check(lib().mds_set_rtc(self.id, when.year, when.month, when.day, when.hour, when.minute, when.second))
+
+    def rtc(self):
+        out = (c_int * 6)()
+        _check(lib().mds_get_rtc(self.id, out))
+        return datetime(*out)
 
     def run(self, frames, timeout_ms=60000):
         return run_group([self], frames, timeout_ms)
