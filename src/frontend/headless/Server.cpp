@@ -1567,9 +1567,15 @@ void Server::DoLastWriter(const P::Message& m)
     Instance* inst;
     if (!Parse(m, l) || !Resolve(m, id, inst) || !RequireStopped(*inst, id, l.Seq))
         return;
-    // Debugger::GetLastWriter packs a CPU writer as pc | (arm7 ? 1 : 0), a DMA writer as
-    // 0xFFFFFFF0 | channel << 1 | (arm7 ? 1 : 0), and no writer as 0.
-    uint32_t raw = mds_lastwriter_get(id, l.Value);
+    // The record packs a CPU writer as pc | (arm7 ? 1 : 0), a DMA writer as 0xFFFFFFF0 | channel << 1 |
+    // (arm7 ? 1 : 0), and no writer as 0. Tracking off answers "none", as before; other errors are errors.
+    uint32_t raw = 0;
+    if (mds_lastwriter_query(id, l.Value, &raw, nullptr) < 0)
+    {
+        if (!Contains(mds_error(), "tracking is off"))
+            return FailFromApi(uint16_t(id), l.Seq);
+        raw = 0;
+    }
     P::LastWriterReply r;
     r.Seq = l.Seq;
     r.Raw = raw;

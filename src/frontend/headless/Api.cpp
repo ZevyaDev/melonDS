@@ -55,6 +55,28 @@ std::mutex SlotsLock;
 // running ~Instance (which joins its thread) from a static destructor would hang the exit.
 std::map<int, Slot>& Slots = *new std::map<int, Slot>();
 thread_local std::string LastError;
+
+bool Level1Function(const std::string& name)
+{
+    static const char* const Names[] = {
+        "mds_version", "mds_error", "mds_set_local_dir", "mds_set_log_level", "mds_mp_timeout", "mds_set_pacing",
+        "mds_create", "mds_destroy", "mds_load_rom", "mds_reset", "mds_set_rtc", "mds_get_rtc", "mds_run",
+        "mds_wait", "mds_gdb", "mds_start", "mds_stop_after", "mds_interrupt", "mds_state", "mds_take_break",
+        "mds_frames", "mds_screen", "mds_set_keys", "mds_touch", "mds_set_lid", "mds_input_submit",
+        "mds_input_submit_multi", "mds_debug_recv_pending", "mds_input_mode", "mds_input_depth",
+        "mds_input_waiting", "mds_input_clear", "mds_input_log", "mds_read", "mds_write", "mds_get_regs",
+        "mds_set_reg", "mds_bp_add", "mds_wp_add", "mds_point_remove", "mds_point_enable", "mds_point_list",
+        "mds_step", "mds_trace", "mds_trace_take", "mds_calls", "mds_callstack", "mds_callcounts_take",
+        "mds_coverage", "mds_coverage_take", "mds_lastwriter", "mds_lastwriter_get", "mds_savestate",
+        "mds_loadstate", "mds_lua_run", "mds_lua_exec", "mds_lua_stop", "mds_lua_output", "mds_packets",
+        "mds_packets_take", "mds_serve", "mds_serve_stop", "mds_serve_wait", "mds_serve_name",
+        "mds_set_instance_base", "mds_instance_base", "mds_mac", "mds_save_path",
+    };
+    for (const char* n : Names)
+        if (name == n)
+            return true;
+    return false;
+}
 bool MPReady = false;
 
 std::mutex HookLock;
@@ -187,7 +209,41 @@ extern "C" {
 
 int mds_version(void)
 {
-    return 1;
+    return MDS_API_VERSION;
+}
+
+int mds_has(const char* name)
+{
+    // Features of API level 2 (fix/api-quirks); see docs/headless-api.md, section 1.
+    static const char* const Features[] = {
+        "api_version",          // mds_version reports the API level; this function
+        "debug_off_errors",     // debugger calls fail on a console created with debug = 0
+        "savestate_input",      // savestates 14.2 carry KeyInput, the held input and the pen (load restores them)
+        "savestate_debug_reset",// a state load clears call stacks, a pending watch hit and last-writer records
+        "mic_noise_emulated",   // level-mic noise is seeded from the emulated frame, which states carry
+        "serve_host",           // mds_serve_host, melonds_server --host
+        "gdb_host",             // mds_gdb_host; the GDB stub listens on 127.0.0.1 by default
+        "count_checks",         // negative max/count arguments fail
+        "dma_break",            // DMA watchpoint breaks park at once, pc = the DMA tag
+        "load_rom_idle",        // mds_load_rom refuses a parked console
+        "lua_queue",            // Lua run/exec/stop go through the command queue; a first-step error fails the call
+        "step_exact",           // mds_step(n) executes n instructions from idle and from parked
+        "lastwriter_query",     // mds_lastwriter_query
+    };
+    static const char* const Functions[] = {
+        "mds_has", "mds_serve_host", "mds_gdb_host", "mds_lastwriter_query",
+    };
+    if (!name)
+        return 0;
+    std::string n = name;
+    for (const char* f : Features)
+        if (n == f)
+            return 1;
+    for (const char* f : Functions)
+        if (n == f)
+            return 1;
+    // every function of API level 1 is still exported
+    return n.rfind("mds_", 0) == 0 && Level1Function(n) ? 1 : 0;
 }
 
 const char* mds_error(void)
@@ -929,12 +985,29 @@ int mds_lastwriter(int id, int enabled)
 
 uint32_t mds_lastwriter_get(int id, uint32_t addr)
 {
-    Slot* s = Stopped(id);
+    uint32_t raw = 0;
+    return mds_lastwriter_query(id, addr, &raw, nullptr) < 0 ? 0 : raw;
+}
+
+int mds_lastwriter_query(int id, uint32_t addr, uint32_t* raw, int* dma)
+{
+    Slot* s = StoppedDebug(id);
     if (!s)
-        return 0;
+        return -1;
     uint32_t writer = 0;
-    s->Inst->Call([&](Instance& inst) { writer = inst.NDS->Debugger.GetLastWriter(addr); });
-    return writer;
+    bool tracking = false;
+    if (!s->Inst->Call([&](Instance& inst) {
+            tracking = inst.NDS->Debugger.IsTrackingWriters();
+            writer = inst.NDS->Debugger.GetLastWriter(addr);
+        }))
+        return Fail("console is shutting down");
+    if (!tracking)
+        return Fail("last-writer tracking is off (mds_lastwriter(id, 1))");
+    if (raw)
+        *raw = writer;
+    if (dma)
+        *dma = writer >= DMAWriterTag ? int((writer >> 1) & 3) : -1;
+    return writer ? 1 : 0;
 }
 
 int mds_savestate(int id, const char* path)

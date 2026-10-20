@@ -462,8 +462,10 @@ static int TrackWriters(lua_State* L)
     return 0;
 }
 
+// pc, cpu for an instruction; nil, cpu, channel for a DMA write (the DMA has no pc); nil for no record.
 static int LastWriter(lua_State* L)
 {
+    NeedDebugger(L);
     u32 addr = (u32)luaL_checkinteger(L, 1);
     u32 w = 0;
     Exec(L, [&](melonDS::NDS& nds) { w = nds.Debugger.GetLastWriter(addr); });
@@ -471,6 +473,13 @@ static int LastWriter(lua_State* L)
     {
         lua_pushnil(L);
         return 1;
+    }
+    if (w >= DMAWriterTag)
+    {
+        lua_pushnil(L);
+        lua_pushinteger(L, (w & 1) ? 7 : 9);
+        lua_pushinteger(L, (w >> 1) & 3);
+        return 3;
     }
     lua_pushinteger(L, w & ~1u);
     lua_pushinteger(L, (w & 1) ? 7 : 9);

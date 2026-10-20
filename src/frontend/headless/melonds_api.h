@@ -90,8 +90,14 @@ typedef struct
     uint32_t length;
 } mds_packet;
 
-// Reference: docs/headless-api.md, section 1 (library-wide settings, errors).
+// Reference: docs/headless-api.md, section 1 (library-wide settings, errors, version and features).
+// API level: 1 up to the IPC merge, 2 from fix/api-quirks (MDS_API_VERSION). It goes up whenever functions
+// are added or behaviour changes; mds_has names the individual features.
+#define MDS_API_VERSION 2
 MDS_API int mds_version(void);
+// 1 if the library has the named feature or exported function ("serve_host", "mds_serve_host", ...; the list
+// is in docs/headless-api.md, section 1), else 0. Absent from libraries before API level 2: look the symbol up.
+MDS_API int mds_has(const char* name);
 MDS_API const char* mds_error(void);
 MDS_API void mds_set_local_dir(const char* dir);
 MDS_API void mds_set_log_level(int level);
@@ -204,7 +210,13 @@ MDS_API int mds_callcounts_take(int id, int cpu, uint32_t* entries, uint64_t* co
 MDS_API int mds_coverage(int id, int enabled);
 MDS_API int mds_coverage_take(int id, int cpu, uint32_t* out, int max);
 MDS_API int mds_lastwriter(int id, int enabled);
+// Legacy: returns the raw record, and 0 for "no record" and for every error alike.
 MDS_API uint32_t mds_lastwriter_get(int id, uint32_t addr);
+// The last writer of the main-RAM word at addr: returns 1 (raw = the record: pc | arm7 for an instruction,
+// 0xFFFFFFF0 | channel << 1 | arm7 for DMA; dma = the channel, or -1 for an instruction), 0 for no record
+// (raw = 0, dma = -1), or -1 (mds_error: unknown console, running, no debugger, tracking off). Either
+// pointer may be NULL.
+MDS_API int mds_lastwriter_query(int id, uint32_t addr, uint32_t* raw, int* dma);
 
 // Reference: docs/headless-api.md, section 6 (savestates).
 MDS_API int mds_savestate(int id, const char* path);
