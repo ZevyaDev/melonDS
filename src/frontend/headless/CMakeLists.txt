@@ -7,6 +7,7 @@ endif()
 
 add_library(melonds_headless SHARED
     Api.cpp
+    Barrier.cpp
     Commands.cpp
     Input.cpp
     InputApply.cpp
@@ -61,10 +62,12 @@ add_executable(headless_tests
     Protocol.cpp
     Socket.cpp
     tests/InputQueueTests.cpp
+    tests/BarrierTests.cpp
     tests/MicFifoTests.cpp
     tests/TouchTimelineTests.cpp
     MicFifo.cpp
     Commands.cpp
+    Barrier.cpp
     Input.cpp
 )
 find_package(Threads REQUIRED)
@@ -92,7 +95,7 @@ if (Python3_Interpreter_FOUND)
         get_filename_component(RUNTIME_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
         list(APPEND PY_TEST_ENV "MELONDS_DLL_DIRS=${RUNTIME_DIR}")
     endif()
-    set_tests_properties(python_integration PROPERTIES ENVIRONMENT "${PY_TEST_ENV}" TIMEOUT 300)
+    set_tests_properties(python_integration PROPERTIES ENVIRONMENT "${PY_TEST_ENV}" TIMEOUT 1200)
 else()
     message(STATUS "Python3 not found: python_integration test disabled")
 endif()

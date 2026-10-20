@@ -258,6 +258,7 @@ private:
     void DoPause(const P::Message& m);
     void DoStep(const P::Message& m);
     void DoInput(const P::Message& m);
+    void DoInputMulti(const P::Message& m);
     void DoRead(const P::Message& m);
     void DoWrite(const P::Message& m);
     void DoRegisters(const P::Message& m);
@@ -922,15 +923,8 @@ void Server::DoStep(const P::Message& m)
     Pending.push_back({PendingKind::Run, s.Seq, uint16_t(id), {id}});
 }
 
-void Server::DoInput(const P::Message& m)
+Headless::InputPayload ToPayload(P::InputPayload& in)
 {
-    P::InputPayload in;
-    int id;
-    Instance* inst;
-    if (!Parse(m, in) || !Resolve(m, id, inst))
-        return;
-    if (!P::ValidatePayload(in))
-        return Error(uint16_t(id), in.Seq, P::ErrorCode::bad_payload, "invalid input payload");
     Headless::InputPayload p;
     p.Source = InputSource::Client;
     p.Seq = in.Seq;
@@ -941,6 +935,55 @@ void Server::DoInput(const P::Message& m)
     p.MicKind = in.MicKind;
     p.Mic = std::move(in.Mic);
     p.MicLevel = in.MicLevel;
+    return p;
+}
+
+// All entries are checked before any is queued: an unknown console, a bad payload or a full queue fails the whole
+// message and leaves every queue as it was.
+void Server::DoInputMulti(const P::Message& m)
+{
+    P::InputMulti req;
+    if (!Parse(m, req))
+        return;
+    uint16_t head = m.Head.Console;
+    if (req.Entries.empty())
+        return Error(head, req.Seq, P::ErrorCode::bad_payload, "input_multi needs at least one entry");
+    std::vector<GroupEntry> entries;
+    for (P::InputMultiEntry& e : req.Entries)
+    {
+        Instance* inst = Api::FindInstance(e.Console);
+        if (!inst)
+            return Error(head, req.Seq, P::ErrorCode::no_console, "no console " + std::to_string(e.Console));
+        if (!P::ValidatePayload(e.Payload))
+            return Error(head, req.Seq, P::ErrorCode::bad_payload,
+                         "invalid input payload for console " + std::to_string(e.Console));
+        GroupEntry g;
+        g.Queue = &inst->Input;
+        g.Console = e.Console;
+        g.Payload = ToPayload(e.Payload);
+        entries.push_back(std::move(g));
+    }
+    std::vector<int> depths;
+    std::string error;
+    if (!SubmitGroup(entries, depths, error))
+        return Error(head, req.Seq, MapError(error), error);
+    P::InputMultiReply r;
+    r.Seq = req.Seq;
+    for (int d : depths)
+        r.Depths.push_back(uint16_t(std::min(d, 0xFFFF)));
+    Reply(head, r);
+}
+
+void Server::DoInput(const P::Message& m)
+{
+    P::InputPayload in;
+    int id;
+    Instance* inst;
+    if (!Parse(m, in) || !Resolve(m, id, inst))
+        return;
+    if (!P::ValidatePayload(in))
+        return Error(uint16_t(id), in.Seq, P::ErrorCode::bad_payload, "invalid input payload");
+    Headless::InputPayload p = ToPayload(in);
     std::string error;
     int depth = inst->Input.Submit(std::move(p), error);
     if (depth < 0)
@@ -1695,6 +1738,7 @@ void Server::Handle(const P::Message& m)
     case P::MsgType::pause: DoPause(m); return;
     case P::MsgType::step: DoStep(m); return;
     case P::MsgType::input: DoInput(m); return;
+    case P::MsgType::input_multi: DoInputMulti(m); return;
     case P::MsgType::read: DoRead(m); return;
     case P::MsgType::write: DoWrite(m); return;
     case P::MsgType::registers: DoRegisters(m); return;

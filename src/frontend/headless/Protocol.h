@@ -828,7 +828,16 @@ struct InputReply
 };
 
 // input_multi: {u32 seq, u16 count, count x {u16 console, InputPayload}}; reply
-// data {u32 seq, u16 count, u16 depth[count]}. Marks the payloads a barrier group.
+// data {u32 seq, u16 count, u16 depth[count]} (queue depth after queueing, in entry order). Marks the payloads a
+// barrier group. The header console is ignored; each entry names its console by literal id. All or nothing:
+// no entries / duplicate console / bad payload -> bad_payload, unknown console -> no_console, any full queue ->
+// input_queue_full, and nothing is queued. A console whose next payload belongs to a group waits at its frame
+// boundary until every member has reached its payload, then all apply and start together. A member that cannot
+// arrive (console destroyed, stopped after its frames ran out, queue cleared by reset / savestate load /
+// disconnect) stops counting: the others proceed, and that member does not wait if it later reaches its payload.
+// A wait is also cut short while another member is blocked in a wireless receive: the waiter then applies its own
+// payload at once (early, not skipped), so every member still applies its payload on the same frame of its own
+// numbering. A paused/parked member holds the barrier; stop or interrupt releases the waiter as in wait mode.
 struct InputMultiEntry
 {
     uint16_t Console = 0;

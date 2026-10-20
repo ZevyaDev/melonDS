@@ -93,6 +93,69 @@ int InputQueue::Submit(InputPayload payload, std::string& error)
     return depth;
 }
 
+bool SubmitGroup(std::vector<GroupEntry>& entries, std::vector<int>& depths, std::string& error,
+                 BarrierGroups& groups)
+{
+    depths.clear();
+    if (entries.empty())
+    {
+        error = "bad_payload: no entries";
+        return false;
+    }
+    std::vector<int> members;
+    for (size_t i = 0; i < entries.size(); i++)
+    {
+        for (size_t j = 0; j < i; j++)
+            if (entries[j].Console == entries[i].Console || entries[j].Queue == entries[i].Queue)
+            {
+                error = "bad_payload: console listed twice";
+                return false;
+            }
+        error = InputQueue::Validate(entries[i].Payload);
+        if (!error.empty())
+            return false;
+        members.push_back(entries[i].Console);
+    }
+
+    // Lock the queues in address order so two groups submitted at once cannot deadlock. The group is
+    // created first: the registry must never be entered with a queue lock held.
+    uint32_t id = groups.Create(members);
+    std::vector<InputQueue*> order;
+    for (GroupEntry& e : entries)
+        order.push_back(e.Queue);
+    std::sort(order.begin(), order.end());
+    for (InputQueue* q : order)
+        q->Lock.lock();
+
+    bool full = false;
+    for (GroupEntry& e : entries)
+        if (e.Queue->Queue.size() >= InputQueueCapacity)
+            full = true;
+    if (!full)
+    {
+        for (GroupEntry& e : entries)
+        {
+            e.Payload.Barrier = id;
+            e.Payload.Setter = false;
+            e.Queue->Queue.push_back(std::move(e.Payload));
+            depths.push_back((int)e.Queue->Queue.size());
+        }
+    }
+    for (auto it = order.rbegin(); it != order.rend(); ++it)
+        (*it)->Lock.unlock();
+
+    if (full)
+    {
+        groups.Cancel(id);
+        error = "input_queue_full";
+        return false;
+    }
+    for (GroupEntry& e : entries)
+        e.Queue->WakeUp();
+    error.clear();
+    return true;
+}
+
 int InputQueue::Modify(const std::function<void(InputPayload&)>& fn, std::string& error)
 {
     int depth;
@@ -134,19 +197,54 @@ size_t InputQueue::Depth() const
     return Queue.size();
 }
 
+void InputQueue::SetBarrierOwner(int console, BarrierGroups* groups)
+{
+    std::lock_guard lock(Lock);
+    BarrierOwner = console;
+    Groups = groups ? groups : &Barriers();
+}
+
+uint32_t InputQueue::FrontBarrier() const
+{
+    std::lock_guard lock(Lock);
+    return Queue.empty() ? 0 : Queue.front().Barrier;
+}
+
+std::vector<uint32_t> InputQueue::TakeBarriers()
+{
+    std::vector<uint32_t> out;
+    if (BarrierOwner >= 0)
+        for (const InputPayload& p : Queue)
+            if (p.Barrier)
+                out.push_back(p.Barrier);
+    return out;
+}
+
+// Outside the queue's lock: this wakes other consoles.
+void InputQueue::LeaveGroups(const std::vector<uint32_t>& groups)
+{
+    for (uint32_t g : groups)
+        Groups->Drop(g, BarrierOwner);
+}
+
 void InputQueue::Clear()
 {
+    std::vector<uint32_t> dropped;
     {
         std::lock_guard lock(Lock);
+        dropped = TakeBarriers();
         Queue.clear();
     }
+    LeaveGroups(dropped);
     WakeUp();
 }
 
 void InputQueue::Reset()
 {
+    std::vector<uint32_t> dropped;
     {
         std::lock_guard lock(Lock);
+        dropped = TakeBarriers();
         Queue.clear();
         Log.clear();
         LogBytes = 0;
@@ -154,6 +252,7 @@ void InputQueue::Reset()
         LastSource = InputSource::Local;
         EmptyFrames = 0;
     }
+    LeaveGroups(dropped);
     WakeUp();
 }
 
@@ -199,6 +298,7 @@ bool InputQueue::Next(uint64_t frame, AppliedInput& out)
         EmptyFrames = 0;
 
         out.Consumed = true;
+        out.Barrier = p.Barrier;
         out.Seq = p.Seq;
         out.Source = p.Source;
         out.Buttons = p.Buttons;

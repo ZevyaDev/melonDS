@@ -462,16 +462,20 @@ int mds_set_lid(int id, int closed)
     return Modify(s, [&](InputPayload& p) { p.Lid = closed != 0; });
 }
 
-int mds_input_submit(int id, const mds_input* in, const mds_touch_point* points, const int16_t* mic)
+// False with *error set ("bad_payload: ...") if the arguments cannot make a payload.
+static bool BuildPayload(const mds_input* in, const mds_touch_point* points, const int16_t* mic, InputPayload& p,
+                         std::string& error)
 {
-    Slot* s = Find(id);
-    if (!s)
-        return -1;
     if (!in)
-        return Fail("bad_payload: no input");
+    {
+        error = "bad_payload: no input";
+        return false;
+    }
     if ((in->touch_count && !points) || (in->mic_count && !mic))
-        return Fail("bad_payload: missing touch or microphone data");
-    InputPayload p;
+    {
+        error = "bad_payload: missing touch or microphone data";
+        return false;
+    }
     p.Source = (in->flags & 1) ? InputSource::Client : InputSource::Local;
     p.Seq = in->seq;
     p.Buttons = in->buttons;
@@ -482,11 +486,58 @@ int mds_input_submit(int id, const mds_input* in, const mds_touch_point* points,
     if (in->mic_count)
         p.Mic.assign(mic, mic + in->mic_count);
     p.MicLevel = in->mic_level;
+    return true;
+}
+
+int mds_input_submit(int id, const mds_input* in, const mds_touch_point* points, const int16_t* mic)
+{
+    Slot* s = Find(id);
+    if (!s)
+        return -1;
+    InputPayload p;
     std::string error;
+    if (!BuildPayload(in, points, mic, p, error))
+        return Fail(error);
     int depth = s->Inst->Input.Submit(std::move(p), error);
     if (depth < 0)
         return Fail(error);
     return depth;
+}
+
+int mds_debug_recv_pending(int id, int pending)
+{
+    if (!Find(id))
+        return -1;
+    Barriers().SetRecvPending(id, pending != 0);
+    return 0;
+}
+
+int mds_input_submit_multi(const int* ids, int count, const mds_input* inputs, const mds_touch_point* const* points,
+                           const int16_t* const* mic, int* depths)
+{
+    if (!ids || count < 1 || !inputs)
+        return Fail("bad_payload: no entries");
+    std::vector<GroupEntry> entries;
+    for (int i = 0; i < count; i++)
+    {
+        Slot* s = Find(ids[i]);
+        if (!s)
+            return -1;
+        GroupEntry e;
+        e.Queue = &s->Inst->Input;
+        e.Console = ids[i];
+        std::string error;
+        if (!BuildPayload(&inputs[i], points ? points[i] : nullptr, mic ? mic[i] : nullptr, e.Payload, error))
+            return Fail(error);
+        entries.push_back(std::move(e));
+    }
+    std::vector<int> out;
+    std::string error;
+    if (!SubmitGroup(entries, out, error))
+        return Fail(error);
+    if (depths)
+        std::copy(out.begin(), out.end(), depths);
+    return 0;
 }
 
 int mds_input_mode(int id, int mode, int stall_frames)

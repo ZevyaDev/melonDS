@@ -117,6 +117,9 @@ def _load():
         "mds_touch": (c_int, [c_int, c_int, c_int]),
         "mds_set_lid": (c_int, [c_int, c_int]),
         "mds_input_submit": (c_int, [c_int, POINTER(MdsInput), POINTER(MdsTouchPoint), POINTER(c_int16)]),
+        "mds_input_submit_multi": (c_int, [POINTER(c_int), c_int, POINTER(MdsInput), POINTER(POINTER(MdsTouchPoint)),
+                                           POINTER(POINTER(c_int16)), POINTER(c_int)]),
+        "mds_debug_recv_pending": (c_int, [c_int, c_int]),
         "mds_input_mode": (c_int, [c_int, c_int, c_int]),
         "mds_input_depth": (c_int, [c_int]),
         "mds_input_waiting": (c_int, [c_int]),
@@ -261,6 +264,48 @@ def wait_group(consoles, timeout_ms):
     return ret == 1, list(states)
 
 
+def _make_input(buttons, lid, touch, mic, mic_level, seq, client):
+    if touch and not isinstance(touch[0], (tuple, list)):
+        touch = [(0, touch[0], touch[1], 1)]
+    pts = (MdsTouchPoint * max(len(touch or []), 1))()
+    for i, (offset, x, y, down) in enumerate(touch or []):
+        pts[i].offset, pts[i].x, pts[i].y, pts[i].down = offset, x, y, int(down)
+    samples = list(mic or [])
+    buf = (c_int16 * max(len(samples), 1))(*samples)
+    hdr = MdsInput()
+    hdr.seq = seq
+    hdr.buttons = _key_mask(buttons)
+    hdr.lid = int(lid)
+    hdr.touch_count = len(touch or [])
+    hdr.mic_kind = 2 if mic_level is not None else (1 if mic is not None else 0)
+    hdr.flags = INPUT_FLAG_CLIENT if client else 0
+    hdr.mic_count = len(samples)
+    hdr.mic_level = mic_level or 0
+    return hdr, pts, buf
+
+
+def submit_multi(entries, client=False):
+    """input_multi without a socket: entries is a list of (console, kwargs) where kwargs are
+    Console.submit_input's arguments (buttons, lid, touch, mic, mic_level, seq). The payloads form a
+    barrier group: each console waits at its payload until all of them are there, then they start the
+    frame together. All or none are queued. Returns each console's queue depth."""
+    n = len(entries)
+    made = [_make_input(client=client, **{"buttons": 0, "lid": False, "touch": None, "mic": None,
+                                           "mic_level": None, "seq": 0, **kw}) for _, kw in entries]
+    ids = (c_int * n)(*[c.id for c, _ in entries])
+    hdrs = (MdsInput * n)(*[m[0] for m in made])
+    pts = (POINTER(MdsTouchPoint) * n)(*[ctypes.cast(m[1], POINTER(MdsTouchPoint)) for m in made])
+    bufs = (POINTER(c_int16) * n)(*[ctypes.cast(m[2], POINTER(c_int16)) for m in made])
+    depths = (c_int * n)()
+    _check(lib().mds_input_submit_multi(ids, n, hdrs, pts, bufs, depths))
+    return list(depths)
+
+
+def debug_recv_pending(console, pending):
+    """Test hook: pretend the console is (True) or is no longer (False) blocked in a wireless receive."""
+    _check(lib().mds_debug_recv_pending(console.id, int(pending)))
+
+
 _live = weakref.WeakSet()
 
 
@@ -348,22 +393,7 @@ class Console:
         """Queue one frame of input; returns the queue depth. buttons: key names or a bitmask.
         touch: list of (offset, x, y, down) or a single (x, y). mic: list of int16 samples.
         client=True marks the payload as coming from a socket client (subject to the stall timeout)."""
-        if touch and not isinstance(touch[0], (tuple, list)):
-            touch = [(0, touch[0], touch[1], 1)]
-        pts = (MdsTouchPoint * max(len(touch or []), 1))()
-        for i, (offset, x, y, down) in enumerate(touch or []):
-            pts[i].offset, pts[i].x, pts[i].y, pts[i].down = offset, x, y, int(down)
-        samples = list(mic or [])
-        buf = (c_int16 * max(len(samples), 1))(*samples)
-        hdr = MdsInput()
-        hdr.seq = seq
-        hdr.buttons = _key_mask(buttons)
-        hdr.lid = int(lid)
-        hdr.touch_count = len(touch or [])
-        hdr.mic_kind = 2 if mic_level is not None else (1 if mic is not None else 0)
-        hdr.flags = INPUT_FLAG_CLIENT if client else 0
-        hdr.mic_count = len(samples)
-        hdr.mic_level = mic_level or 0
+        hdr, pts, buf = _make_input(buttons, lid, touch, mic, mic_level, seq, client)
         return _check(lib().mds_input_submit(self.id, ctypes.byref(hdr), pts, buf))
 
     def input_mode(self, mode=None, stall_frames=None):

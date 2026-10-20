@@ -171,6 +171,11 @@ Instance::Instance(int id, const Config& config, std::string& error) : ID(id)
         { std::lock_guard lock(Lock); }
         Cond.notify_all();
     });
+    Input.SetBarrierOwner(ID);
+    Barriers().Register(ID, [this] {
+        { std::lock_guard lock(Lock); BarrierEvent = true; }
+        Cond.notify_all();
+    });
     Thread = std::thread([this] { ThreadMain(); });
     Commands.SetDrainThread(Thread.get_id());
 }
@@ -189,6 +194,8 @@ Instance::~Instance()
     Cond.notify_all();
     if (Thread.joinable())
         Thread.join();
+    Barriers().Unregister(ID);
+    Barriers().DropConsole(ID);     // partners waiting for this console's payload are released
     Lua.reset();
     Network().UnregisterInstance(ID);
     NDS->Stop();
@@ -355,7 +362,7 @@ void Instance::ThreadMain()
                 }
             }
             AppliedInput applied;
-            if (!AcquireInput(applied))
+            if (!AcquireInput(applied))     // may wait at a barrier or for input
             {
                 std::lock_guard lock(Lock);
                 if (Quit || FramesLeft == 0)
@@ -385,19 +392,96 @@ void Instance::ThreadMain()
                     next = now;
             }
         }
+        // The console stopped running: a barrier partner must not wait for a payload it will not reach.
+        Barriers().DropConsole(ID);
         Cond.notify_all();
+    }
+}
+
+// Wait at the frame boundary until every console of the barrier group has reached its payload (or can
+// no longer reach it, or a partner is blocked in a wireless receive). True: go ahead and pop the payload.
+// False: the caller should look at Quit/FramesLeft again before running a frame. Like the wait for input,
+// the wait ends for Quit, a stop, an interrupt (which parks) and posted commands (which are drained).
+bool Instance::AwaitBarrier(uint32_t group)
+{
+    BarrierGroups& groups = Barriers();
+    groups.Arrive(group, ID);
+
+    std::unique_lock lock(Lock);
+    bool waited = false;
+    for (;;)
+    {
+        // Clear the event before looking: one that arrives after the look sets it again.
+        BarrierEvent = false;
+        lock.unlock();
+        bool released = groups.Released(group, ID);
+        lock.lock();
+        if (released)
+        {
+            Waiting = false;
+            return true;
+        }
+
+        Waiting = true;
+        if (!waited)
+            Cond.notify_all();
+        waited = true;
+        Cond.wait(lock, [this, group] {
+            return Quit || FramesLeft == 0 || WaitInterrupt || Commands.HasPending() || BarrierEvent
+                || Input.FrontBarrier() != group;
+        });
+        if (Quit || FramesLeft == 0)
+        {
+            Waiting = false;
+            return false;
+        }
+        if (WaitInterrupt)
+        {
+            Waiting = false;
+            WaitInterrupt = false;
+            BreakEvent ev {};
+            ev.Kind = BreakKind::Request;
+            ev.PC = NDS->ARM9->R[15];
+            lock.unlock();
+            Park(ev);
+            return false;
+        }
+        if (Commands.HasPending())
+        {
+            Waiting = false;
+            lock.unlock();
+            Commands.Drain();
+            return false;
+        }
+        if (Input.FrontBarrier() != group)      // the queue was cleared under us
+        {
+            Waiting = false;
+            return true;
+        }
     }
 }
 
 // Resolve the input for the next frame. In Wait mode with nothing queued this blocks at the frame
 // boundary (FramesLeft is not used up) until input arrives or something else needs attention.
+// A payload of a barrier group is not popped until its group is released.
 // False means the caller should look at Quit/FramesLeft again before running a frame.
 bool Instance::AcquireInput(AppliedInput& out)
 {
     for (;;)
     {
+        if (uint32_t group = Input.FrontBarrier())
+        {
+            if (!AwaitBarrier(group))
+                return false;
+            if (Input.FrontBarrier() != group)
+                continue;
+        }
         if (Input.Next(FramesRun, out))
+        {
+            if (out.Barrier)
+                Barriers().Applied(out.Barrier, ID);
             return true;
+        }
 
         std::unique_lock lock(Lock);
         Waiting = true;

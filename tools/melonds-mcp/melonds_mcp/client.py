@@ -566,6 +566,24 @@ class Client:
         reply = self._wait_reply(self.send_input_raw(payload, console))
         return _R(reply.body).take("<H")
 
+    def input_multi(self, entries):
+        """Queue one payload per console as a barrier group: each console waits at its payload until all of
+        them are there, then they start the frame together. All or none are queued. ``entries`` is a list of
+        (console, kwargs), kwargs being input()'s payload arguments (buttons, lid, touch, mic, mic_level, seq).
+        Returns the list of queue depths in entry order; each payload's seq is in ``last_seqs``."""
+        seq = self._next_seq()
+        self.last_seqs = []
+        body = _u32(seq) + _u16(len(entries))
+        for console, kw in entries:
+            kw = dict(kw)
+            pseq = kw.pop("seq", None)
+            pseq = self._next_seq() if pseq is None else pseq
+            self.last_seqs.append(pseq)
+            body += _u16(console) + encode_input_payload(pseq, **kw)
+        self.send_raw(T.input_multi, body)
+        r = _R(self._wait_reply(seq).body)
+        return [r.take("<H") for _ in range(r.take("<H"))]
+
     def send_input_raw(self, payload, console=DEFAULT_CONSOLE):
         """Send an already encoded InputPayload (starts with its seq); returns that seq."""
         self.send_raw(T.input, payload, console)

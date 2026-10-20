@@ -113,11 +113,6 @@ class SessionTests(ServerTest):
         cl = self.connect()
         self.expect_error("unknown_type", cl.request, 0x7F01, b"")
 
-    def test_unimplemented_messages_not_supported(self):
-        cl = self.connect()
-        for t in (T.input_multi,):          # plan step 7
-            self.expect_error("not_supported", cl.request, t, b"")
-
     def test_malformed_body(self):
         cl = self.connect()
         self.expect_error("bad_payload", cl.request, T.read, b"\x01")

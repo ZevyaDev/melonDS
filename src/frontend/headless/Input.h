@@ -27,6 +27,7 @@
 #include <string>
 #include <vector>
 
+#include "Barrier.h"
 #include "InputTimeline.h"
 
 namespace melonDS { class NDS; }
@@ -89,6 +90,7 @@ struct AppliedInput
     std::vector<int16_t> Mic;
     uint16_t MicLevel = 0;
     bool Consumed = false;          // a queued payload was used (as opposed to the empty-queue result)
+    uint32_t Barrier = 0;           // the barrier group of that payload, 0 = none
     InputSource Source = InputSource::Local;
 };
 
@@ -113,6 +115,16 @@ struct InputLogEntry
     std::vector<int16_t> Mic;
 };
 
+class InputQueue;
+
+// One console's share of an input_multi.
+struct GroupEntry
+{
+    InputQueue* Queue = nullptr;
+    int Console = 0;
+    InputPayload Payload;
+};
+
 // Per-console input FIFO. Submit() may be called from any thread; Next() belongs to the
 // emulator thread, at the start of a frame.
 class InputQueue
@@ -131,8 +143,14 @@ public:
     // setter payload, else append. Returns the depth, or -1.
     int Modify(const std::function<void(InputPayload&)>& fn, std::string& error);
 
+    // The barrier group of the payload that Next would pop, 0 if none (or the queue is empty).
+    uint32_t FrontBarrier() const;
+    // Which console this queue belongs to: when payloads of a barrier group are dropped (Clear, Reset),
+    // that console leaves the group. Default: none.
+    void SetBarrierOwner(int console, BarrierGroups* groups = nullptr);
+
     size_t Depth() const;
-    void Clear();                       // drop queued payloads
+    void Clear();                     // drop queued payloads
     void Reset();                       // Clear, plus the log and the held state (the console was reset)
 
     void SetMode(EmptyMode mode);
@@ -160,11 +178,23 @@ private:
     std::deque<InputLogEntry> Log;
     size_t LogBytes = 0;                // touch and mic data held by Log
     std::function<void()> Wake;
+    int BarrierOwner = -1;
+    BarrierGroups* Groups = nullptr;
+
+    friend bool SubmitGroup(std::vector<GroupEntry>&, std::vector<int>&, std::string&, BarrierGroups&);
+    std::vector<uint32_t> TakeBarriers();      // the barrier groups of the queued payloads (lock held)
+    void LeaveGroups(const std::vector<uint32_t>& groups);
 
     static std::string Validate(const InputPayload& p);
     static InputState After(const InputPayload& p, const InputState& before);
     void WakeUp();
 };
+
+// input_multi: queue every entry's payload as one barrier group, or none of them. Validates every payload,
+// rejects duplicate consoles and an empty list ("bad_payload: ..."), and checks every queue's room
+// ("input_queue_full") before anything is queued. On success depths[i] is entry i's queue depth.
+bool SubmitGroup(std::vector<GroupEntry>& entries, std::vector<int>& depths, std::string& error,
+                 BarrierGroups& groups = Barriers());
 
 // The touch points of the frame being run, as the core's InputTimeline. Each point holds from its
 // offset until the next; before the first one, and after the last one in later frames, the state

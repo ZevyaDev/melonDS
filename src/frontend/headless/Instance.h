@@ -125,6 +125,7 @@ private:
     bool BreakPending = false;
     bool Waiting = false;           // blocked for input (guarded by Lock)
     bool WaitInterrupt = false;     // Interrupt() arrived while Waiting
+    bool BarrierEvent = false;      // a barrier partner arrived, dropped out or entered a wireless receive
     melonDS::BreakEvent LastBreak {};
 
     std::mutex PacketLock;
@@ -137,6 +138,7 @@ private:
     void ThreadMain();
     void Park(const melonDS::BreakEvent& ev);
     bool AcquireInput(AppliedInput& out);
+    bool AwaitBarrier(uint32_t group);
 };
 
 // Offset added to every console's id for MAC and save numbering. Process-wide; it can only

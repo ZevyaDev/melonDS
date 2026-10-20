@@ -153,6 +153,16 @@ MDS_API int mds_set_lid(int id, int closed);
 
 // Queue one frame of input. Returns the queue depth, or -1 (mds_error: bad_payload / input_queue_full).
 MDS_API int mds_input_submit(int id, const mds_input* in, const mds_touch_point* points, const int16_t* mic);
+// Queue one payload for each of count consoles as a barrier group (input_multi): all or none are queued, and
+// every console waits at its payload's frame boundary until all of them are there. inputs[i] is console ids[i]'s
+// header; points[i] / mic[i] are its touch points and samples (the arrays, or individual entries, may be null when
+// the counts are 0). depths, if not null, receives each console's queue depth. Returns 0, or -1 (mds_error:
+// no console / bad_payload / input_queue_full).
+MDS_API int mds_input_submit_multi(const int* ids, int count, const mds_input* inputs,
+                                   const mds_touch_point* const* points, const int16_t* const* mic, int* depths);
+// Test hook: mark the console as blocked in (pending 1) or finished with (0) a wireless receive, as the platform
+// layer does around a blocking MP receive. A console waiting at a barrier is released while a partner is marked.
+MDS_API int mds_debug_recv_pending(int id, int pending);
 // mode: 0 repeat, 1 neutral, 2 wait, -1 unchanged. stall_frames: -1 unchanged, 0 never.
 MDS_API int mds_input_mode(int id, int mode, int stall_frames);
 MDS_API int mds_input_depth(int id);
