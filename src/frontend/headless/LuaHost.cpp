@@ -301,10 +301,16 @@ void LuaHost::Open()
     SetFuncs(L, "input", inputFuncs);
     SetFuncs(L, "savestate", savestateFuncs);
 
-    LuaDebug::Register(L, {
-        [this] { return Inst.NDS.get(); },
-        [this](const std::string& s) { Print(s); },
-    });
+    LuaDebug::Host host;
+    host.GetNDS = [this] { return Inst.NDS.get(); };
+    host.Print = [this](const std::string& s) { Print(s); };
+    // a console created with debug = 0 runs without the debugger hooks: the debugger functions fail
+    host.DebugUnavailable = [this]() -> std::string {
+        if (Inst.DebugEnabled())
+            return "";
+        return "console " + std::to_string(Inst.ID) + " was created without the debugger (debug = 0)";
+    };
+    LuaDebug::Register(L, std::move(host));
 }
 
 void LuaHost::Close()
@@ -336,8 +342,15 @@ bool LuaHost::Run(const std::string& source, bool isFile, std::string& error)
         Stop();
         return false;
     }
-    Resume();
+    // The body runs until its first emu.frameadvance() or its end; an error there fails the call.
+    std::string failure;
+    Resume(&failure);
     FlushInput();
+    if (!failure.empty())
+    {
+        error = failure;
+        return false;
+    }
     return true;
 }
 
@@ -353,7 +366,7 @@ bool LuaHost::Exec(const std::string& code, std::string& error)
     return true;
 }
 
-void LuaHost::Resume()
+void LuaHost::Resume(std::string* error)
 {
     if (!Main)
         return;
@@ -365,7 +378,14 @@ void LuaHost::Resume()
         return;
     }
     if (status != LUA_OK)
-        Print(std::string("lua: ") + lua_tostring(Main, -1));
+    {
+        const char* text = lua_tostring(Main, -1);
+        std::string message = text ? text : "error object is not a string";
+        if (error)
+            *error = message;
+        else
+            Print("lua: " + message);
+    }
     luaL_unref(L, LUA_REGISTRYINDEX, MainRef);
     MainRef = LUA_NOREF;
     Main = nullptr;

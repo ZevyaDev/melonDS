@@ -66,7 +66,9 @@ private:
 
     void Open();
     void Close();
-    void Resume();
+    // Resume the script coroutine. A runtime error ends the script: it goes to *error if given, else
+    // to the output as "lua: ...".
+    void Resume(std::string* error = nullptr);
 };
 
 }

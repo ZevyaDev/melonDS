@@ -88,6 +88,44 @@ Slot* Stopped(int id)
     return s;
 }
 
+// The console must have been created with the debugger (debug != 0): without it the CPUs run without the
+// debugger hooks, so breakpoints, watchpoints, steps, traces, call tracking, coverage and CPU last-writer
+// records would silently never happen.
+Slot* Debug(Slot* s, int id)
+{
+    if (s && !s->Inst->DebugEnabled())
+    {
+        LastError = "console " + std::to_string(id) + " was created without the debugger (debug = 0)";
+        return nullptr;
+    }
+    return s;
+}
+
+Slot* StoppedDebug(int id)
+{
+    return Debug(Stopped(id), id);
+}
+
+Slot* Idle(int id, const char* what)
+{
+    Slot* s = Find(id);
+    if (s && s->Inst->GetState() != RunState::Idle)
+    {
+        LastError = what;
+        return nullptr;
+    }
+    return s;
+}
+
+// Buffer sizes and counts: negative ones are refused before anything is copied or allocated.
+bool CountOk(int n, const char* name)
+{
+    if (n >= 0)
+        return true;
+    LastError = std::string(name) + " must not be negative";
+    return false;
+}
+
 int StateCode(RunState st)
 {
     switch (st)
@@ -249,7 +287,7 @@ void mds_destroy(int id)
 
 int mds_load_rom(int id, const char* rom, const char* save)
 {
-    Slot* s = Stopped(id);
+    Slot* s = Idle(id, "loading a ROM needs an idle console");
     if (!s)
         return -1;
     return OnEmu(s, [&](Instance& inst, std::string& error) {
@@ -259,11 +297,9 @@ int mds_load_rom(int id, const char* rom, const char* save)
 
 int mds_reset(int id)
 {
-    Slot* s = Find(id);
+    Slot* s = Idle(id, "reset needs an idle console");
     if (!s)
         return -1;
-    if (s->Inst->GetState() != RunState::Idle)
-        return Fail("reset needs an idle console");
     return OnEmu(s, [](Instance& inst, std::string&) {
         inst.Reset();
         return 0;
@@ -296,6 +332,8 @@ int mds_get_rtc(int id, int* out)
 
 int mds_run(const int* ids, int count, uint32_t frames, int timeout_ms, int* states)
 {
+    if (!CountOk(count, "count"))
+        return -1;
     std::vector<Slot*> slots;
     for (int i = 0; i < count; i++)
     {
@@ -311,6 +349,8 @@ int mds_run(const int* ids, int count, uint32_t frames, int timeout_ms, int* sta
 
 int mds_wait(const int* ids, int count, int timeout_ms, int* states)
 {
+    if (!CountOk(count, "count"))
+        return -1;
     std::vector<Slot*> slots;
     for (int i = 0; i < count; i++)
     {
@@ -396,7 +436,7 @@ int mds_stop_after(int id, uint32_t frames)
 
 int mds_interrupt(int id)
 {
-    Slot* s = Find(id);
+    Slot* s = Debug(Find(id), id);
     if (!s)
         return -1;
     s->Inst->Interrupt();
@@ -602,10 +642,10 @@ int mds_input_clear(int id)
 int mds_input_log(int id, uint64_t from_frame, mds_input_log_entry* out, int max)
 {
     Slot* s = Find(id);
-    if (!s)
+    if (!s || !CountOk(max, "max"))
         return -1;
     int n = 0;
-    for (const InputLogEntry& e : s->Inst->Input.ReadLog(from_frame, max > 0 ? max : 0))
+    for (const InputLogEntry& e : s->Inst->Input.ReadLog(from_frame, max))
         out[n++] = {e.Frame, e.Seq, e.Buttons, e.Lid, e.TouchCount, e.MicKind, 0, e.MicLevel, 0, 0};
     return n;
 }
@@ -679,7 +719,7 @@ int mds_set_reg(int id, int cpu, int reg, uint32_t value)
 
 int mds_bp_add(int id, uint32_t cpumask, uint32_t addr)
 {
-    Slot* s = Stopped(id);
+    Slot* s = StoppedDebug(id);
     if (!s)
         return -1;
     return OnEmu(s, [&](Instance& inst, std::string&) {
@@ -689,7 +729,7 @@ int mds_bp_add(int id, uint32_t cpumask, uint32_t addr)
 
 int mds_wp_add(int id, uint32_t cpumask, uint32_t addr, uint32_t size, uint32_t flags)
 {
-    Slot* s = Stopped(id);
+    Slot* s = StoppedDebug(id);
     if (!s)
         return -1;
     return OnEmu(s, [&](Instance& inst, std::string& error) {
@@ -702,7 +742,7 @@ int mds_wp_add(int id, uint32_t cpumask, uint32_t addr, uint32_t size, uint32_t 
 
 int mds_point_remove(int id, int point)
 {
-    Slot* s = Stopped(id);
+    Slot* s = StoppedDebug(id);
     if (!s)
         return -1;
     return OnEmu(s, [&](Instance& inst, std::string& error) {
@@ -715,7 +755,7 @@ int mds_point_remove(int id, int point)
 
 int mds_point_enable(int id, int point, int enabled)
 {
-    Slot* s = Stopped(id);
+    Slot* s = StoppedDebug(id);
     if (!s)
         return -1;
     return OnEmu(s, [&](Instance& inst, std::string& error) {
@@ -728,8 +768,8 @@ int mds_point_enable(int id, int point, int enabled)
 
 int mds_point_list(int id, mds_point* out, int max)
 {
-    Slot* s = Stopped(id);
-    if (!s)
+    Slot* s = StoppedDebug(id);
+    if (!s || !CountOk(max, "max"))
         return -1;
     return OnEmu(s, [&](Instance& inst, std::string&) {
         auto& dbg = inst.NDS->Debugger;
@@ -746,7 +786,7 @@ int mds_point_list(int id, mds_point* out, int max)
 
 int mds_step(int id, int cpu, uint32_t count)
 {
-    Slot* s = Stopped(id);
+    Slot* s = StoppedDebug(id);
     if (!s)
         return -1;
     return OnEmu(s, [&](Instance& inst, std::string&) {
@@ -757,7 +797,7 @@ int mds_step(int id, int cpu, uint32_t count)
 
 int mds_trace(int id, uint32_t cpumask, uint32_t start, uint32_t end, uint32_t capacity)
 {
-    Slot* s = Stopped(id);
+    Slot* s = StoppedDebug(id);
     if (!s)
         return -1;
     s->Trace.clear();
@@ -769,8 +809,8 @@ int mds_trace(int id, uint32_t cpumask, uint32_t start, uint32_t end, uint32_t c
 
 int mds_trace_take(int id, mds_trace_entry* out, int max)
 {
-    Slot* s = Stopped(id);
-    if (!s)
+    Slot* s = StoppedDebug(id);
+    if (!s || !CountOk(max, "max"))
         return -1;
     std::vector<TraceEntry> buf(max);
     int n = Take(s->Trace, [s] {
@@ -785,7 +825,7 @@ int mds_trace_take(int id, mds_trace_entry* out, int max)
 
 int mds_calls(int id, int enabled)
 {
-    Slot* s = Stopped(id);
+    Slot* s = StoppedDebug(id);
     if (!s)
         return -1;
     return OnEmu(s, [&](Instance& inst, std::string&) {
@@ -796,8 +836,8 @@ int mds_calls(int id, int enabled)
 
 int mds_callstack(int id, int cpu, mds_frame* out, int max)
 {
-    Slot* s = Stopped(id);
-    if (!s)
+    Slot* s = StoppedDebug(id);
+    if (!s || !CountOk(max, "max"))
         return -1;
     return OnEmu(s, [&](Instance& inst, std::string&) {
         auto stack = inst.NDS->Debugger.GetCallStack(cpu == 7 || cpu == 1);
@@ -813,8 +853,8 @@ int mds_callstack(int id, int cpu, mds_frame* out, int max)
 
 int mds_callcounts_take(int id, int cpu, uint32_t* entries, uint64_t* counts, int max)
 {
-    Slot* s = Stopped(id);
-    if (!s)
+    Slot* s = StoppedDebug(id);
+    if (!s || !CountOk(max, "max"))
         return -1;
     int n = cpu == 7 || cpu == 1;
     std::vector<std::pair<u32, u64>> buf(max);
@@ -836,7 +876,7 @@ int mds_callcounts_take(int id, int cpu, uint32_t* entries, uint64_t* counts, in
 
 int mds_coverage(int id, int enabled)
 {
-    Slot* s = Stopped(id);
+    Slot* s = StoppedDebug(id);
     if (!s)
         return -1;
     return OnEmu(s, [&](Instance& inst, std::string&) {
@@ -847,8 +887,8 @@ int mds_coverage(int id, int enabled)
 
 int mds_coverage_take(int id, int cpu, uint32_t* out, int max)
 {
-    Slot* s = Stopped(id);
-    if (!s)
+    Slot* s = StoppedDebug(id);
+    if (!s || !CountOk(max, "max"))
         return -1;
     int n = cpu == 7 || cpu == 1;
     return Take(s->Coverage[n], [s, n] {
@@ -860,7 +900,7 @@ int mds_coverage_take(int id, int cpu, uint32_t* out, int max)
 
 int mds_lastwriter(int id, int enabled)
 {
-    Slot* s = Stopped(id);
+    Slot* s = StoppedDebug(id);
     if (!s)
         return -1;
     return OnEmu(s, [&](Instance& inst, std::string&) {
@@ -899,13 +939,19 @@ int mds_loadstate(int id, const char* path)
     });
 }
 
+// The Lua calls run on the emulator thread like every other command, so they are serialised with the other
+// threads' calls (the socket server's included) and the script touches the console only from its own thread.
 int mds_lua_run(int id, const char* source, int is_file)
 {
     Slot* s = Stopped(id);
     if (!s)
         return -1;
-    std::string error;
-    return s->Inst->Lua->Run(source, is_file != 0, error) ? 0 : Fail(error);
+    if (!source)
+        return Fail("no Lua source");
+    std::string src = source;
+    return OnEmu(s, [&](Instance& inst, std::string& error) {
+        return inst.Lua->Run(src, is_file != 0, error) ? 0 : -1;
+    });
 }
 
 int mds_lua_exec(int id, const char* code)
@@ -913,8 +959,12 @@ int mds_lua_exec(int id, const char* code)
     Slot* s = Stopped(id);
     if (!s)
         return -1;
-    std::string error;
-    return s->Inst->Lua->Exec(code, error) ? 0 : Fail(error);
+    if (!code)
+        return Fail("no Lua code");
+    std::string chunk = code;
+    return OnEmu(s, [&](Instance& inst, std::string& error) {
+        return inst.Lua->Exec(chunk, error) ? 0 : -1;
+    });
 }
 
 int mds_lua_stop(int id)
@@ -922,14 +972,16 @@ int mds_lua_stop(int id)
     Slot* s = Stopped(id);
     if (!s)
         return -1;
-    s->Inst->Lua->Stop();
-    return 0;
+    return OnEmu(s, [](Instance& inst, std::string&) {
+        inst.Lua->Stop();
+        return 0;
+    });
 }
 
 int mds_lua_output(int id, char* out, int max)
 {
     Slot* s = Find(id);
-    if (!s)
+    if (!s || !CountOk(max, "max"))
         return -1;
     s->LuaOutput += s->Inst->Lua->TakeOutput();
     int n = std::min<int>(max, s->LuaOutput.size());
@@ -951,7 +1003,7 @@ int mds_packets(int id, int enabled, int capacity)
 int mds_packets_take(int id, mds_packet* headers, uint8_t* data, int max_packets, int max_data)
 {
     Slot* s = Find(id);
-    if (!s)
+    if (!s || !CountOk(max_packets, "max_packets") || !CountOk(max_data, "max_data"))
         return -1;
     if (s->Packets.empty())
         s->Packets = s->Inst->DrainPackets();
@@ -1032,6 +1084,8 @@ int mds_save_path(int id, char* out, int max)
     Slot* s = Find(id);
     if (!s)
         return -1;
+    if (!out && max > 0)
+        return Fail("no buffer");
     const std::string& path = s->Inst->GetSavePath();
     if (max <= 0 || (int)path.size() >= max)
         return Fail("buffer too small");

@@ -41,6 +41,9 @@ struct Host
     std::function<bool(const std::function<void(melonDS::NDS&)>&)> Exec;
     std::function<void()> Wait;
     std::function<void()> Resume;
+    // If set and it returns a message, the debugger functions (memory hooks, call tracking, coverage, trace,
+    // last writer, pause, step) raise that message as a Lua error instead of doing nothing.
+    std::function<std::string()> DebugUnavailable;
 };
 
 void Register(lua_State* L, Host host);

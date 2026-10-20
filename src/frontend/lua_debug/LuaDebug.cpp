@@ -86,6 +86,17 @@ static void Exec(lua_State* L, const std::function<void(melonDS::NDS&)>& fn)
         luaL_error(L, "the emulator thread did not answer");
 }
 
+// Raise the host's "no debugger" error, if it has one.
+static void NeedDebugger(lua_State* L)
+{
+    Context* ctx = Ctx(L);
+    if (!ctx->H.DebugUnavailable)
+        return;
+    std::string why = ctx->H.DebugUnavailable();
+    if (!why.empty())
+        luaL_error(L, "%s", why.c_str());
+}
+
 static void Acquire(Context* ctx)
 {
     if (!ctx->H.Wait)
@@ -153,6 +164,7 @@ static bool CallHook(Context* ctx, int ref, const BreakEvent* ev)
 static int AddHook(lua_State* L, BreakKind kind)
 {
     luaL_checktype(L, 1, LUA_TFUNCTION);
+    NeedDebugger(L);
     u32 addr = (u32)luaL_checkinteger(L, 2);
     std::string name = luaL_optstring(L, 3, "");
     int cpu = CPUArg(L, 4, 0);
@@ -349,6 +361,7 @@ static int SetRegister(lua_State* L)
 
 static int CallStack(lua_State* L)
 {
+    NeedDebugger(L);
     int cpu = CPUArg(L, 1, 0);
     std::vector<CallFrame> stack;
     Exec(L, [&](melonDS::NDS& nds) { stack = nds.Debugger.GetCallStack(cpu); });
@@ -368,6 +381,7 @@ static int CallStack(lua_State* L)
 
 static int TrackCalls(lua_State* L)
 {
+    NeedDebugger(L);
     bool on = lua_toboolean(L, 1);
     Exec(L, [&](melonDS::NDS& nds) { nds.Debugger.SetCallTracking(on); });
     return 0;
@@ -375,6 +389,7 @@ static int TrackCalls(lua_State* L)
 
 static int CallCounts(lua_State* L)
 {
+    NeedDebugger(L);
     int cpu = CPUArg(L, 1, 0);
     std::unordered_map<u32, u64> counts;
     Exec(L, [&](melonDS::NDS& nds) { counts = nds.Debugger.DrainCallCounts(cpu); });
@@ -389,6 +404,7 @@ static int CallCounts(lua_State* L)
 
 static int Coverage(lua_State* L)
 {
+    NeedDebugger(L);
     bool on = lua_toboolean(L, 1);
     Exec(L, [&](melonDS::NDS& nds) { nds.Debugger.SetCoverage(on); });
     return 0;
@@ -396,6 +412,7 @@ static int Coverage(lua_State* L)
 
 static int DrainCoverage(lua_State* L)
 {
+    NeedDebugger(L);
     int cpu = CPUArg(L, 1, 0);
     std::vector<u32> addrs;
     Exec(L, [&](melonDS::NDS& nds) { addrs = nds.Debugger.DrainCoverage(cpu); });
@@ -410,6 +427,7 @@ static int DrainCoverage(lua_State* L)
 
 static int Trace(lua_State* L)
 {
+    NeedDebugger(L);
     u32 capacity = (u32)luaL_optinteger(L, 1, 65536);
     int cpu = CPUArg(L, 2, 0);
     u32 start = (u32)luaL_optinteger(L, 3, 0);
@@ -420,6 +438,7 @@ static int Trace(lua_State* L)
 
 static int DrainTrace(lua_State* L)
 {
+    NeedDebugger(L);
     std::vector<TraceEntry> entries;
     Exec(L, [&](melonDS::NDS& nds) { entries = nds.Debugger.DrainTrace(); });
     lua_createtable(L, entries.size(), 0);
@@ -437,6 +456,7 @@ static int DrainTrace(lua_State* L)
 
 static int TrackWriters(lua_State* L)
 {
+    NeedDebugger(L);
     bool on = lua_toboolean(L, 1);
     Exec(L, [&](melonDS::NDS& nds) { nds.Debugger.SetLastWriter(on); });
     return 0;
@@ -459,6 +479,7 @@ static int LastWriter(lua_State* L)
 
 static int Break(lua_State* L)
 {
+    NeedDebugger(L);
     int cpu = CPUArg(L, 1, 0);
     Exec(L, [&](melonDS::NDS& nds) { nds.Debugger.RequestBreak(1 << cpu); });
     return 0;
@@ -466,6 +487,7 @@ static int Break(lua_State* L)
 
 static int Step(lua_State* L)
 {
+    NeedDebugger(L);
     u32 count = (u32)luaL_optinteger(L, 1, 1);
     int cpu = CPUArg(L, 2, 0);
     Exec(L, [&](melonDS::NDS& nds) { nds.Debugger.Step(cpu, count); });

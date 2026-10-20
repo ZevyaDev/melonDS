@@ -94,6 +94,8 @@ P::ErrorCode MapError(const std::string& e)
 {
     if (Contains(e, "is running") || Contains(e, "needs an idle"))
         return P::ErrorCode::console_running;
+    if (Contains(e, "without the debugger"))
+        return P::ErrorCode::not_supported;
     if (e.rfind("no console", 0) == 0 || Contains(e, "shutting down"))
         return P::ErrorCode::no_console;
     if (e.rfind("input_queue_full", 0) == 0)
