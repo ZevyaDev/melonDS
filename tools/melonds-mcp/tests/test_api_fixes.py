@@ -375,7 +375,7 @@ class LastWriterQuery(ConsoleTest):
 
 class Features(unittest.TestCase):
     def test_version_and_features(self):
-        self.assertEqual(native.api_version(), 2)
+        self.assertGreaterEqual(native.api_version(), 2)
         for name in ("api_version", "debug_off_errors", "savestate_input", "mic_noise_emulated", "serve_host",
                      "gdb_host", "count_checks", "dma_break", "load_rom_idle", "lua_queue", "step_exact",
                      "lastwriter_query", "mds_serve_host", "mds_gdb_host", "mds_lastwriter_query", "mds_read"):

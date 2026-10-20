@@ -40,6 +40,10 @@ class MdsPacket(Structure):
     _fields_ = [("timestamp", c_uint64), ("sent", c_uint32), ("type", c_uint32), ("length", c_uint32)]
 
 
+class MdsCheat(Structure):
+    _fields_ = [("cheat", c_int32), ("enabled", c_int32), ("words", c_int32), ("name", c_char * 116)]
+
+
 class MdsTouchPoint(Structure):
     _fields_ = [("offset", c_uint32), ("x", c_uint16), ("y", c_uint16), ("down", c_uint8), ("pad", c_uint8 * 3)]
 
@@ -169,6 +173,15 @@ _SIGNATURES |= {
     "mds_gdb_host": (c_int, [c_int, c_char_p, c_int, c_int, c_int]),
     "mds_lastwriter_query": (c_int, [c_int, c_uint32, POINTER(c_uint32), POINTER(c_int)]),
 }
+# API level 3 (feature/cheats)
+_SIGNATURES |= {
+    "mds_cheat_add": (c_int, [c_int, c_char_p, c_char_p, c_int]),
+    "mds_cheat_remove": (c_int, [c_int, c_int]),
+    "mds_cheat_enable": (c_int, [c_int, c_int, c_int]),
+    "mds_cheat_clear": (c_int, [c_int]),
+    "mds_cheat_list": (c_int, [c_int, POINTER(MdsCheat), c_int]),
+    "mds_cheat_get": (c_int, [c_int, c_int, POINTER(c_char), c_int, POINTER(c_uint32), c_int]),
+}
 
 
 class _Lib:
@@ -250,7 +263,7 @@ def _mask(cpu):
 
 
 def api_version():
-    """The library's API level (mds_version): 1 up to the IPC merge, 2 from fix/api-quirks."""
+    """The library's API level (mds_version): 1 up to the IPC merge, 2 from fix/api-quirks, 3 from feature/cheats."""
     return lib().mds_version()
 
 
@@ -582,6 +595,45 @@ class Console:
         if w >= DMA_TAG:
             return ("dma", (w >> 1) & 3, 7 if w & 1 else 9)
         return (w & ~1, 7 if w & 1 else 9)
+
+    # Action Replay codes (API level 3, feature "cheats"; docs/headless-api.md, section 6a). The core's engine runs
+    # the enabled ones every frame. A state load or ROM load clears the list: re-add codes after loading.
+
+    def add_cheat(self, code, name="", enabled=True):
+        """Add an Action Replay code: text of "XXXXXXXX YYYYYYYY" lines, or a list of such lines. Returns its id.
+        A malformed code raises MelonError ("cheat: line N: ...") and adds nothing."""
+        if not isinstance(code, str):
+            code = "\n".join(code)
+        return _check(lib().mds_cheat_add(self.id, (name or "").encode(), code.encode(), int(enabled)))
+
+    def remove_cheat(self, cheat):
+        _check(lib().mds_cheat_remove(self.id, cheat))
+
+    def enable_cheat(self, cheat, enabled=True):
+        _check(lib().mds_cheat_enable(self.id, cheat, int(enabled)))
+
+    def clear_cheats(self):
+        """Remove every code; returns how many there were."""
+        return _check(lib().mds_cheat_clear(self.id))
+
+    def cheat(self, cheat):
+        """{"id", "name", "enabled", "words", "code"} of one code; "code" is its text, one line per word pair."""
+        for c in self.cheats():
+            if c["id"] == cheat:
+                return c
+        raise MelonError(f"no cheat {cheat}")
+
+    def cheats(self):
+        """Every code in list order, as cheat() describes it."""
+        entries = (MdsCheat * 1024)()
+        out = []
+        for e in entries[:_check(lib().mds_cheat_list(self.id, entries, 1024))]:
+            name, words = ctypes.create_string_buffer(4097), (c_uint32 * max(e.words, 1))()
+            n = _check(lib().mds_cheat_get(self.id, e.cheat, name, 4097, words, e.words))
+            w = list(words[:n])
+            out.append({"id": e.cheat, "name": name.value.decode(errors="replace"), "enabled": bool(e.enabled),
+                        "words": n, "code": "\n".join(f"{a:08X} {b:08X}" for a, b in zip(w[0::2], w[1::2]))})
+        return out
 
     def save_state(self, path):
         _check(lib().mds_savestate(self.id, _b(str(path))))
