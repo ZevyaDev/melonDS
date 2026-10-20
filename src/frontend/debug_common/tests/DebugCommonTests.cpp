@@ -225,6 +225,71 @@ static void WriteDsdProject(const TempDir& dir)
     dir.write("proj/rom/arm9_overlays/ov0.bin", image);
 }
 
+TEST(Labels)
+{
+    TempDir dir("labels");
+    WriteDsdProject(dir);
+    dir.write("my.labels",
+        "# address name [module]\n"
+        "02000100 renamed_main\n"
+        "0x02000450 new_fn\n"
+        "02000501 thumb_label main\n"
+        "02100010 ov1_named OV1\n"
+        "02100030 ov0_new ov0\n"
+        "02200000 nowhere\n"
+        "02000000 bad_module ov9\n"
+        "zz skipped\n"
+        "justone\n");
+    DebugSymbols syms;
+    std::string err;
+    CHECK(syms.load(dir.file("proj"), err));
+    std::string base = syms.source();
+    CHECK(syms.loadLabels(dir.file("my.labels"), err));
+    CHECK_EQ(syms.labelCount(), 7);
+    CHECK_EQ(syms.labelsUnmatched(), 2);
+    CHECK_EQ(syms.labelsSource(), dir.file("my.labels"));
+    CHECK_EQ(syms.source(), base);
+
+    u32 a = 0;
+    // a label renames the symbol at its address; the old name still resolves
+    CHECK_EQ(syms.exact(0x02000100), std::string("renamed_main"));
+    CHECK(syms.resolve("renamed_main", a) && a == 0x02000100);
+    CHECK(syms.resolve("main_func", a) && a == 0x02000100);
+    // or adds a symbol where there was none
+    CHECK(syms.resolve("new_fn", a) && a == 0x02000450);
+    CHECK(syms.lookup(0x02000450) && syms.lookup(0x02000450)->Kind == "label");
+    // the Thumb bit is dropped from the address and the existing symbol renamed
+    CHECK_EQ(syms.exact(0x02000500), std::string("thumb_label"));
+    // module names match case-insensitively; overlay labels show only while loaded
+    CHECK(syms.lookup(0x02100010) == nullptr);
+    syms.setLoaded({1});
+    CHECK_EQ(syms.exact(0x02100010), std::string("ov1_named"));
+    syms.setLoaded({0});
+    CHECK_EQ(syms.exact(0x02100010), std::string("ov0_fn"));
+    CHECK_EQ(syms.exact(0x02100030), std::string("ov0_new"));
+    syms.setLoaded({});
+
+    syms.clearLabels();
+    CHECK(syms.labelsSource().empty());
+    CHECK_EQ(syms.exact(0x02000100), std::string("main_func"));
+    CHECK(!syms.resolve("renamed_main", a));
+    CHECK(!syms.resolve("new_fn", a));
+
+    // labels without symbols form their own module
+    DebugSymbols only;
+    dir.write("only.labels", "02000000 entry\n02000010 other ov0\n");
+    CHECK(only.loadLabels(dir.file("only.labels"), err));
+    CHECK(!only.empty());
+    CHECK_EQ(only.labelsUnmatched(), 1);
+    CHECK(only.resolve("entry", a) && a == 0x02000000);
+
+    CHECK(!syms.loadLabels(dir.file("missing.labels"), err));
+    CHECK_EQ(err, "cannot read " + dir.file("missing.labels"));
+    dir.write("empty.labels", "# none\n");
+    CHECK(!syms.loadLabels(dir.file("empty.labels"), err));
+    CHECK_EQ(err, "no labels in " + dir.file("empty.labels"));
+}
+
 TEST(DsdProject)
 {
     TempDir dir("dsd");
