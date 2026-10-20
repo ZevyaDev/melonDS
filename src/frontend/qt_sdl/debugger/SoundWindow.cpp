@@ -31,7 +31,7 @@
 #include <QVBoxLayout>
 
 #include "SoundWindow.h"
-#include "DebugSymbols.h"
+#include "DebugSymbolsQt.h"
 #include "Savestate.h"
 #include "SPU.h"
 
@@ -310,7 +310,7 @@ static int LevelOf(const SoundChannelState& ch)
 
 static QString AddressText(DebugSymbols& syms, u32 addr)
 {
-    QString name = syms.describe(addr);
+    QString name = SymStr(syms.describe(addr));
     return Hex(addr) + (name.isEmpty() ? "" : "  " + name);
 }
 

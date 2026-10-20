@@ -16,40 +16,25 @@
     with melonDS. If not, see http://www.gnu.org/licenses/.
 */
 
-#ifndef DISASSEMBLER_H
-#define DISASSEMBLER_H
+#ifndef DEBUGSYMBOLSQT_H
+#define DEBUGSYMBOLSQT_H
 
 #include <QString>
 
-#include "types.h"
+#include <string>
 
-struct DisasmLine
+#include "DebugSymbols.h"
+#include "Disassembler.h"
+
+// The shared debug library is Qt-free and speaks UTF-8 std::string; these convert at the Qt boundary.
+inline QString SymStr(const std::string& s)
 {
-    melonDS::u32 Addr;
-    melonDS::u32 Opcode;
-    melonDS::u8 Size;
-    QString Mnemonic;
-    QString Operands;
-    melonDS::u32 Target;
-    bool HasTarget;
-    bool IsCall;
-    bool IsLiteral;
-};
+    return QString::fromUtf8(s.data(), (int)s.size());
+}
 
-class Disassembler
+inline std::string SymStr(const QString& s)
 {
-public:
-    Disassembler();
-    ~Disassembler();
-    Disassembler(const Disassembler&) = delete;
-    Disassembler& operator=(const Disassembler&) = delete;
-
-    DisasmLine decode(melonDS::u32 addr, const melonDS::u8* bytes, int avail, bool thumb);
-    static bool available();
-
-private:
-    void* Arm = nullptr;
-    void* Thumb = nullptr;
-};
+    return s.toUtf8().toStdString();
+}
 
 #endif

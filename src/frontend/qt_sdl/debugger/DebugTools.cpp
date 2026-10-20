@@ -41,7 +41,7 @@
 #include "Gfx2DWindows.h"
 #include "Gfx3DWindow.h"
 #include "SoundWindow.h"
-#include "DebugSymbols.h"
+#include "DebugSymbolsQt.h"
 #include "EmuInstance.h"
 #include "Config.h"
 #include "NDSCart.h"
@@ -268,10 +268,10 @@ void autoLoadSymbols(DebugBridge* bridge)
         return;
     Config::Table& cfg = bridge->instance()->getGlobalConfig();
     QString path = QString::fromStdString(cfg.GetString("Debugger.Symbols." + code.toStdString()));
-    if (path.isEmpty() || path == bridge->symbols().source())
+    if (path.isEmpty() || path == SymStr(bridge->symbols().source()))
         return;
-    QString error;
-    if (bridge->symbols().load(path, error))
+    std::string error;
+    if (bridge->symbols().load(SymStr(path), error))
         emit bridge->symbolsChanged();
 }
 

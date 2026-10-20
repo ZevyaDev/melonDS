@@ -19,11 +19,11 @@
 #ifndef DEBUGSYMBOLS_H
 #define DEBUGSYMBOLS_H
 
-#include <QByteArray>
-#include <QHash>
-#include <QString>
-
+#include <functional>
 #include <memory>
+#include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "types.h"
@@ -33,6 +33,8 @@ namespace melonDS
 class NDS;
 }
 
+// A per-console symbol table. All strings are UTF-8. There is no global state:
+// each owner (Qt DebugBridge, headless Instance) holds its own instance.
 class DebugSymbols
 {
 public:
@@ -40,20 +42,20 @@ public:
     {
         melonDS::u32 Addr;
         melonDS::u32 Size;
-        QString Name;
-        QString Pretty;
-        QString Kind;
+        std::string Name;
+        std::string Pretty;
+        std::string Kind;
         int Module;
         bool Thumb;
     };
 
     struct Module
     {
-        QString Name;
+        std::string Name;
         int Overlay = -1;
         melonDS::u32 Base = 0;
         melonDS::u32 Size = 0;
-        QByteArray Image;
+        std::vector<melonDS::u8> Image;
         std::vector<Symbol> Symbols;
 
         const Symbol* find(melonDS::u32 addr) const;
@@ -62,33 +64,36 @@ public:
 
     struct Set
     {
-        QString Source;
+        std::string Source;
         std::vector<Module> Modules;
-        QMultiHash<QString, std::pair<int, int>> ByName;
+        // name -> (module, symbol index), in insertion order
+        std::unordered_map<std::string, std::vector<std::pair<int, int>>> ByName;
         int SymbolCount = 0;
     };
 
-    bool load(const QString& path, QString& error);
+    bool load(const std::string& path, std::string& error);
     void clear();
     bool empty() const { return !Cur || Cur->Modules.empty(); }
-    QString source() const { return Cur ? Cur->Source : QString(); }
+    std::string source() const { return Cur ? Cur->Source : std::string(); }
     std::shared_ptr<const Set> set() const { return Cur; }
 
+    // Which overlays of the set are currently resident, judged by sampling memory through peek.
+    static std::vector<int> detect(const Set& set, const std::function<melonDS::u32(melonDS::u32)>& peek);
     static std::vector<int> detect(const Set& set, melonDS::NDS& nds);
     void setLoaded(const std::vector<int>& overlays) { Loaded = overlays; }
     const std::vector<int>& loaded() const { return Loaded; }
 
     void setDemangle(bool on) { Demangle = on; }
     bool demangle() const { return Demangle; }
-    const QString& name(const Symbol& sym) const { return Demangle ? sym.Pretty : sym.Name; }
+    const std::string& name(const Symbol& sym) const { return Demangle ? sym.Pretty : sym.Name; }
 
     const Symbol* lookup(melonDS::u32 addr) const;
     const Module* moduleOf(const Symbol* sym) const;
-    QString describe(melonDS::u32 addr, bool withModule = true) const;
-    QString exact(melonDS::u32 addr) const;
-    bool resolve(const QString& name, melonDS::u32& out) const;
-    std::vector<const Symbol*> search(const QString& text, int limit) const;
-    bool parseAddress(const QString& text, melonDS::u32& out) const;
+    std::string describe(melonDS::u32 addr, bool withModule = true) const;
+    std::string exact(melonDS::u32 addr) const;
+    bool resolve(const std::string& name, melonDS::u32& out) const;
+    std::vector<const Symbol*> search(const std::string& text, int limit) const;
+    bool parseAddress(const std::string& text, melonDS::u32& out) const;
 
 private:
     std::shared_ptr<const Set> Cur;

@@ -17,11 +17,13 @@
 */
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
-
-#include <QDir>
-#include <QFile>
-#include <QFileInfo>
 
 #include "DebugSymbols.h"
 #include "NDS.h"
@@ -33,24 +35,132 @@
 
 using namespace melonDS;
 
+namespace fs = std::filesystem;
+
 namespace
 {
 
-QString DemangleName(const QString& name)
+std::string DemangleName(const std::string& name)
 {
 #ifdef HAVE_CXXABI
-    if (!name.startsWith("_Z"))
+    if (name.compare(0, 2, "_Z") != 0)
         return name;
     int status = 0;
-    char* out = abi::__cxa_demangle(name.toLatin1().constData(), nullptr, nullptr, &status);
+    char* out = abi::__cxa_demangle(name.c_str(), nullptr, nullptr, &status);
     if (status != 0 || !out)
         return name;
-    QString pretty = QString::fromLatin1(out);
+    std::string pretty = out;
     free(out);
     return pretty;
 #else
     return name;
 #endif
+}
+
+bool ReadFile(const std::string& path, std::string& out)
+{
+    std::ifstream f(fs::u8path(path), std::ios::binary);
+    if (!f)
+        return false;
+    out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    return true;
+}
+
+std::vector<std::string> SplitLines(const std::string& data)
+{
+    std::vector<std::string> out;
+    size_t start = 0;
+    while (true)
+    {
+        size_t nl = data.find('\n', start);
+        if (nl == std::string::npos)
+        {
+            out.push_back(data.substr(start));
+            break;
+        }
+        out.push_back(data.substr(start, nl - start));
+        start = nl + 1;
+    }
+    return out;
+}
+
+// Directory part of a path, '/'-separated; empty for a bare file name
+std::string DirName(const std::string& path)
+{
+    size_t slash = path.find_last_of("/\\");
+    return slash == std::string::npos ? std::string() : path.substr(0, slash);
+}
+
+bool IsAbsolute(const std::string& path)
+{
+    return fs::u8path(path).is_absolute();
+}
+
+std::string JoinPath(const std::string& dir, const std::string& rel)
+{
+    if (dir.empty() || IsAbsolute(rel))
+        return rel;
+    if (dir.back() == '/' || dir.back() == '\\')
+        return dir + rel;
+    return dir + "/" + rel;
+}
+
+// Text after the last '.' of the file name, and before the first '.'
+std::string Suffix(const std::string& path)
+{
+    std::string name = fs::u8path(path).filename().u8string();
+    size_t dot = name.rfind('.');
+    return dot == std::string::npos ? std::string() : name.substr(dot + 1);
+}
+
+std::string BaseName(const std::string& path)
+{
+    std::string name = fs::u8path(path).filename().u8string();
+    size_t dot = name.find('.');
+    return dot == std::string::npos ? name : name.substr(0, dot);
+}
+
+// Whole-string unsigned number, rejecting signs, spaces and overflow past 32 bits
+bool ToU32(const std::string& s, int base, u32& out)
+{
+    if (s.empty() || !isalnum((unsigned char)s[0]))
+        return false;
+    char* end = nullptr;
+    unsigned long long v = strtoull(s.c_str(), &end, base);
+    if (*end || v > 0xFFFFFFFFull)
+        return false;
+    out = (u32)v;
+    return true;
+}
+
+std::string Lower(std::string s)
+{
+    for (char& c : s)
+        c = (char)tolower((unsigned char)c);
+    return s;
+}
+
+bool IsSpace(char c)
+{
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\v' || c == '\f';
+}
+
+std::string Simplify(const std::string& s)
+{
+    std::string out;
+    for (char c : s)
+    {
+        if (IsSpace(c))
+        {
+            if (!out.empty() && out.back() != ' ')
+                out += ' ';
+        }
+        else
+            out += c;
+    }
+    if (!out.empty() && out.back() == ' ')
+        out.pop_back();
+    return out;
 }
 
 constexpr int SampleWindows = 8;
@@ -217,15 +327,14 @@ YNode ParseBlock(std::vector<YLine>& lines, size_t& i, int indent)
     return ParseMap(lines, i, indent);
 }
 
-bool ParseYAML(const QString& path, YNode& out)
+bool ParseYAML(const std::string& path, YNode& out)
 {
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly))
+    std::string data;
+    if (!ReadFile(path, data))
         return false;
     std::vector<YLine> lines;
-    for (const QByteArray& raw : f.readAll().split('\n'))
+    for (const std::string& s : SplitLines(data))
     {
-        std::string s = raw.toStdString();
         std::string t = Trim(s);
         if (t.empty() || t[0] == '#' || t == "---")
             continue;
@@ -253,14 +362,14 @@ u32 ParseNumber(const std::string& s, bool& ok)
     }
 }
 
-void ParseDsdSymbols(const QString& path, int module, std::vector<DebugSymbols::Symbol>& out)
+void ParseDsdSymbols(const std::string& path, int module, std::vector<DebugSymbols::Symbol>& out)
 {
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly))
+    std::string data;
+    if (!ReadFile(path, data))
         return;
-    for (const QByteArray& raw : f.readAll().split('\n'))
+    for (const std::string& raw : SplitLines(data))
     {
-        std::string line = Trim(raw.toStdString());
+        std::string line = Trim(raw);
         size_t sp = line.find_first_of(" \t");
         if (sp == std::string::npos)
             continue;
@@ -269,12 +378,12 @@ void ParseDsdSymbols(const QString& path, int module, std::vector<DebugSymbols::
         if (kindPos == std::string::npos || addrPos == std::string::npos)
             continue;
         DebugSymbols::Symbol sym {};
-        sym.Name = QString::fromStdString(line.substr(0, sp));
+        sym.Name = line.substr(0, sp);
         sym.Module = module;
         size_t kindEnd = kindPos + 5;
         while (kindEnd < line.size() && (isalnum((unsigned char)line[kindEnd]) || line[kindEnd] == '_'))
             kindEnd++;
-        sym.Kind = QString::fromStdString(line.substr(kindPos + 5, kindEnd - kindPos - 5));
+        sym.Kind = line.substr(kindPos + 5, kindEnd - kindPos - 5);
         if (kindEnd < line.size() && line[kindEnd] == '(')
         {
             size_t close = line.find(')', kindEnd);
@@ -336,14 +445,13 @@ const DebugSymbols::Symbol* DebugSymbols::Module::find(u32 addr) const
     return nullptr;
 }
 
-bool DebugSymbols::load(const QString& rawPath, QString& error)
+bool DebugSymbols::load(const std::string& rawPath, std::string& error)
 {
-    QString path = rawPath;
-    QFileInfo info(path);
-    if (info.isDir())
-        path = QDir(path).filePath("config.yaml");
-    info = QFileInfo(path);
-    if (!info.exists())
+    std::string path = rawPath;
+    std::error_code ec;
+    if (fs::is_directory(fs::u8path(path), ec))
+        path = JoinPath(path, "config.yaml");
+    if (!fs::exists(fs::u8path(path), ec))
     {
         error = "not found: " + path;
         return false;
@@ -352,7 +460,8 @@ bool DebugSymbols::load(const QString& rawPath, QString& error)
     auto set = std::make_shared<Set>();
     set->Source = path;
 
-    if (info.suffix() == "yaml" || info.suffix() == "yml")
+    std::string suffix = Suffix(path);
+    if (suffix == "yaml" || suffix == "yml")
     {
         YNode cfg;
         if (!ParseYAML(path, cfg))
@@ -360,12 +469,12 @@ bool DebugSymbols::load(const QString& rawPath, QString& error)
             error = "cannot read " + path;
             return false;
         }
-        QDir root = info.dir();
-        auto add = [&](const QString& name, int overlay, const std::string& symbols) {
+        std::string root = DirName(path);
+        auto add = [&](const std::string& name, int overlay, const std::string& symbols) {
             Module mod;
             mod.Name = name;
             mod.Overlay = overlay;
-            ParseDsdSymbols(root.filePath(QString::fromStdString(symbols)), (int)set->Modules.size(), mod.Symbols);
+            ParseDsdSymbols(JoinPath(root, symbols), (int)set->Modules.size(), mod.Symbols);
             set->Modules.push_back(std::move(mod));
         };
         const YNode* main = cfg.get("main_module");
@@ -377,62 +486,69 @@ bool DebugSymbols::load(const QString& rawPath, QString& error)
         add("main", -1, main->str("symbols"));
         if (const YNode* autoloads = cfg.get("autoloads"))
             for (const YNode& a : autoloads->List)
-                add(QString::fromStdString(a.str("name")), -1, a.str("symbols"));
+                add(a.str("name"), -1, a.str("symbols"));
 
-        QHash<int, std::pair<YNode, QString>> table;
+        std::unordered_map<int, std::pair<YNode, std::string>> table;
         std::string romCfg = cfg.str("rom_config");
         if (!romCfg.empty())
         {
-            QDir romDir = QFileInfo(root.filePath(QString::fromStdString(romCfg))).dir();
-            QString tablePath = romDir.filePath("arm9_overlays/overlays.yaml");
+            std::string romDir = DirName(JoinPath(root, romCfg));
+            std::string tablePath = JoinPath(romDir, "arm9_overlays/overlays.yaml");
             YNode ovTable;
             if (ParseYAML(tablePath, ovTable))
                 if (const YNode* list = ovTable.get("overlays"))
                     for (const YNode& ov : list->List)
-                        table.insert((int)ov.num("id"), {ov, romDir.filePath("arm9_overlays/" + QString::fromStdString(ov.str("file_name")))});
+                        table.insert_or_assign((int)ov.num("id"), std::make_pair(ov, JoinPath(romDir, "arm9_overlays/" + ov.str("file_name"))));
         }
         if (const YNode* overlays = cfg.get("overlays"))
             for (const YNode& ov : overlays->List)
             {
                 int id = (int)ov.num("id");
-                add(QString::fromStdString(ov.str("name")), id, ov.str("symbols"));
+                add(ov.str("name"), id, ov.str("symbols"));
                 Module& mod = set->Modules.back();
                 auto it = table.find(id);
                 if (it != table.end())
                 {
-                    mod.Base = it->first.num("base_address");
-                    mod.Size = it->first.num("code_size") + it->first.num("bss_size");
-                    QFile image(it->second);
-                    if (image.open(QIODevice::ReadOnly))
-                        mod.Image = image.readAll();
+                    mod.Base = it->second.first.num("base_address");
+                    mod.Size = it->second.first.num("code_size") + it->second.first.num("bss_size");
+                    std::string image;
+                    if (ReadFile(it->second.second, image))
+                        mod.Image.assign(image.begin(), image.end());
                 }
             }
     }
     else
     {
-        QFile f(path);
-        if (!f.open(QIODevice::ReadOnly))
+        std::string data;
+        if (!ReadFile(path, data))
         {
             error = "cannot read " + path;
             return false;
         }
         Module mod;
-        mod.Name = info.baseName();
-        for (const QByteArray& raw : f.readAll().split('\n'))
+        mod.Name = BaseName(path);
+        for (const std::string& raw : SplitLines(data))
         {
-            QList<QByteArray> parts = raw.simplified().split(' ');
-            if (parts.size() < 2)
+            std::string line = Simplify(raw);
+            size_t sp1 = line.find(' ');
+            if (sp1 == std::string::npos)
                 continue;
-            bool ok;
-            u32 addr = parts[0].toUInt(&ok, 16);
-            if (!ok)
+            u32 addr;
+            if (!ToU32(line.substr(0, sp1), 16, addr))
                 continue;
+            size_t sp2 = line.find(' ', sp1 + 1);
             Symbol sym {};
             sym.Addr = addr & ~1u;
             sym.Thumb = addr & 1;
-            sym.Name = QString::fromUtf8(parts[1]);
+            sym.Name = line.substr(sp1 + 1, sp2 == std::string::npos ? std::string::npos : sp2 - sp1 - 1);
             sym.Kind = "function";
-            sym.Size = parts.size() > 2 ? parts[2].toUInt(nullptr, 0) : 0;
+            if (sp2 != std::string::npos)
+            {
+                size_t sp3 = line.find(' ', sp2 + 1);
+                u32 size = 0;
+                if (ToU32(line.substr(sp2 + 1, sp3 == std::string::npos ? std::string::npos : sp3 - sp2 - 1), 0, size))
+                    sym.Size = size;
+            }
             mod.Symbols.push_back(std::move(sym));
         }
         set->Modules.push_back(std::move(mod));
@@ -446,13 +562,13 @@ bool DebugSymbols::load(const QString& rawPath, QString& error)
         {
             Symbol& sym = mod.Symbols[s];
             sym.Pretty = DemangleName(sym.Name);
-            set->ByName.insert(sym.Name, {m, s});
+            set->ByName[sym.Name].push_back({m, s});
             if (sym.Pretty != sym.Name)
             {
-                set->ByName.insert(sym.Pretty, {m, s});
-                int paren = sym.Pretty.indexOf('(');
-                if (paren > 0)
-                    set->ByName.insert(sym.Pretty.left(paren), {m, s});
+                set->ByName[sym.Pretty].push_back({m, s});
+                size_t paren = sym.Pretty.find('(');
+                if (paren != std::string::npos && paren > 0)
+                    set->ByName[sym.Pretty.substr(0, paren)].push_back({m, s});
             }
         }
         set->SymbolCount += (int)mod.Symbols.size();
@@ -473,12 +589,12 @@ void DebugSymbols::clear()
     Loaded.clear();
 }
 
-std::vector<int> DebugSymbols::detect(const Set& set, NDS& nds)
+std::vector<int> DebugSymbols::detect(const Set& set, const std::function<u32(u32)>& peek)
 {
     std::vector<int> out;
     for (const Module& mod : set.Modules)
     {
-        if (mod.Overlay < 0 || mod.Image.isEmpty())
+        if (mod.Overlay < 0 || mod.Image.empty())
             continue;
         u32 code = std::min<u32>(mod.Image.size(), mod.Size);
         int hits = 0;
@@ -489,8 +605,8 @@ std::vector<int> DebugSymbols::detect(const Set& set, NDS& nds)
             for (u32 b = 0; b < SampleBytes && off + b + 4 <= (u32)mod.Image.size(); b += 4)
             {
                 u32 want;
-                memcpy(&want, mod.Image.constData() + off + b, 4);
-                if (nds.Debugger.Peek(0, mod.Base + off + b, 4) != want)
+                memcpy(&want, mod.Image.data() + off + b, 4);
+                if (peek(mod.Base + off + b) != want)
                 {
                     same = false;
                     break;
@@ -502,6 +618,11 @@ std::vector<int> DebugSymbols::detect(const Set& set, NDS& nds)
             out.push_back(mod.Overlay);
     }
     return out;
+}
+
+std::vector<int> DebugSymbols::detect(const Set& set, NDS& nds)
+{
+    return detect(set, [&nds](u32 addr) -> u32 { return nds.Debugger.Peek(0, addr, 4); });
 }
 
 const DebugSymbols::Symbol* DebugSymbols::lookup(u32 addr) const
@@ -527,55 +648,64 @@ const DebugSymbols::Module* DebugSymbols::moduleOf(const Symbol* sym) const
     return &Cur->Modules[sym->Module];
 }
 
-QString DebugSymbols::describe(u32 addr, bool withModule) const
+std::string DebugSymbols::describe(u32 addr, bool withModule) const
 {
     const Symbol* s = lookup(addr);
     if (!s)
-        return QString();
+        return std::string();
     u32 off = (addr & ~1u) - s->Addr;
-    QString out = off ? QString("%1+0x%2").arg(name(*s)).arg(off, 0, 16) : name(*s);
+    std::string out = name(*s);
+    if (off)
+    {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "+0x%x", off);
+        out += buf;
+    }
     const Module* mod = moduleOf(s);
     if (withModule && mod && mod->Overlay >= 0)
         out += " [" + mod->Name + "]";
     return out;
 }
 
-QString DebugSymbols::exact(u32 addr) const
+std::string DebugSymbols::exact(u32 addr) const
 {
     const Symbol* s = lookup(addr);
     if (s && s->Addr == (addr & ~1u))
         return name(*s);
-    return QString();
+    return std::string();
 }
 
-bool DebugSymbols::resolve(const QString& name, u32& out) const
+bool DebugSymbols::resolve(const std::string& name, u32& out) const
 {
     if (!Cur)
         return false;
-    QList<std::pair<int, int>> hits = Cur->ByName.values(name);
-    if (hits.isEmpty())
+    auto found = Cur->ByName.find(name);
+    if (found == Cur->ByName.end() || found->second.empty())
         return false;
-    for (auto& [m, s] : hits)
+    const auto& hits = found->second;
+    // most recently added first, as the old QMultiHash::values order
+    for (auto it = hits.rbegin(); it != hits.rend(); ++it)
     {
-        const Module& mod = Cur->Modules[m];
+        const Module& mod = Cur->Modules[it->first];
         if (mod.Overlay < 0 || std::find(Loaded.begin(), Loaded.end(), mod.Overlay) != Loaded.end())
         {
-            out = mod.Symbols[s].Addr;
+            out = mod.Symbols[it->second].Addr;
             return true;
         }
     }
-    out = Cur->Modules[hits.front().first].Symbols[hits.front().second].Addr;
+    out = Cur->Modules[hits.back().first].Symbols[hits.back().second].Addr;
     return true;
 }
 
-std::vector<const DebugSymbols::Symbol*> DebugSymbols::search(const QString& text, int limit) const
+std::vector<const DebugSymbols::Symbol*> DebugSymbols::search(const std::string& text, int limit) const
 {
     std::vector<const Symbol*> out;
     if (!Cur)
         return out;
+    std::string needle = Lower(text);
     for (const Module& mod : Cur->Modules)
         for (const Symbol& s : mod.Symbols)
-            if (s.Name.contains(text, Qt::CaseInsensitive) || s.Pretty.contains(text, Qt::CaseInsensitive))
+            if (Lower(s.Name).find(needle) != std::string::npos || Lower(s.Pretty).find(needle) != std::string::npos)
             {
                 out.push_back(&s);
                 if ((int)out.size() >= limit)
@@ -584,20 +714,30 @@ std::vector<const DebugSymbols::Symbol*> DebugSymbols::search(const QString& tex
     return out;
 }
 
-bool DebugSymbols::parseAddress(const QString& raw, u32& out) const
+bool DebugSymbols::parseAddress(const std::string& raw, u32& out) const
 {
-    QString text = raw.trimmed();
-    if (text.isEmpty())
+    auto trimmed = [](const std::string& s) {
+        size_t a = 0, b = s.size();
+        while (a < b && IsSpace(s[a]))
+            a++;
+        while (b > a && IsSpace(s[b - 1]))
+            b--;
+        return s.substr(a, b - a);
+    };
+    auto stripHex = [](const std::string& s) {
+        return (s.size() >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) ? s.substr(2) : s;
+    };
+
+    std::string text = trimmed(raw);
+    if (text.empty())
         return false;
-    int plus = text.lastIndexOf('+');
+    size_t plus = text.rfind('+');
     u32 offset = 0;
-    if (plus > 0)
+    if (plus != std::string::npos && plus > 0)
     {
-        bool ok;
-        QString off = text.mid(plus + 1).trimmed();
-        offset = off.startsWith("0x", Qt::CaseInsensitive) ? off.mid(2).toUInt(&ok, 16) : off.toUInt(&ok, 16);
-        if (ok)
-            text = text.left(plus).trimmed();
+        std::string off = trimmed(text.substr(plus + 1));
+        if (ToU32(stripHex(off), 16, offset))
+            text = trimmed(text.substr(0, plus));
         else
             offset = 0;
     }
@@ -606,8 +746,8 @@ bool DebugSymbols::parseAddress(const QString& raw, u32& out) const
         out += offset;
         return true;
     }
-    QString hex = text.startsWith("0x", Qt::CaseInsensitive) ? text.mid(2) : text;
-    bool ok;
-    out = hex.toUInt(&ok, 16) + offset;
+    u32 value;
+    bool ok = ToU32(stripHex(text), 16, value);
+    out = (ok ? value : 0) + offset;
     return ok;
 }

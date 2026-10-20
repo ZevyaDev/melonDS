@@ -25,7 +25,7 @@
 #include <QWheelEvent>
 
 #include "DisasmView.h"
-#include "DebugSymbols.h"
+#include "DebugSymbolsQt.h"
 #include "DebugTool.h"
 
 using namespace melonDS;
@@ -219,7 +219,7 @@ DisasmLine DisasmView::decodeAt(u32 a, const QSet<u32>& pool)
         if (avail >= 4)
         {
             memcpy(&line.Opcode, ptr, 4);
-            line.Operands = "0x" + Hex(line.Opcode);
+            line.Operands = SymStr("0x" + Hex(line.Opcode));
         }
         else
             line.Operands = "??";
@@ -264,11 +264,11 @@ QString DisasmView::operands(const DisasmLine& line) const
 {
     if (line.HasTarget && !line.IsLiteral)
     {
-        QString name = Bridge->symbols().describe(line.Target, false);
+        QString name = SymStr(Bridge->symbols().describe(line.Target, false));
         if (!name.isEmpty())
             return name;
     }
-    return line.Operands;
+    return SymStr(line.Operands);
 }
 
 QString DisasmView::comment(const DisasmLine& line) const
@@ -280,17 +280,17 @@ QString DisasmView::comment(const DisasmLine& line) const
         u32 v = readBuf(line.Target, 4, ok);
         if (!ok)
             return QString();
-        QString name = syms.describe(v);
+        QString name = SymStr(syms.describe(v));
         return "=0x" + Hex(v) + (name.isEmpty() ? QString() : " " + name);
     }
     if (line.HasTarget)
     {
-        QString name = syms.describe(line.Target, false);
+        QString name = SymStr(syms.describe(line.Target, false));
         return name.isEmpty() ? QString() : Hex(line.Target);
     }
     if (line.Mnemonic == ".word")
     {
-        QString name = syms.describe(line.Opcode);
+        QString name = SymStr(syms.describe(line.Opcode));
         return name;
     }
     return QString();
@@ -326,10 +326,10 @@ void DisasmView::paintEvent(QPaintEvent*)
         {
             p.setPen(labelColor);
             const DebugSymbols::Symbol* sym = Bridge->symbols().lookup(row.Addr);
-            QString text = sym ? Bridge->symbols().name(*sym) + (row.Continued ? QString(":  (continued from %1)").arg(Hex(sym->Addr)) : ":") : QString();
+            QString text = sym ? SymStr(Bridge->symbols().name(*sym)) + (row.Continued ? QString(":  (continued from %1)").arg(Hex(sym->Addr)) : ":") : QString();
             const DebugSymbols::Module* mod = Bridge->symbols().moduleOf(sym);
             if (mod && mod->Overlay >= 0)
-                text += "    [" + mod->Name + "]";
+                text += "    [" + SymStr(mod->Name) + "]";
             p.drawText(xAddr, y + fm.ascent(), text);
             continue;
         }
@@ -371,7 +371,7 @@ void DisasmView::paintEvent(QPaintEvent*)
         p.drawText(xAddr, y + fm.ascent(), Hex(row.Addr));
         p.drawText(xOp, y + fm.ascent(), l.Size == 2 ? Hex(l.Opcode, 4) : Hex(l.Opcode));
         p.setPen(pal.text().color());
-        p.drawText(xMn, y + fm.ascent(), l.Mnemonic);
+        p.drawText(xMn, y + fm.ascent(), SymStr(l.Mnemonic));
         QString args = operands(l);
         p.drawText(xArgs, y + fm.ascent(), args);
         QString c = comment(l);
@@ -517,7 +517,7 @@ void DisasmView::contextMenuEvent(QContextMenuEvent* event)
     menu.addAction("Copy address", this, [addr] { QApplication::clipboard()->setText(Hex(addr)); });
     if (line)
     {
-        QString text = Hex(addr) + "  " + line->Mnemonic + " " + operands(*line);
+        QString text = Hex(addr) + "  " + SymStr(line->Mnemonic) + " " + operands(*line);
         menu.addAction("Copy line", this, [text] { QApplication::clipboard()->setText(text); });
     }
     menu.addSeparator();

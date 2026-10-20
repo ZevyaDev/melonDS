@@ -58,7 +58,7 @@
 #include <QVBoxLayout>
 
 #include "RamSearchWindow.h"
-#include "DebugSymbols.h"
+#include "DebugSymbolsQt.h"
 #include "DebugTools.h"
 #include "EmuInstance.h"
 #include "Config.h"
@@ -419,7 +419,7 @@ static QString CheatName(DebugBridge* bridge, u32 addr, const QString& notes)
 {
     if (!notes.trimmed().isEmpty())
         return notes.trimmed();
-    QString symbol = bridge->symbols().describe(addr);
+    QString symbol = SymStr(bridge->symbols().describe(addr));
     return symbol.isEmpty() ? "RAM " + Hex(addr) : symbol;
 }
 
@@ -453,7 +453,7 @@ static bool EditCheat(DebugBridge* bridge, QWidget* parent, CheatDraft& draft, b
         next.Size = 1 << size->currentIndex();
         QString error;
         bool ok = false;
-        if (!bridge->symbols().parseAddress(addr->text(), next.Addr))
+        if (!bridge->symbols().parseAddress(SymStr(addr->text()), next.Addr))
             error = "Enter an address or symbol";
         else if (!ParseCheatValue(value->text(), next.Size, next.Value))
             error = "Enter a value that fits the size";
@@ -593,7 +593,7 @@ public:
         switch (column)
         {
         case SearchColumn::Address: return Hex(address(row));
-        case SearchColumn::Symbol: return Bridge->symbols().describe(address(row));
+        case SearchColumn::Symbol: return SymStr(Bridge->symbols().describe(address(row)));
         case SearchColumn::Value: return FormatValue(current, Size, Type);
         case SearchColumn::Previous: return FormatValue(previous, Size, Type);
         case SearchColumn::Changes: return changesAt(row);
@@ -1023,7 +1023,7 @@ bool RamSearchWindow::readFilter(SearchFilter& filter, u32& reference)
         }
         break;
     case CompareTarget::Address:
-        if (!Bridge->symbols().parseAddress(Operand->text(), reference))
+        if (!Bridge->symbols().parseAddress(SymStr(Operand->text()), reference))
         {
             Info->setText("Enter an address or symbol to compare to");
             return false;
@@ -1430,7 +1430,7 @@ void RamWatchWindow::resolve(Watch& w)
     }
     u32 old = w.Addr;
     bool wasValid = w.Valid;
-    w.Valid = Bridge->symbols().parseAddress(w.Expr, w.Addr);
+    w.Valid = Bridge->symbols().parseAddress(SymStr(w.Expr), w.Addr);
     if (!w.Valid || !wasValid || w.Addr != old)
         w.Known = false;
 }
@@ -1505,7 +1505,7 @@ void RamWatchWindow::setupRow(int row)
 void RamWatchWindow::showRow(int row)
 {
     const Watch& w = Watches[row];
-    QString symbol = w.Valid ? Bridge->symbols().describe(w.Addr) : QString();
+    QString symbol = w.Valid ? SymStr(Bridge->symbols().describe(w.Addr)) : QString();
     Filling = true;
     Table->item(row, WatchColumn::Address)->setText(w.Expr);
     Table->item(row, WatchColumn::Resolved)->setText(w.Separator ? QString() : !w.Valid ? QString("?") : symbol.isEmpty() ? Hex(w.Addr) : Hex(w.Addr) + "  " + symbol);

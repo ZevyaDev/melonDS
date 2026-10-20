@@ -31,7 +31,7 @@
 #include <QVBoxLayout>
 
 #include "IORegsWindow.h"
-#include "DebugSymbols.h"
+#include "DebugSymbolsQt.h"
 
 using namespace melonDS;
 
@@ -1513,7 +1513,7 @@ void IORegsWindow::showValues(const std::vector<u64>& values)
         u64 shown = values[i] & WidthMask(reg.Bits);
         IODecoded decoded = reg.Decode ? reg.Decode(values[i]) : IODecoded();
         item->setText(2, HexWide(shown, reg.Bits));
-        item->setText(3, reg.HoldsAddress ? syms.describe((u32)shown) : decoded.Summary);
+        item->setText(3, reg.HoldsAddress ? SymStr(syms.describe((u32)shown)) : decoded.Summary);
         Paint(item, changed ? changedColor : normalColor);
         if (item->childCount() != (int)decoded.Fields.size())
         {

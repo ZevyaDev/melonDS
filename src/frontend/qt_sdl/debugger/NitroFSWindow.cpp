@@ -37,7 +37,7 @@
 #include <QVBoxLayout>
 
 #include "NitroFSWindow.h"
-#include "DebugSymbols.h"
+#include "DebugSymbolsQt.h"
 #include "DebugTools.h"
 #include "NDS.h"
 

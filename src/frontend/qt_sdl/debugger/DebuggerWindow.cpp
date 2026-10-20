@@ -44,7 +44,7 @@
 #include <QVBoxLayout>
 
 #include "DebuggerWindow.h"
-#include "DebugSymbols.h"
+#include "DebugSymbolsQt.h"
 #include "DebugTool.h"
 #include "DebugTools.h"
 #include "DisasmView.h"
@@ -268,7 +268,7 @@ void DebuggerWindow::buildToolbar()
     bar->addWidget(GotoEdit);
     connect(GotoEdit, &QLineEdit::returnPressed, this, [this] {
         u32 addr;
-        if (Bridge->symbols().parseAddress(GotoEdit->text(), addr))
+        if (Bridge->symbols().parseAddress(SymStr(GotoEdit->text()), addr))
             Disasm->goTo(addr);
         else
             GotoEdit->selectAll();
@@ -573,7 +573,7 @@ void DebuggerWindow::updateRegs(int c)
     for (int r = 0; r < 16; r++)
     {
         QString text = Hex(s.R[r]);
-        QString sym = (r >= 13 || (s.R[r] >> 24) == 0x02 || (s.R[r] >> 24) == 0x01) ? syms.describe(s.R[r]) : QString();
+        QString sym = (r >= 13 || (s.R[r] >> 24) == 0x02 || (s.R[r] >> 24) == 0x01) ? SymStr(syms.describe(s.R[r])) : QString();
         if (!sym.isEmpty())
             text += "  " + sym;
         set(r, text, HavePrev && s.R[r] != p.R[r]);
@@ -606,7 +606,7 @@ void DebuggerWindow::updatePoints()
         item->setText(4, Hex(p.Start));
         item->setData(4, Qt::UserRole, p.Start);
         item->setText(5, p.Exec ? QString() : "0x" + QString::number(p.End - p.Start + 1, 16));
-        item->setText(6, syms.describe(p.Start));
+        item->setText(6, SymStr(syms.describe(p.Start)));
         item->setText(7, QString::number(p.Hits));
         item->setText(8, p.Temp ? "temp" : p.Scripted ? "script" : "user");
         if (selected.contains(p.ID))
@@ -627,10 +627,10 @@ void DebuggerWindow::updateStack()
         const CallFrame& f = frames[i];
         auto* item = new QTreeWidgetItem(Stack);
         item->setText(0, QString::number(n));
-        QString fn = syms.describe(f.Entry);
+        QString fn = SymStr(syms.describe(f.Entry));
         item->setText(1, (f.Exception ? "[exception] " : "") + (fn.isEmpty() ? Hex(f.Entry) : fn));
         item->setData(1, Qt::UserRole, f.Entry);
-        QString site = syms.describe(f.Site);
+        QString site = SymStr(syms.describe(f.Site));
         item->setText(2, Hex(f.Site) + (site.isEmpty() ? "" : "  " + site));
         item->setData(2, Qt::UserRole, f.Site);
         item->setText(3, Hex(f.Return));
@@ -660,7 +660,7 @@ QString DebuggerWindow::describeBreak(const BreakEvent& ev) const
     DebugSymbols& syms = Bridge->symbols();
     QString cpuName = ev.CPU ? "ARM7" : "ARM9";
     QString where = Hex(ev.PC);
-    QString sym = syms.describe(ev.PC);
+    QString sym = SymStr(syms.describe(ev.PC));
     if (!sym.isEmpty())
         where += " " + sym;
     switch (ev.Kind)
@@ -674,7 +674,7 @@ QString DebuggerWindow::describeBreak(const BreakEvent& ev) const
             .arg(ev.Kind == BreakKind::Write ? "write" : "read")
             .arg(ev.Kind == BreakKind::Write ? "to" : "from")
             .arg(Hex(ev.Addr)).arg(ev.Size).arg(Hex(ev.Value, ev.Size * 2));
-        QString target = syms.describe(ev.Addr);
+        QString target = SymStr(syms.describe(ev.Addr));
         if (!target.isEmpty())
             what += " [" + target + "]";
         if (ev.DMAChannel != 0xFF)
@@ -716,9 +716,9 @@ void DebuggerWindow::updateStatus()
             for (int id : syms.loaded())
                 for (const auto& mod : syms.set()->Modules)
                     if (mod.Overlay == id)
-                        ovs << mod.Name;
+                        ovs << SymStr(mod.Name);
         SymbolStatus->setText(QString("%1 symbols, overlays: %2").arg(syms.set()->SymbolCount).arg(ovs.isEmpty() ? "none" : ovs.join(' ')));
-        SymbolStatus->setToolTip(syms.source());
+        SymbolStatus->setToolTip(SymStr(syms.source()));
     }
 }
 
@@ -770,7 +770,7 @@ void DebuggerWindow::addPointDialog(bool exec)
         return;
 
     u32 start;
-    if (!Bridge->symbols().parseAddress(addr->text(), start))
+    if (!Bridge->symbols().parseAddress(SymStr(addr->text()), start))
     {
         QMessageBox::warning(this, "melonDS", "Cannot read the address: " + addr->text());
         return;
@@ -837,10 +837,10 @@ void DebuggerWindow::loadSymbols()
         "dsd config or symbol list (*.yaml *.yml *.txt *.sym);;All files (*)");
     if (path.isEmpty())
         return;
-    QString error;
-    if (!Bridge->symbols().load(path, error))
+    std::string error;
+    if (!Bridge->symbols().load(SymStr(path), error))
     {
-        QMessageBox::warning(this, "melonDS", error);
+        QMessageBox::warning(this, "melonDS", SymStr(error));
         return;
     }
     DebugTools::rememberSymbols(Bridge, path);

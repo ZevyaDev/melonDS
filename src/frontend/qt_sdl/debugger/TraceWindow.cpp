@@ -38,7 +38,7 @@
 #include <QVBoxLayout>
 
 #include "TraceWindow.h"
-#include "DebugSymbols.h"
+#include "DebugSymbolsQt.h"
 #include "DebugTools.h"
 #include "Disassembler.h"
 
@@ -108,8 +108,8 @@ TraceWindow::TraceWindow(DebugBridge* bridge, QWidget* parent) : DebugTool(bridg
 void TraceWindow::apply()
 {
     u32 start = 0, end = 0xFFFFFFFF;
-    Bridge->symbols().parseAddress(Start->text(), start);
-    Bridge->symbols().parseAddress(End->text(), end);
+    Bridge->symbols().parseAddress(SymStr(Start->text()), start);
+    Bridge->symbols().parseAddress(SymStr(End->text()), end);
     u8 mask = CPU->currentIndex() == 2 ? 3 : 1 << CPU->currentIndex();
     u32 cap = Active->isChecked() ? Capacity->value() : 0;
     Bridge->post([mask, start, end, cap](NDS& nds) { nds.Debugger.SetTrace(mask, start, end, cap); });
@@ -133,11 +133,11 @@ static QString Decode(Disassembler& dis, DebugSymbols& syms, const TraceEntry& e
     DisasmLine line = dis.decode(e.PC, bytes, thumb ? 2 : 4, thumb);
     if (line.HasTarget && !line.IsLiteral)
     {
-        QString name = syms.describe(line.Target, false);
+        QString name = SymStr(syms.describe(line.Target, false));
         if (!name.isEmpty())
-            return line.Mnemonic + " " + name;
+            return SymStr(line.Mnemonic) + " " + name;
     }
-    return line.Mnemonic + " " + line.Operands;
+    return SymStr(line.Mnemonic + " " + line.Operands);
 }
 
 void TraceWindow::showEntries(const std::vector<TraceEntry>& entries)
@@ -154,7 +154,7 @@ void TraceWindow::showEntries(const std::vector<TraceEntry>& entries)
         Table->setItem(r, 0, new QTableWidgetItem(QString::number(e.Timestamp)));
         Table->setItem(r, 1, new QTableWidgetItem(e.CPU ? "7" : "9"));
         Table->setItem(r, 2, new QTableWidgetItem(Hex(e.PC)));
-        Table->setItem(r, 3, new QTableWidgetItem(syms.describe(e.PC)));
+        Table->setItem(r, 3, new QTableWidgetItem(SymStr(syms.describe(e.PC))));
         Table->setItem(r, 4, new QTableWidgetItem(Decode(dis, syms, e)));
     }
     Table->resizeColumnsToContents();
@@ -179,7 +179,7 @@ void TraceWindow::save()
     Disassembler dis;
     DebugSymbols& syms = Bridge->symbols();
     for (const TraceEntry& e : Entries)
-        out << e.Timestamp << ' ' << (e.CPU ? 7 : 9) << ' ' << Hex(e.PC) << ' ' << Decode(dis, syms, e) << "  ; " << syms.describe(e.PC) << '\n';
+        out << e.Timestamp << ' ' << (e.CPU ? 7 : 9) << ' ' << Hex(e.PC) << ' ' << Decode(dis, syms, e) << "  ; " << SymStr(syms.describe(e.PC)) << '\n';
 }
 
 ProfilerWindow::ProfilerWindow(DebugBridge* bridge, QWidget* parent) : DebugTool(bridge, "Call counts and coverage", parent)
@@ -280,7 +280,7 @@ void ProfilerWindow::drainCalls()
                 QTreeWidgetItem* item = rows.value(entry);
                 qulonglong total = n + (item ? item->data(2, Qt::UserRole).toULongLong() : 0);
                 if (!item)
-                    item = new QTreeWidgetItem(CallTree, {syms.describe(entry), Hex(entry), ""});
+                    item = new QTreeWidgetItem(CallTree, {SymStr(syms.describe(entry)), Hex(entry), ""});
                 item->setData(2, Qt::UserRole, total);
                 item->setData(2, Qt::DisplayRole, total);
             }
@@ -314,7 +314,7 @@ void ProfilerWindow::drainCoverage()
                 u32 start = s ? s->Addr : (a & ~0xFFu);
                 Func& f = funcs[start];
                 if (f.Name.isEmpty())
-                    f = {s ? syms.name(*s) : QString("unknown %1").arg(Hex(start)), 0, s ? s->Size : 0, s && s->Thumb ? 2u : 4u};
+                    f = {s ? SymStr(syms.name(*s)) : QString("unknown %1").arg(Hex(start)), 0, s ? s->Size : 0, s && s->Thumb ? 2u : 4u};
                 f.Hits++;
             }
             CoverTree->setSortingEnabled(false);
@@ -390,7 +390,7 @@ LastWriterWindow::LastWriterWindow(DebugBridge* bridge, QWidget* parent) : Debug
 void LastWriterWindow::refresh()
 {
     u32 start;
-    if (!Bridge->symbols().parseAddress(Addr->text(), start))
+    if (!Bridge->symbols().parseAddress(SymStr(Addr->text()), start))
         return;
     start &= ~3u;
     u32 len = Length->value() & ~3u;
@@ -413,9 +413,9 @@ void LastWriterWindow::refresh()
             else
             {
                 by = Hex(w & ~1u);
-                fn = (w & 1 ? "[ARM7] " : "") + syms.describe(w & ~1u);
+                fn = (w & 1 ? "[ARM7] " : "") + SymStr(syms.describe(w & ~1u));
             }
-            QString name = syms.describe(a);
+            QString name = SymStr(syms.describe(a));
             new QTreeWidgetItem(Tree, {Hex(a) + (name.isEmpty() ? "" : "  " + name), Hex(value), by, fn});
             a += 4;
         }
