@@ -1355,7 +1355,7 @@ void Debugger::OnInstr(ARM& cpu, u32 pc, bool redirected)
         ev = Pending[n];
         raise = true;
     }
-    if (BreakRequested[n].exchange(false) && !raise)
+    if (BreakRequested[n].load(std::memory_order_relaxed) && BreakRequested[n].exchange(false) && !raise)
     {
         ev.Kind = BreakKind::Request;
         raise = true;
