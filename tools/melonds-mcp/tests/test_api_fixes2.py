@@ -17,6 +17,16 @@ from .test_api_fixes import adds, dma_program, free_port
 from .test_gdb_overlays import Rsp, monitor
 
 
+class Level6Features(unittest.TestCase):
+    def test_version_and_features(self):
+        self.assertGreaterEqual(native.api_version(), 6)
+        for name in ("interrupt_clean", "pc_next", "write_regions", "packets_truncate", "unknown_id_errors",
+                     "point_lua_tag", "point_count", "gdb_reset_event", "mds_point_count", "mds_reset_count",
+                     "mds_debug_packet", "rom_overlays", "api_version"):
+            with self.subTest(name):
+                self.assertTrue(native.has(name))
+
+
 def spin(base):
     a = A.Asm(base)
     a.label("spin")
