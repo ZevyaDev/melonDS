@@ -76,4 +76,3 @@ std::vector<int> DebugSymbols::detect(const Set& set, NDS& nds)
 {
     return detect(set, [&nds](u32 addr) -> u32 { return nds.Debugger.Peek(0, addr, 4); });
 }
-

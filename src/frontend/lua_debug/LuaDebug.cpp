@@ -373,6 +373,7 @@ static int NamedCPU(lua_State* L, int idx)
 
 static int Execute(lua_State* L)
 {
+    NeedDebugger(L);
     std::vector<u32> ops;
     int cpu = -1;
     for (int i = 1; i <= lua_gettop(L); i++)
@@ -432,6 +433,7 @@ static int CallStack(lua_State* L)
 
 static int ThreadStacks(lua_State* L)
 {
+    NeedDebugger(L);
     int cpu = CPUArg(L, 1, 0);
     std::vector<std::pair<u32, std::vector<CallFrame>>> threads;
     Exec(L, [&](melonDS::NDS& nds) { threads = nds.Debugger.GetThreadStacks(cpu); });

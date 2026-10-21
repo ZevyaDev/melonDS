@@ -116,7 +116,8 @@ class DebugOff(unittest.TestCase):
                      "event.onmemoryexecute(function() end, 0x02100000)",
                      "debugger.trackcalls(true)", "debugger.coverage(true)", "debugger.trace(16)",
                      "debugger.trackwriters(true)", "debugger.lastwriter(0x02200000)", "debugger.pause()",
-                     "debugger.step(1)", "debugger.callstack()"):
+                     "debugger.step(1)", "debugger.callstack()", "debugger.threadstacks()",
+                     "memory.execute(0xE12FFF1E)"):
             with self.subTest(code):
                 with self.assertRaises(MelonError) as cm:
                     self.c.lua_exec(code)
