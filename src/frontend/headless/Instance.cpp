@@ -161,6 +161,7 @@ Instance::Instance(int id, const Config& config, std::string& error) : ID(id)
     NDS->SetInputTimeline(&TouchLine);
     NDS->SetSavestateExtra([this](Savestate* file) { return DoSavestateExtra(file); });
     NDS->Debugger.SetBreakHandler([this](const BreakEvent& ev) { Park(ev); });
+    NDS->Debugger.Probes.FrameCounter = &FramesRun;   // stamps probe, memory log and action records
     NDS->Debugger.ResetHandler = [this](u8 cpu, bool console) { OnGdbReset(cpu, console); };
     Network().RegisterInstance(ID);
     Lua = std::make_unique<LuaHost>(*this);

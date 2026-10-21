@@ -322,4 +322,7 @@ MDS_API int mds_save_path(int id, char* out, int max);
 }
 #endif
 
+// Function probes, the memory access log, breakpoint actions and overlay tags (API level 7).
+#include "melonds_probes.h"
+
 #endif

@@ -271,6 +271,8 @@ int mds_has(const char* name)
     for (const char* f : Functions)
         if (n == f)
             return 1;
+    if (Headless::Api::ProbeFeature(n))    // probes, memlog, bp_actions, overlay_tags (ApiProbes.cpp)
+        return 1;
     // every function of API level 1 is still exported
     return n.rfind("mds_", 0) == 0 && Level1Function(n) ? 1 : 0;
 }
@@ -1469,6 +1471,11 @@ void SetConsoleHooks(std::function<void(Instance&)> created, std::function<void(
     std::lock_guard lock(HookLock);
     CreatedHook = std::move(created);
     DestroyedHook = std::move(destroyed);
+}
+
+void SetError(const std::string& error)
+{
+    LastError = error;
 }
 
 void ReadGuest(Instance& inst, int cpu, uint32_t addr, uint32_t len, uint8_t* out)

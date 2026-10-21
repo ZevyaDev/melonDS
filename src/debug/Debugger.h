@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "../types.h"
+#include "Probes.h"
 
 namespace melonDS
 {
@@ -224,18 +225,26 @@ public:
     void OnInstr(ARM& cpu, u32 pc, bool redirected = false);
     void OnData(ARM& cpu, u32 addr, u8 size, u32 value, bool write);
     // A DMA unit was written (called after the write, so a break sees the new memory).
-    void OnDMA(u8 cpu, u8 channel, u32 addr, u8 size, u32 value);
+    void OnDMA(u8 cpu, u8 channel, u32 src, u32 addr, u8 size, u32 value);
     void OnCall(ARM& cpu);
     void OnException(ARM& cpu, u32 ret);
     void OnFault(ARM& cpu, u32 pc, u32 addr);
 
     std::array<u32, 2> CurPC {};
     std::function<void(u32 cpu, const char* text, bool newline)> PrintHandler;
+
+    // Probes, the memory access log, breakpoint actions and overlay tags (Probes.h).
+    DebugProbes Probes;
+    // The call tracker's depth for the CPU (its frames and those of the contexts interrupted), -1 with tracking off.
+    int CallDepth(u8 cpu) const;
+    // A write made from inside a hook (a breakpoint action): refetches the pipeline if it covers the code there.
+    void PokeFromHook(u8 cpu, u32 addr, u8 size, u32 value);
     // Called on the emulator thread after the GDB stub of CPU cpu has reset the whole console (vRun, R, r;
     // console = true) or only that CPU ("monitor reset"; console = false).
     std::function<void(u8 cpu, bool console)> ResetHandler;
 
 private:
+    friend class DebugProbes;
     melonDS::NDS& NDS;
     int NextID = 1;
     std::vector<Breakpoint> Breakpoints;
