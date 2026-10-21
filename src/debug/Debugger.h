@@ -24,6 +24,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -50,6 +51,13 @@ enum class StepMode : u8
     None,
     Branch,
     TakenBranch,
+};
+
+enum class ExecResult : u8
+{
+    Refused,
+    Continued,
+    Branched,
 };
 
 enum WatchFlags : u8
@@ -170,6 +178,9 @@ public:
 
     u32 Peek(u8 cpu, u32 addr, u8 size) const;
     bool Poke(u8 cpu, u32 addr, u8 size, u32 value);
+    void SyncPipelines(u32 addr, u32 size);
+    int HookedCPU() const;
+    ExecResult Execute(u8 cpu, const std::vector<u32>& ops);
 
     bool IsBreaking() const { return InBreak; }
 
@@ -243,6 +254,22 @@ private:
 
     std::vector<u32> LastWriter;
 
+    enum class HookContext : u8
+    {
+        None,
+        Service,
+        Hook,
+    };
+    struct ContextGuard;
+    HookContext Context = HookContext::None;
+    u8 ContextCPU = 0;
+    std::thread::id ContextThread;
+    std::array<int, 2> MidInstr {};
+
+    bool OnContextThread() const;
+    u32 Canonical(u8 cpu, u32 addr) const;
+    bool PipelineCurrent(ARM& cpu) const;
+    void Redirected(ARM& cpu, u32 pc, bool thumb, u32 op, u32 lr);
     void Rearm();
     void RebuildPages();
     void Raise(const BreakEvent& ev);

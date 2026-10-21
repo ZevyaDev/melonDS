@@ -20,10 +20,33 @@
 
 #include "Debugger.h"
 #include "../ARM.h"
+#include "../ARMInterpreter.h"
 #include "../NDS.h"
 
 namespace melonDS
 {
+
+struct Debugger::ContextGuard
+{
+    Debugger& D;
+    HookContext Kind;
+    u8 CPU;
+    std::thread::id Thread;
+
+    ContextGuard(Debugger& d, HookContext kind, u8 cpu)
+        : D(d), Kind(d.Context), CPU(d.ContextCPU), Thread(d.ContextThread)
+    {
+        D.Context = kind;
+        D.ContextCPU = cpu;
+        D.ContextThread = std::this_thread::get_id();
+    }
+    ~ContextGuard()
+    {
+        D.Context = Kind;
+        D.ContextCPU = CPU;
+        D.ContextThread = Thread;
+    }
+};
 
 constexpr u32 PageShift = 12;
 constexpr u32 PageCount = 1u << (32 - PageShift);
@@ -47,6 +70,7 @@ static bool IsIndirectJump(u32 instr, bool thumb);
 static bool WritesPC(u32 instr, bool thumb);
 constexpr u32 MainRAMWords = 0x400000 >> 2;
 constexpr u32 DMAWriterTag = 0xFFFFFFF0;
+constexpr u32 PipelineSentinel = 0xE7F0DEF0;
 
 Debugger::Debugger(melonDS::NDS& nds) noexcept : NDS(nds)
 {
@@ -433,6 +457,7 @@ bool Debugger::Poke(u8 cpu, u32 addr, u8 size, u32 value)
             if (size == 1) *tcm = value;
             else if (size == 2) *(u16*)tcm = value;
             else *(u32*)tcm = value;
+            SyncPipelines(addr, size);
             return true;
         }
     }
@@ -450,7 +475,137 @@ bool Debugger::Poke(u8 cpu, u32 addr, u8 size, u32 value)
         else if (size == 2) NDS.ARM7Write16(addr, value);
         else NDS.ARM7Write32(addr, value);
     }
+    SyncPipelines(addr, size);
     return true;
+}
+
+bool Debugger::OnContextThread() const
+{
+    return Context != HookContext::None && ContextThread == std::this_thread::get_id();
+}
+
+int Debugger::HookedCPU() const
+{
+    return Context == HookContext::Hook && OnContextThread() ? ContextCPU : -1;
+}
+
+u32 Debugger::Canonical(u8 cpu, u32 addr) const
+{
+    if ((addr >> 24) == 0x02)
+        return 0x02000000 | (addr & NDS.MainRAMMask);
+    if (cpu == 0 && addr < NDS.ARM9->ITCMSize)
+        return addr & (ITCMPhysicalSize - 1);
+    return addr;
+}
+
+bool Debugger::PipelineCurrent(ARM& cpu) const
+{
+    u8 n = cpu.Num;
+    if (!(cpu.CPSR & 0x20))
+        return cpu.NextInstr[0] == Peek(n, cpu.R[15] - 4, 4) && cpu.NextInstr[1] == Peek(n, cpu.R[15], 4);
+    u32 pc = cpu.R[15] - 2;
+    if ((cpu.NextInstr[0] & 0xFFFF) != Peek(n, pc, 2))
+        return false;
+    if (n == 0 && (pc & 2))
+        return cpu.NextInstr[1] == Peek(n, pc + 2, 4);
+    return (cpu.NextInstr[1] & 0xFFFF) == Peek(n, pc + 2, 2);
+}
+
+void Debugger::SyncPipelines(u32 addr, u32 size)
+{
+    if (!size || !OnContextThread() || NDS.IsJITEnabled())
+        return;
+    for (u8 n = 0; n < 2; n++)
+    {
+        if (MidInstr[n])
+            continue;
+        ARM& cpu = n ? (ARM&)*NDS.ARM7 : (ARM&)*NDS.ARM9;
+        u32 window = Canonical(n, cpu.R[15] - 4);
+        u32 start = Canonical(n, addr);
+        if (start + size > window && start < window + 8 && !PipelineCurrent(cpu))
+            cpu.FillPipeline();
+    }
+}
+
+static bool IsLinkBranch(u32 op, bool thumb)
+{
+    if (thumb)
+        return (op & 0xF800) == 0xF800 || (op & 0xF800) == 0xE800 || (op & 0xFF87) == 0x4780;
+    return ((op >> 28) != 0xF && (op & 0x0F000000) == 0x0B000000) || (op & 0xFE000000) == 0xFA000000
+        || (op & 0x0FFFFFF0) == 0x012FFF30;
+}
+
+void Debugger::Redirected(ARM& cpu, u32 pc, bool thumb, u32 op, u32 lr)
+{
+    u8 n = cpu.Num;
+    PrevInstr[n] = op;
+    PrevThumb[n] = thumb;
+    u32 vector = cpu.R[15] - 4 - cpu.ExceptionBase;
+    u8 mode = cpu.CPSR & 0x1F;
+    if ((vector == 0x04 && mode == 0x1B) || (vector == 0x08 && mode == 0x13))
+    {
+        u32 old = cpu.R[14];
+        cpu.R[14] = pc;
+        if (!Exceptions[n].empty() && Exceptions[n].back().Return == old)
+        {
+            Exceptions[n].back().Return = pc;
+            if (!CallStack[n].empty())
+                CallStack[n].front().Site = CallStack[n].front().Return = pc;
+        }
+        return;
+    }
+    if (!IsLinkBranch(op, thumb) || cpu.R[14] == lr)
+        return;
+    u32 old = cpu.R[14] & ~1u;
+    cpu.R[14] = pc | (thumb ? 1 : 0);
+    if (!CallStack[n].empty() && CallStack[n].back().Return == old)
+        CallStack[n].back().Return = pc;
+}
+
+ExecResult Debugger::Execute(u8 cpu, const std::vector<u32>& ops)
+{
+    u8 n = cpu & 1;
+    if (HookedCPU() != n || MidInstr[n] || NDS.IsJITEnabled())
+        return ExecResult::Refused;
+    ARM& arm = n ? (ARM&)*NDS.ARM7 : (ARM&)*NDS.ARM9;
+    bool thumb = arm.CPSR & 0x20;
+    u32 step = thumb ? 2 : 4;
+    u32 pc = arm.R[15] - step;
+    u32 cur = arm.CurInstr;
+    std::vector<u32> seq;
+    for (u32 op : ops)
+    {
+        seq.push_back(thumb ? op & 0xFFFF : op);
+        if (thumb && op > 0xFFFF)
+            seq.push_back(op >> 16);
+    }
+    for (u32 op : seq)
+    {
+        u32 lr = arm.R[14];
+        arm.R[15] = pc + 2 * step;
+        arm.CurInstr = op;
+        arm.NextInstr[0] = arm.NextInstr[1] = PipelineSentinel;
+        MidInstr[n]++;
+        if (thumb)
+            ARMInterpreter::THUMBInstrTable[(op >> 6) & 0x3FF](&arm);
+        else if (arm.CheckCondition(op >> 28))
+            ARMInterpreter::ARMInstrTable[((op >> 4) & 0xF) | ((op >> 16) & 0xFF0)](&arm);
+        else if (n == 0 && (op & 0xFE000000) == 0xFA000000)
+            ARMInterpreter::A_BLX_IMM(&arm);
+        else
+            arm.AddCycles_C();
+        MidInstr[n]--;
+        if (arm.R[15] != pc + 2 * step || arm.NextInstr[0] != PipelineSentinel || arm.NextInstr[1] != PipelineSentinel)
+        {
+            arm.CurInstr = cur;
+            Redirected(arm, pc, thumb, op, lr);
+            return ExecResult::Branched;
+        }
+    }
+    arm.R[15] = pc + step;
+    arm.CurInstr = cur;
+    arm.FillPipeline();
+    return ExecResult::Continued;
 }
 
 void Debugger::Rearm()
@@ -978,7 +1133,10 @@ void Debugger::OnInstr(ARM& cpu, u32 pc)
     if (ServiceRequested.load(std::memory_order_relaxed) && ServiceRequested.exchange(false))
     {
         if (ServiceHandler)
+        {
+            ContextGuard guard(*this, HookContext::Service, n);
             ServiceHandler();
+        }
         Rearm();
     }
 
@@ -1044,6 +1202,7 @@ void Debugger::OnInstr(ARM& cpu, u32 pc)
 
     if (!ExecPages[n].empty() && ExecPages[n][pc >> PageShift])
     {
+        ContextGuard guard(*this, HookContext::Hook, n);
         std::vector<int> hits;
         for (auto& b : Breakpoints)
             if (b.Enabled && (b.CPUMask & (1 << n)) && b.Addr == pc)
@@ -1067,7 +1226,10 @@ void Debugger::OnInstr(ARM& cpu, u32 pc)
     }
 
     if (raise)
+    {
+        ContextGuard guard(*this, HookContext::Hook, n);
         Raise(ev);
+    }
 }
 
 void Debugger::OnDMA(u8 n, u8 channel, u32 addr, u8 size, u32 value)
@@ -1111,7 +1273,10 @@ void Debugger::WatchHit(u8 n, u32 addr, u8 size, u32 value, bool write, u8 dma)
             continue;
         BreakEvent hit {write ? BreakKind::Write : BreakKind::Read, n, size, id, CurPC[n], addr, value, dma};
         BreakCallback cb = it->Callback;
-        if ((!cb || cb(hit)) && !PendingValid[n])
+        MidInstr[n]++;
+        bool brk = !cb || cb(hit);
+        MidInstr[n]--;
+        if (brk && !PendingValid[n])
         {
             Pending[n] = hit;
             PendingValid[n] = true;
@@ -1140,7 +1305,9 @@ void Debugger::OnException(ARM& cpu, u32 ret)
 void Debugger::OnFault(ARM& cpu, u32 pc, u32 addr)
 {
     u8 n = cpu.Num;
+    MidInstr[n]++;
     Raise({BreakKind::Fault, n, 0, 0, pc, addr, 0});
+    MidInstr[n]--;
 }
 
 }
