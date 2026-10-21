@@ -42,6 +42,16 @@ public:
     void FinishRendering() override;
     void RestartFrame() override;
 
+    // Skip this frame's rasterising (the headless frontend's render control): the texture caches are
+    // still made coherent as RenderFrame does, nothing is drawn, and the next RenderFrame draws in full
+    // even when the frame looks identical. GetLine then returns the stale buffer without waiting.
+    void SkipFrame();
+    // True from SkipFrame until the next RenderFrame: the buffer does not hold this frame's 3D.
+    [[nodiscard]] bool FrameSkipped() const noexcept { return Skipped; }
+    // Draw a skipped frame after all (a display capture needs it): RenderFrame, unless the render thread
+    // is already drawing it.
+    void RenderLate();
+
     u32* GetLine(int line) override;
 
     void SetupRenderThread();
@@ -492,6 +502,10 @@ private:
 
     bool FrameIdentical;
 
+    // render control (SkipFrame): the last RenderFrame was skipped / the next one must draw in full
+    bool Skipped = false;
+    bool ForceFull = false;
+
     u32 ScrolledLine[256];
 
     // threading
@@ -500,6 +514,10 @@ private:
     Platform::Thread* RenderThread;
     std::atomic_bool RenderThreadRunning;
     std::atomic_bool RenderThreadRendering;
+    // The main thread posted Sema_RenderStart and has not waited for that frame's Sema_RenderDone yet
+    // (main thread only). GetLine and FinishRendering wait for the thread only then, so a skipped frame
+    // never waits for a render that was not started.
+    bool Outstanding = false;
 
     // Used by the main thread to tell the render thread to start rendering a frame
     Platform::Semaphore* Sema_RenderStart;

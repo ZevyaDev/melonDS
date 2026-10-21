@@ -11,14 +11,15 @@ reading the code but no test covers them. Claims marked *(verified)* were checke
 one-console experiment against this branch's DLL. Bugs and surprises are collected at the end, in
 [Known issues and surprises](#11-known-issues-and-surprises).
 
-This revision describes **API level 6**: the `fix/api-quirks` changes (level 2), Action Replay
+This revision describes **API level 7**: the `fix/api-quirks` changes (level 2), Action Replay
 cheat codes from the `feature/cheats` branch (level 3), the debugger work merged from
 ZevyaDev's `debug` branch on `merge/upstream-debug` (level 4: thread stacks, the new call tracker,
 PC changes at a break, pipeline refetch, Lua `memory.execute` and `wifi`), its next merge on
 `merge/upstream-debug-2` (level 5: `mds_overlays`, the GDB stub's session handling, extended mode
 and `monitor overlays`, DWARF line info in the symbol tables), and the `fix/api-quirks-2` fixes
 (level 6: interrupts leave nothing armed, the pc at a park, `mds_write` for palette/VRAM/OAM,
-packets that cannot block, errors for unknown ids, Lua hooks in the point list, GDB reset events).
+packets that cannot block, errors for unknown ids, Lua hooks in the point list, GDB reset events)
+and render control from `feature/render-control` (level 7: skipping 2D / 3D drawing, threaded 3D).
 See [Version and features](#version-and-features) for what changed at each level.
 
 Contents
@@ -158,6 +159,7 @@ does this: `native.api_version()`, `native.has(name)` (see [section 9](#9-python
 | 4 | `merge/upstream-debug` | `mds_threadstacks`; the call tracker, PC changes at a break, pipeline refetch, Lua `memory.execute`, `debugger.threadstacks` and `wifi.*`, ROM overlays for the server's symbols (the features of level 4 below) |
 | 5 | `merge/upstream-debug-2` | `mds_overlays`; the GDB stub's per-connection reset, EOF detection, extended mode and `monitor overlays`; ROM overlay detection in the core; DWARF line info in the symbol tables (the features of level 5 below) |
 | 6 | `fix/api-quirks-2` | `mds_point_count`, `mds_reset_count`, `mds_debug_packet` (test hook); `mds_destroy` returns int; `mds_packet.total`; `MDS_POINT_LUA`, `MDS_BREAK_RESET`, `MDS_FRAMES_ERROR`; the behaviour changes named by the features of level 6 below |
+| 7 | `feature/render-control` | `mds_set_render`, `mds_set_threaded_3d`, `mds_render_stats`, `MDS_RENDER_SKIP_2D`, `MDS_RENDER_SKIP_3D`, `MDS_RENDER_STATS` (features of level 7 below); the soft renderer's threaded mode no longer redraws the current 3D frame when it is switched on. A branch merged later that also takes level 7 keeps these feature names: ask `mds_has`, not the level |
 
 Features of level 2 (`mds_has` also answers 1 for every exported function name, `"mds_serve_host"`,
 `"mds_read"`, ...):
@@ -218,6 +220,14 @@ Features of level 6 (the fixes are listed with what changed in
 | `point_lua_tag` | `mds_point_list` sets `MDS_POINT_LUA` in `flags` for Lua hooks; `mds_point_remove` refuses them ([Breakpoints and watchpoints](#breakpoints-and-watchpoints)) |
 | `point_count` | `mds_point_count`: how many points `mds_point_list` has to list |
 | `gdb_reset_event` | a GDB restart (`vRun`, `R`, `r`, `monitor reset`) queues an `MDS_BREAK_RESET` event, which the socket server forwards; `mds_reset_count` ([Breaks](#breaks-what-happens-and-mds_take_break), [section 8](#gdb-stub)) |
+
+Features of level 7 ([Render control](#render-control)):
+
+| feature | meaning |
+| --- | --- |
+| `render_skip` | `mds_set_render`: skip 2D drawing and/or 3D rasterising from the next frame boundary; display capture still gets what it needs, so emulated state never changes |
+| `threaded_3d` | `mds_set_threaded_3d`: the soft renderer draws 3D on a thread of its own (same pixels) |
+| `render_stats` | `mds_render_stats`: the settings asked for and in force, and the skip counters |
 
 ### Wireless between consoles, and one console per process
 
@@ -796,7 +806,83 @@ expanded to 8 bits. The frame buffer is swapped at the end of each frame, so aft
 screen shows that frame. Framebuffers are not in savestates: right after `mds_loadstate` the screen
 still shows the frame from before the load, and 3D content lags a frame more; run two frames after
 a load before trusting it (dq9-re harness experience). Works in any state; a running console
-answers at the next frame boundary. Fails with "no framebuffer" if the renderer has none.
+answers at the next frame boundary. Fails with "no framebuffer" if the renderer has none. With
+drawing skipped ([Render control](#render-control)) the screen keeps the last frame drawn.
+
+### Render control
+
+```c
+#define MDS_RENDER_SKIP_2D 1
+#define MDS_RENDER_SKIP_3D 2
+int mds_set_render(int id, uint32_t flags);
+int mds_set_threaded_3d(int id, int on);
+#define MDS_RENDER_STATS 9
+int mds_render_stats(int id, uint64_t* out, int max);
+```
+
+API level 7 (features `render_skip`, `threaded_3d`, `render_stats`). Drawing is about 30% of a frame's
+time in a 3D game (most of it 3D rasterising), and a headless run that only looks at the screen now and
+then does not need it. Neither call changes emulated state: main RAM, VRAM, the registers and the whole
+savestate are the same with any setting (tested: `tools/melonds-mcp/tests/test_render.py`; a full rebuild of
+dq9-re's ~4000 scenarios reproduced every RAM and screen hash). Savestates do not carry either setting, and a
+state load or a reset keeps them.
+
+**`mds_set_render(id, flags)`** skips drawing from the next frame boundary on: a running console applies it
+before its next frame, a stopped one before the frame it runs next, so a frame is never split. Unknown bits
+fail ("unknown render flags N"); 0 draws everything again. Works in any state.
+
+- `MDS_RENDER_SKIP_2D`: no BG/OBJ drawing, compositing or framebuffer writes (the VRAM caches the 2D renderer
+  keeps are still updated, so the first frame drawn afterwards is exact). Sprites for line 0, which are drawn at
+  VCount 262 of the frame before, are always drawn. `mds_screen` keeps showing the last frame drawn.
+- `MDS_RENDER_SKIP_3D`: no 3D rasterising at VCount 215 (the texture caches are still updated); the next frame
+  drawn redraws in full even when the 3D engine says nothing changed.
+
+How many frames to draw before a screenshot: after clearing the flags, **2D is exact in the first frame drawn,
+3D in the second** (a frame shows its own 2D lines, but the 3D frame drawn at VCount 215 of the frame before).
+So clear both 2 frames before reading the screen (`native.RENDER_FRAMES_3D`). Measured on the synthetic
+scene of `test_render.py` (2D and 3D colours that change every frame: with 3D, the first frame after skipping
+still shows the old 3D) and on ten DQ9 states (field, town, battle, menu, a battle transition, a cutscene, a
+map change, the title movie: 300-600 frames skipped, then 2 frames drawn give the reference screen, 1 frame
+does not).
+
+**Display capture.** Capture (DISPCAPCNT) writes the 2D engine A or 3D output into VRAM, so it is game state
+and skipping must not change it. With capture on (VCount 0-191 of a frame whose DISPCAPCNT bit 31 was set),
+every line is drawn in full even with `MDS_RENDER_SKIP_2D`, and its sprites the line before. The 3D frame a
+capture needs is drawn at VCount 215 of the frame before; it is drawn although `MDS_RENDER_SKIP_3D` is set when
+a capture is already requested then (bit 31 set) or the frame being drawn had capture on (games that capture
+do so frame after frame). A capture requested later (between VCount 215 and the next frame) finds its 3D frame
+skipped: it is drawn at the capture's first line instead (counted as a late 3D frame). That is exact unless
+the game changed texture or texture palette VRAM after VCount 215, which melonDS's own renderer would not have
+seen; the counter says whether it ever happened. DQ9 never enables capture in the states measured.
+
+**`mds_set_threaded_3d(id, on)`** puts the soft 3D renderer on a thread of its own (melonDS's "threaded" 3D
+setting; the headless library never set it, so 3D ran on the emulator thread). The pixels are the same; a
+frame takes 15-20% less wall time in DQ9. A stopped console switches at once, a running one at its next frame
+boundary. Switching is safe at any point and changes no pixel: the buffer already holds the current 3D frame,
+so no frame is redrawn (the core used to start a redraw when the setting was switched on). One difference is
+melonDS's own: a state loaded while threaded redraws the loaded 3D frame at once, so the first frame after
+the load shows it, where the unthreaded renderer shows the stale buffer for that frame. Keep it off while
+loading states if the first frame's screen must match an unthreaded run (the dq9-re harness turns it on only
+while inputs play).
+
+**`mds_render_stats(id, out, max)`** fills up to `max` values and returns `MDS_RENDER_STATS` (9; more than
+`max` when cut short), on the emulator thread (a running console answers at its next frame boundary):
+
+| index | value |
+| --- | --- |
+| 0 | skip flags asked for (`mds_set_render`) |
+| 1 | skip flags in force (they change at the next frame boundary) |
+| 2 | threaded 3D asked for |
+| 3 | threaded 3D in force |
+| 4 | visible lines whose 2D drawing was skipped |
+| 5 | 3D frames not rasterised |
+| 6 | lines drawn although 2D skipping was on, because capture was on |
+| 7 | 3D frames drawn although 3D skipping was on, because a capture was likely |
+| 8 | late 3D frames: a capture started without its 3D frame, which was then drawn at its first line |
+
+The counters run from the console's creation (a reset keeps them). Python: `Console.set_render(skip_2d,
+skip_3d)`, `set_render_flags(flags)`, `set_threaded_3d(on)`, `render_stats()` (a dict named by
+`native.RENDER_STAT_NAMES`).
 
 ---
 
@@ -1572,6 +1658,9 @@ melonds_headless library"). `native.has(name)` and `native.api_version()` tell w
 | `mds_frames` | `frames` (property; raises `MelonError` for `MDS_FRAMES_ERROR` from a level-6 library) |
 | `mds_reset_count` | `reset_count()` (level 6) |
 | `mds_screen` | `screen()` -> `c_uint32` array of 256*384 (`bytes()` gives BGRA) |
+| `mds_set_render` | `set_render(skip_2d=False, skip_3d=False)` / `set_render_flags(flags)` (`native.RENDER_SKIP_2D`, `RENDER_SKIP_3D`, `RENDER_SKIP_ALL`; frames to draw before a screenshot: `RENDER_FRAMES_2D` = 1, `RENDER_FRAMES_3D` = 2) (level 7) |
+| `mds_set_threaded_3d` | `set_threaded_3d(on=True)` (level 7) |
+| `mds_render_stats` | `render_stats()` -> dict named by `native.RENDER_STAT_NAMES` (level 7) |
 | `mds_set_keys` | `set_keys(names or mask)` |
 | `mds_touch` | `touch(x=None, y=None)` (None = pen up) |
 | `mds_set_lid` | `set_lid(closed)` |

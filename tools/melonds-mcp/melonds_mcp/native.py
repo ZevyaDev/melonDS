@@ -19,6 +19,14 @@ POINT_LUA = 0x100       # mds_point.flags: a Lua memory hook (API level 6)
 DMA_TAG = 0xFFFFFFF0
 # mds_frames for an unknown console (API level 6; older libraries return 0)
 FRAMES_ERROR = 0xFFFFFFFFFFFFFFFF
+# mds_set_render flags (API level 7)
+RENDER_SKIP_2D, RENDER_SKIP_3D = 1, 2
+RENDER_SKIP_ALL = RENDER_SKIP_2D | RENDER_SKIP_3D
+# frames to draw before a screenshot after skipping: 2D shows a frame's lines at once, 3D the frame drawn the frame
+# before (docs/headless-api.md, section 4, "Render control")
+RENDER_FRAMES_2D, RENDER_FRAMES_3D = 1, 2
+RENDER_STAT_NAMES = ["skip_wanted", "skip", "threaded_wanted", "threaded", "lines_2d_skipped", "frames_3d_skipped",
+                     "capture_lines", "frames_3d_for_capture", "late_3d_frames"]
 
 
 class MdsBreak(Structure):
@@ -196,6 +204,12 @@ _SIGNATURES |= {
     "mds_point_count": (c_int, [c_int]),
     "mds_reset_count": (c_int, [c_int]),
 }
+# API level 7 (feature/render-control)
+_SIGNATURES |= {
+    "mds_set_render": (c_int, [c_int, c_uint32]),
+    "mds_set_threaded_3d": (c_int, [c_int, c_int]),
+    "mds_render_stats": (c_int, [c_int, POINTER(c_uint64), c_int]),
+}
 
 
 class _Lib:
@@ -278,7 +292,8 @@ def _mask(cpu):
 
 def api_version():
     """The library's API level (mds_version): 1 up to the IPC merge, 2 from fix/api-quirks, 3 from feature/cheats,
-    4 from merge/upstream-debug, 5 from merge/upstream-debug-2, 6 from fix/api-quirks-2."""
+    4 from merge/upstream-debug, 5 from merge/upstream-debug-2, 6 from fix/api-quirks-2, 7 from
+    feature/render-control."""
     return lib().mds_version()
 
 
@@ -489,6 +504,28 @@ class Console:
         buf = (c_uint32 * (256 * 384))()
         _check(lib().mds_screen(self.id, buf))
         return buf
+
+    # Render control (API level 7; docs/headless-api.md, section 4). Applied at the next frame boundary; neither
+    # setting changes emulated state.
+
+    def set_render(self, skip_2d=False, skip_3d=False):
+        """Skip 2D drawing (BG/OBJ, the framebuffer) and/or 3D rasterising from the next frame on. Display capture
+        still gets what it needs. Draw again for RENDER_FRAMES_3D (2) frames before a screenshot."""
+        _check(lib().mds_set_render(self.id, (RENDER_SKIP_2D if skip_2d else 0) | (RENDER_SKIP_3D if skip_3d else 0)))
+
+    def set_render_flags(self, flags):
+        """mds_set_render with the raw flags (RENDER_SKIP_2D | RENDER_SKIP_3D)."""
+        _check(lib().mds_set_render(self.id, flags))
+
+    def set_threaded_3d(self, on=True):
+        """Draw 3D on a thread of its own from the next frame on (same pixels, less wall time)."""
+        _check(lib().mds_set_threaded_3d(self.id, int(on)))
+
+    def render_stats(self):
+        """{name: value} for RENDER_STAT_NAMES: the settings asked for and in force, and the skip counters."""
+        out = (c_uint64 * 32)()
+        n = min(_check(lib().mds_render_stats(self.id, out, 32)), 32)
+        return {RENDER_STAT_NAMES[i] if i < len(RENDER_STAT_NAMES) else f"stat{i}": out[i] for i in range(n)}
 
     def set_keys(self, pressed):
         _check(lib().mds_set_keys(self.id, _key_mask(pressed)))

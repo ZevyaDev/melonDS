@@ -38,6 +38,8 @@
 #include "Net.h"
 #include "Subs.h"
 
+namespace melonDS { class SoftRenderer; }
+
 namespace Headless
 {
 
@@ -128,6 +130,18 @@ public:
 
     // True while the emulator thread is blocked at a frame boundary in Wait mode.
     bool WaitingForInput();
+
+    // Render control (mds_set_render, mds_set_threaded_3d): what the caller asked for. The emulator thread
+    // applies the skip flags at the next frame boundary, before the next frame runs (ApplyRender), so a
+    // change never splits a frame; mds_set_threaded_3d applies at once (ApplyThreaded3D, through the command
+    // queue: a running console does it at its next frame boundary), which is safe at any point. Neither is
+    // emulated state: savestates do not carry them.
+    std::atomic<melonDS::u32> WantedRenderSkip {0};
+    std::atomic<bool> WantedThreaded3D {false};
+    // The renderer's current settings and counters (emulator thread).
+    melonDS::SoftRenderer& Renderer();
+    void ApplyRender();
+    void ApplyThreaded3D();
 
     // Resets of the console: mds_reset, mds_load_rom, and GDB restarts (whole console or one CPU).
     std::atomic<melonDS::u32> Resets {0};

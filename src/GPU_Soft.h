@@ -43,6 +43,30 @@ public:
     void DrawScanline(u32 line) override;
     void DrawSprites(u32 line) override;
 
+    void Start3DRendering() override;
+
+    // Render control (the headless frontend): skip drawing to save time. Bits: SkipRender2D (BG/OBJ
+    // drawing, compositing and the framebuffer), SkipRender3D (3D rasterising). Emulated state is not
+    // touched either way: display capture writes VRAM, so whatever a capture needs is still drawn (the
+    // whole line while capture is on; the 3D frame when a capture is likely, see Start3DRendering).
+    // Change it between frames only (the frontend does it at the frame boundary).
+    enum { SkipRender2D = 1, SkipRender3D = 2 };
+    void SetRenderSkip(u32 mask) noexcept { SkipMask = mask & (SkipRender2D | SkipRender3D); }
+    [[nodiscard]] u32 GetRenderSkip() const noexcept { return SkipMask; }
+    void SetThreaded3D(bool threaded);
+    [[nodiscard]] bool IsThreaded3D() const;
+
+    struct RenderSkipStats
+    {
+        u64 Lines2DSkipped = 0;     // visible lines not drawn
+        u64 Frames3DSkipped = 0;    // 3D frames not rasterised
+        u64 CaptureLines = 0;       // lines drawn although 2D skipping was on, because display capture was on
+        u64 Frames3DForCapture = 0; // 3D frames drawn although 3D skipping was on, because a capture was likely
+        u64 Late3DFrames = 0;       // a capture started with the 3D frame skipped: it was drawn at the capture's
+                                    // first line instead (exact unless texture VRAM changed after VCount 215)
+    };
+    [[nodiscard]] const RenderSkipStats& GetRenderSkipStats() const noexcept { return SkipStats; }
+
     void VBlank() override {};
     void VBlankEnd() override {};
 
@@ -56,6 +80,10 @@ private:
     friend class SoftRenderer3D;
 
     u32* Framebuffer[2][2];
+
+    u32 SkipMask = 0;
+    bool CaptureSeen = false;   // display capture was on for a line since the last Start3DRendering
+    RenderSkipStats SkipStats;
 
     u32* Output3D;
     alignas(8) u32 Output2D[2][256];

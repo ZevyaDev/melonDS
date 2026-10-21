@@ -138,6 +138,18 @@ void SoftRenderer2D::DrawScanline(u32 line)
         return;
     }
 
+    SyncScanlineVRAM();
+
+    // render BG layers and sprites
+    DrawScanline_BGOBJ(line, dst);
+}
+
+void SoftRenderer2D::SyncScanlineVRAM()
+{
+    // DrawScanline does this only for an enabled unit that is not in forced blank
+    if (!GPU2D.Enabled || GPU2D.ForcedBlank)
+        return;
+
     if (GPU2D.Num == 0)
     {
         auto bgDirty = GPU.VRAMDirty_ABG.DeriveState(GPU.VRAMMap_ABG, GPU);
@@ -156,9 +168,24 @@ void SoftRenderer2D::DrawScanline(u32 line)
         auto objExtPalDirty = GPU.VRAMDirty_BOBJExtPal.DeriveState(&GPU.VRAMMap_BOBJExtPal, GPU);
         GPU.MakeVRAMFlat_BOBJExtPalCoherent(objExtPalDirty);
     }
+}
 
-    // render BG layers and sprites
-    DrawScanline_BGOBJ(line, dst);
+void SoftRenderer2D::SyncSpriteVRAM()
+{
+    // the OBJ buffers don't get updated at all if the 2D engine is disabled
+    if (!GPU2D.Enabled)
+        return;
+
+    if (GPU2D.Num == 0)
+    {
+        auto objDirty = GPU.VRAMDirty_AOBJ.DeriveState(GPU.VRAMMap_AOBJ, GPU);
+        GPU.MakeVRAMFlat_AOBJCoherent(objDirty);
+    }
+    else
+    {
+        auto objDirty = GPU.VRAMDirty_BOBJ.DeriveState(GPU.VRAMMap_BOBJ, GPU);
+        GPU.MakeVRAMFlat_BOBJCoherent(objDirty);
+    }
 }
 
 #define DoDrawBG(type, line, num) \
@@ -1027,16 +1054,7 @@ void SoftRenderer2D::DrawSprites(u32 line)
     if (!GPU2D.Enabled)
         return;
 
-    if (GPU2D.Num == 0)
-    {
-        auto objDirty = GPU.VRAMDirty_AOBJ.DeriveState(GPU.VRAMMap_AOBJ, GPU);
-        GPU.MakeVRAMFlat_AOBJCoherent(objDirty);
-    }
-    else
-    {
-        auto objDirty = GPU.VRAMDirty_BOBJ.DeriveState(GPU.VRAMMap_BOBJ, GPU);
-        GPU.MakeVRAMFlat_BOBJCoherent(objDirty);
-    }
+    SyncSpriteVRAM();
 
     NumSprites = 0;
     memset(OBJLine, 0, sizeof(OBJLine));
