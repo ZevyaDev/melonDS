@@ -1,5 +1,5 @@
 build*/
-debug*/
+/debug*/
 !src/frontend/qt_sdl/debugger/
 bin
 obj
