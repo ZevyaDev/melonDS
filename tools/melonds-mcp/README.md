@@ -45,21 +45,29 @@ what local multiplayer needs, and a stop in one stops the others at their next i
 
 | tool | does |
 |---|---|
-| `breakpoint_add`, `watchpoint_add` | execute / read / write points (CPU and DMA writes), optional Lua condition |
+| `breakpoint_add`, `watchpoint_add` | execute / read / write points (CPU and DMA writes; cpu 9, 7 or both), optional Lua condition |
+| `point_list`, `point_enable`, `point_remove` | list points with hit counts, disable / re-enable, remove |
 | `step`, `run`, `wait`, `pause` | execution control, every wait has a timeout |
 | `live_start`, `live_stop`, `pacing` | free-running consoles at 60 fps; local wireless sessions need this |
-| `registers`, `memory_read`, `memory_write`, `memory_search`, `disassemble_at` | inspection |
+| `registers`, `set_register`, `disassemble_at` | CPU state and code |
+| `memory_read`, `memory_values`, `memory_write`, `memory_search` | hexdump or raw dump to a file, typed values (u8 ... fx32, ascii, utf16), write bytes / a value / a file, value or byte search |
+| `memory_sample` | read ranges every N frames while running (the CLI's `subscribe`) |
 | `ramsearch_start`, `ramsearch_filter`, `ramsearch_list` | DeSmuME-style RAM search: snapshot, then changed / increased / equal / delta |
-| `watch_add`, `watch_read`, `watch_save`, `watch_load` | named, typed addresses (fx32 included), shareable as JSON; one list per game (see below) |
-| `symbols_load`, `symbol_lookup`, `overlays_loaded` | per-console symbol tables |
-| `text_find` | find on-screen text in RAM (ASCII, UTF-16, UTF-8) |
-| `input_sequence`, `press`, `touch` | input; `"A*4 w20 Down*30"` plays a whole sequence in one call |
+| `watch_add`, `watch_remove`, `watch_list`, `watch_read`, `watch_save`, `watch_load` | named, typed addresses (fx32 included), shareable as JSON; one list per game (see below) |
+| `symbols_load`, `symbols_clear`, `symbol_lookup`, `overlays_loaded` | per-console symbol tables |
+| `text_find` | find on-screen text in RAM (ASCII, UTF-16, UTF-8, or chosen encodings) |
+| `input_sequence`, `press`, `touch`, `lid_set` | input through the setters; `"A*4 w20 Down*30"` plays a whole sequence in one call, on several consoles |
+| `input_queue`, `input_mode`, `input_status`, `input_clear`, `input_log` | frame-exact input through the queue (touch tokens `touch:X,Y*N` too, like the CLI's `input`), empty-queue mode, applied-input log |
 | `calls_track`, `callstack`, `calls_read` | shadow call stack across threads and nested IRQs, per-function call counts |
-| `coverage_track`, `coverage_read` | every executed instruction, grouped by symbol |
+| `coverage_track`, `coverage_read` | every executed instruction, grouped by symbol (optionally the addresses) |
 | `trace_start`, `trace_read` | instruction ring buffer, or function transitions only |
 | `writers_track`, `last_writer` | which instruction (or DMA channel) last wrote a main-RAM word |
-| `packets_track`, `packets_read` | local wireless traffic per console |
-| `savestate_save`, `savestate_load`, `screenshot` | state; savestates need a frame boundary |
+| `packets_track`, `packets_read`, `wireless_timeout` | local wireless traffic per console; the in-process link's receive timeout |
+| `cheat_add`, `cheat_list`, `cheat_enable`, `cheat_remove`, `cheat_clear` | Action Replay codes run by melonDS's AR engine each frame; a state load or ROM load clears them |
+| `savestate_save`, `savestate_load`, `screenshot` | state (savestates need a frame boundary); PNG of both screens, top or bottom, optionally saved to a file |
+| `lua_run`, `lua_exec`, `lua_output`, `lua_stop` | Lua scripts and snippets; `frames` runs that many frames and returns what they printed |
+| `rtc_get`, `rtc_set`, `gdb_start`, `gdb_stop` | the console's clock; GDB stubs on 127.0.0.1 |
+| `console_create`, `console_destroy`, `console_list`, `console_info`, `rom_load`, `console_reset`, `server_info` | consoles; save path, MAC, queue and clock of one; API level and features of the library |
 
 Symbols and watches are per console. `symbols_load(path, console=0)` fills that console's table, and
 every tool that prints or parses addresses uses the table of the console it targets, so two consoles
@@ -69,6 +77,12 @@ console (console 0); other consoles start with no symbols unless `console_create
 consoles whose ROM path (made absolute) is the same share one list, consoles with different ROMs do
 not, and a console without a ROM has its own. The list is dropped when no console runs that game any
 more. `watch_save` and `watch_load` take `console` and use that console's list; the JSON format is unchanged.
+
+The MCP tools cover what the `melonds` command line (below) does, except what only makes sense for a
+separate process: `launch`, `attach` and `shutdown` (the MCP server is the emulator process; `server_info`
+reports what `attach` does), per-call `--symbols` and the CLI's state files (MCP tables are per console, watch
+lists are per ROM path and saved with `watch_save`), and a streaming `subscribe` (`memory_sample` returns the
+samples instead). `--with-symbols` is not needed: MCP tools name addresses whenever the console has symbols.
 
 The GDB stub (`mds_gdb`, ARM9 3333 / ARM7 3334) also works in the headless build, watchpoints included.
 It listens on 127.0.0.1; `Console.gdb(host="0.0.0.0")` (`mds_gdb_host`) opens it to the network, as
