@@ -166,6 +166,7 @@ private:
     bool DoSavestateExtra(melonDS::Savestate* file);
     void ThreadMain();
     void Park(const melonDS::BreakEvent& ev);
+    void StopRunning();
     bool AcquireInput(AppliedInput& out);
     bool AwaitBarrier(uint32_t group);
 };

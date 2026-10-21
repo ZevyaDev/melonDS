@@ -218,11 +218,12 @@ void Debugger::RequestBreak(u8 cpuMask)
         }
 }
 
-void Debugger::CancelBreakRequests()
+void Debugger::CancelBreakRequests(bool steps)
 {
     BreakRequested[0] = false;
     BreakRequested[1] = false;
-    StepRemaining = {};
+    if (steps)
+        StepRemaining = {};
     Rearm();
 }
 

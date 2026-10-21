@@ -246,6 +246,8 @@ int mds_has(const char* name)
         "gdb_monitor_overlays", // the GDB stub answers "monitor overlays" (qRcmd output)
         "gdb_session_reset",    // a GDB disconnect (also EOF) clears the stub's breakpoints, no-ack and extended mode
         "gdb_extended",         // GDB extended mode (!): vKill keeps the connection, vRun restarts (direct boot kept)
+        // API level 6 (fix/api-quirks-2)
+        "interrupt_clean",      // a park and the end of a run drop leftover break requests; mds_interrupt ignores a stopped console
     };
     static const char* const Functions[] = {
         "mds_has", "mds_serve_host", "mds_gdb_host", "mds_lastwriter_query",

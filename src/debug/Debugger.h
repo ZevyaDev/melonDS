@@ -159,7 +159,8 @@ public:
     void SetServiceHandler(std::function<void()> handler);
     void RequestService();
     void RequestBreak(u8 cpuMask);
-    void CancelBreakRequests();
+    // Drop the break requests of both CPUs, and with steps also the armed step countdowns.
+    void CancelBreakRequests(bool steps = true);
     // Park the console after the CPU has executed count more instructions (0 disarms). Counted from the
     // instruction the CPU is parked at when called during a break of that CPU's instruction hook, else from
     // its next instruction, so count = n always executes n instructions.

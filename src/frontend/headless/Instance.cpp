@@ -299,19 +299,31 @@ RunState Instance::GetState()
     return State;
 }
 
+// Only a running console is interrupted: a request left armed on a stopped one would park its next run at its
+// first instruction. The request is made under Lock, so it cannot slip in after the run has ended (StopRunning)
+// or the console has parked (Park), both of which drop the requests left over.
 void Instance::Interrupt()
 {
+    std::lock_guard lock(Lock);
+    if (State != RunState::Running)
+        return;
+    if (Waiting)
     {
-        std::lock_guard lock(Lock);
-        if (Waiting)
-        {
-            // No CPU is running to take a break request: park at the frame boundary instead.
-            WaitInterrupt = true;
-            Cond.notify_all();
-            return;
-        }
+        // No CPU is running to take a break request: park at the frame boundary instead.
+        WaitInterrupt = true;
+        Cond.notify_all();
+        return;
     }
     NDS->Debugger.RequestBreak(3);
+}
+
+// The run is over (Lock held, emulator thread): an interrupt that arrived too late to park it must not park the
+// next run. The step countdowns stay armed (mds_step before mds_run).
+void Instance::StopRunning()
+{
+    State = RunState::Idle;
+    WaitInterrupt = false;
+    NDS->Debugger.CancelBreakRequests(false);
 }
 
 bool Instance::WaitingForInput()
@@ -360,7 +372,7 @@ void Instance::ThreadMain()
                 std::lock_guard lock(Lock);
                 if (Quit || FramesLeft == 0)
                 {
-                    State = RunState::Idle;
+                    StopRunning();
                     break;
                 }
             }
@@ -370,7 +382,7 @@ void Instance::ThreadMain()
                 std::lock_guard lock(Lock);
                 if (Quit || FramesLeft == 0)
                 {
-                    State = RunState::Idle;
+                    StopRunning();
                     break;
                 }
                 continue;
@@ -524,6 +536,9 @@ void Instance::Park(const BreakEvent& ev)
     LastBreak = ev;
     BreakPending = true;
     State = RunState::Parked;
+    // mds_interrupt asks both CPUs to break and only the first one parks: the other CPU's request (and those of
+    // a group's other consoles, which mds_wait interrupts) would park the resume again at once.
+    NDS->Debugger.CancelBreakRequests(false);
     Cond.notify_all();
     while (!Quit && State != RunState::Running)
     {
