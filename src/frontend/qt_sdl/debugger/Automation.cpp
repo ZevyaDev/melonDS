@@ -327,14 +327,29 @@ QString Automation::run(const QStringList& args)
         int images = 0;
         for (const auto& mod : set->Modules)
             images += !mod.Image.empty();
-        return QString("ok %1 symbols, %2 source files, %3 overlay images").arg(set->SymbolCount).arg(set->SourceFiles.size()).arg(images);
+        return QString("ok %1 symbols, %2 source files, %3 overlay images, %4 line rows").arg(set->SymbolCount)
+            .arg(set->SourceFiles.size()).arg(images).arg(set->LineCount);
     }
-    if (c == "source")
+    if (c == "lines")
+    {
+        QString error;
+        if (!bridge->symbols().loadLines(rest, error))
+            return "error: " + error;
+        DebugTools::rememberLines(bridge, bridge->symbols().lineSource());
+        emit bridge->symbolsChanged();
+        return QString("ok %1 line rows").arg(bridge->symbols().set()->LineCount);
+    }
+    if (c == "source" || c == "srcline")
     {
         auto* debugger = qobject_cast<DebuggerWindow*>(FindWindow("Debugger"));
         SourceView* view = debugger ? debugger->findChild<SourceView*>() : nullptr;
         if (!view)
             return "error: open the debugger first";
+        if (c == "srcline")
+        {
+            view->clickLine(rest.toInt() - 1);
+            return "ok";
+        }
         if (args.size() > 1)
         {
             u32 addr;

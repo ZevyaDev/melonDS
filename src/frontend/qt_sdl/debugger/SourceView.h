@@ -20,6 +20,7 @@
 #define SOURCEVIEW_H
 
 #include <QHash>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QWidget>
@@ -32,10 +33,10 @@
 #include "types.h"
 
 class QLabel;
-class QPlainTextEdit;
 class QPushButton;
 class QSyntaxHighlighter;
 class DebugBridge;
+class CodeView;
 
 class SourceView : public QWidget
 {
@@ -45,7 +46,12 @@ public:
     explicit SourceView(DebugBridge* bridge, QWidget* parent = nullptr);
 
     void showAddress(melonDS::u32 addr);
+    void setMarks(melonDS::u32 pc, bool stopped, const QSet<melonDS::u32>& exec, const QSet<melonDS::u32>& disabled);
+    void clickLine(int line);
     QString describe() const;
+
+signals:
+    void toggleBreakpoint(melonDS::u32 addr);
 
 protected:
     void changeEvent(QEvent* event) override;
@@ -54,7 +60,7 @@ private:
     DebugBridge* Bridge;
     QLabel* Title;
     QPushButton* Open;
-    QPlainTextEdit* Text;
+    CodeView* Text;
     QSyntaxHighlighter* Highlighter;
 
     std::shared_ptr<const DebugSymbols::Set> ForSet;
@@ -63,12 +69,20 @@ private:
     QHash<QString, QString> Cache;
     QString Key;
     QString ShownLocation;
+    QString ShownRel;
     DebugSource::Span Shown;
+    int ShownLine = -1;
     int Request = 0;
+
+    melonDS::u32 PC = 0;
+    bool Stopped = false;
+    QSet<melonDS::u32> Exec;
+    QSet<melonDS::u32> ExecDisabled;
 
     void message(const QString& title, const QString& text);
     void findRoot(const QString& rel, QStringList candidates, std::function<void()> then);
-    void display(const QString& location, const QString& rel, const QString& name, const QString& pretty, const QString& label);
+    void display(const QString& location, const QString& rel, const QString& name, const QString& pretty, const QString& label, int line);
+    void applyMarks();
 };
 
 #endif

@@ -55,6 +55,14 @@ public:
         int File;
     };
 
+    struct LineRow
+    {
+        melonDS::u32 Addr;
+        int File;
+        int Line;
+        bool Stmt;
+    };
+
     struct Module
     {
         QString Name;
@@ -64,6 +72,7 @@ public:
         std::vector<melonDS::u8> Image;
         std::vector<Symbol> Symbols;
         std::vector<FileRange> Files;
+        std::vector<LineRow> Lines;
 
         const Symbol* find(melonDS::u32 addr) const;
         bool covers(melonDS::u32 addr) const { return addr >= Base && addr - Base < Size; }
@@ -77,9 +86,16 @@ public:
         QStringList SourceFiles;
         QMultiHash<QString, std::pair<int, int>> ByName;
         int SymbolCount = 0;
+        QString LineSource;
+        QStringList LineFiles;
+        int LineCount = 0;
     };
 
     bool load(const QString& path, QString& error, melonDS::NDS* nds = nullptr);
+    bool loadLines(const QString& path, QString& error);
+    QString lineSource() const { return Cur ? Cur->LineSource : QString(); }
+    bool lineAt(melonDS::u32 addr, QString& file, int& line) const;
+    bool lineAddress(const QString& file, int line, melonDS::u32& addr, int& module) const;
     void clear();
     bool empty() const { return !Cur || Cur->Modules.empty(); }
     QString source() const { return Cur ? Cur->Source : QString(); }

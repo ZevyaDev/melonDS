@@ -86,6 +86,7 @@ add_library(core STATIC
     blip-buf/blip_buf.c
 
     debug/Debugger.cpp
+    debug/DwarfLines.cpp
     debug/RomOverlays.cpp)
 
 if (ENABLE_GDBSTUB)

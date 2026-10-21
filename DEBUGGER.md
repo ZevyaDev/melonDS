@@ -32,6 +32,13 @@ stack shows that function. Files come from beside the config, or from the same r
 symbols came from a URL; downloads are cached. Open opens a local file in its editor, or a GitHub
 file in the browser at those lines. A function that is not in any delinked file has no source yet.
 
+With line info the dock marks the exact line of the selected address, marks the line the stopped
+CPU is on, and a click in its margin toggles a breakpoint on that line. Line info is the DWARF
+`.debug_line` of an ELF linked with `-sym on` (mwldarm; the ROM bytes do not change). For a local
+`config.yaml` it loads by itself from `build/<region>/arm9.o` of that decomp; Symbols... > Line
+info from an ELF... loads any other one. Rows are matched to modules through `delinks.txt`, so
+overlays that share addresses resolve to the loaded one.
+
 ## Debugger window
 
 | key | does |

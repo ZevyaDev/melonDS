@@ -27,6 +27,7 @@
 #include "DebugSource.h"
 #include "DebugSymbols.h"
 #include "NDS.h"
+#include "debug/DwarfLines.h"
 #include "debug/RomOverlays.h"
 
 #if __has_include(<cxxabi.h>)
@@ -541,7 +542,164 @@ bool DebugSymbols::load(const QString& rawPath, QString& error, NDS* nds)
     }
     Cur = set;
     Loaded.clear();
+    if (!remote && (info.suffix() == "yaml" || info.suffix() == "yml"))
+    {
+        QDir dir(set->Base);
+        dir.cdUp();
+        QString region = dir.dirName();
+        QString elf = dir.cdUp() && dir.cdUp() ? dir.filePath("build/" + region + "/arm9.o") : QString();
+        QString ignored;
+        if (!elf.isEmpty() && QFile::exists(elf))
+            loadLines(elf, ignored);
+    }
     return true;
+}
+
+bool DebugSymbols::loadLines(const QString& rawPath, QString& error)
+{
+    if (!Cur)
+    {
+        error = "load symbols first";
+        return false;
+    }
+    QString path = DebugSource::Normalize(rawPath);
+    QHash<QString, QByteArray> files;
+    DebugSource::ReadAll({path}, files);
+    if (!files.contains(path))
+    {
+        error = (DebugSource::IsRemote(path) ? "cannot download " : "not found: ") + path;
+        return false;
+    }
+    const QByteArray& elf = files[path];
+    std::vector<DwarfLineProgram> programs;
+    std::string why;
+    if (!ReadDwarfLines((const u8*)elf.constData(), (size_t)elf.size(), programs, why))
+    {
+        error = QString::fromStdString(why) + ": " + path;
+        return false;
+    }
+
+    auto set = std::make_shared<Set>(*Cur);
+    set->LineSource = path;
+    set->LineFiles.clear();
+    set->LineCount = 0;
+    QHash<QString, int> moduleOf;
+    for (int m = 0; m < (int)set->Modules.size(); m++)
+    {
+        set->Modules[m].Lines.clear();
+        for (const FileRange& r : set->Modules[m].Files)
+            moduleOf.insert(set->SourceFiles[r.File].toLower(), m);
+    }
+    QHash<QString, int> fileIndex;
+    for (const DwarfLineProgram& prog : programs)
+    {
+        std::vector<QString> paths;
+        for (const std::string& f : prog.Files)
+            paths.push_back(QString::fromStdString(f).replace('\\', '/'));
+        int module = -1;
+        QString root;
+        for (size_t f = 1; f < paths.size() && module < 0; f++)
+        {
+            QStringList parts = paths[f].split('/');
+            for (int i = 0; i < parts.size() && module < 0; i++)
+            {
+                QString rel = parts.mid(i).join('/');
+                auto it = moduleOf.constFind(rel.toLower());
+                if (it == moduleOf.constEnd())
+                    continue;
+                module = *it;
+                root = paths[f].left(paths[f].size() - rel.size());
+            }
+        }
+        if (module < 0)
+            continue;
+        std::vector<int> index(paths.size(), -1);
+        for (size_t f = 1; f < paths.size(); f++)
+        {
+            QString rel = paths[f].startsWith(root, Qt::CaseInsensitive) ? paths[f].mid(root.size()) : paths[f];
+            auto it = fileIndex.constFind(rel);
+            if (it == fileIndex.constEnd())
+            {
+                it = fileIndex.insert(rel, (int)set->LineFiles.size());
+                set->LineFiles << rel;
+            }
+            index[f] = *it;
+        }
+        std::vector<LineRow>& lines = set->Modules[module].Lines;
+        for (const DwarfLineRow& row : prog.Rows)
+        {
+            int file = row.End || row.File >= index.size() ? -1 : index[row.File];
+            lines.push_back({row.Addr, file, (int)row.Line, row.Stmt});
+            set->LineCount += file >= 0;
+        }
+    }
+    if (!set->LineCount)
+    {
+        error = "no line info for the source files of these symbols: " + path;
+        return false;
+    }
+    for (Module& mod : set->Modules)
+        std::stable_sort(mod.Lines.begin(), mod.Lines.end(), [](const LineRow& a, const LineRow& b) {
+            return a.Addr != b.Addr ? a.Addr < b.Addr : (a.File < 0 && b.File >= 0);
+        });
+    Cur = set;
+    return true;
+}
+
+bool DebugSymbols::lineAt(u32 addr, QString& file, int& line) const
+{
+    if (!Cur)
+        return false;
+    addr &= ~1u;
+    for (const Module& mod : Cur->Modules)
+    {
+        if (mod.Lines.empty() || (mod.Overlay >= 0 && std::find(Loaded.begin(), Loaded.end(), mod.Overlay) == Loaded.end()))
+            continue;
+        auto it = std::upper_bound(mod.Lines.begin(), mod.Lines.end(), addr, [](u32 a, const LineRow& r) { return a < r.Addr; });
+        if (it == mod.Lines.begin() || it == mod.Lines.end())
+            continue;
+        --it;
+        if (it->File < 0)
+            continue;
+        file = Cur->LineFiles[it->File];
+        line = it->Line;
+        return true;
+    }
+    return false;
+}
+
+bool DebugSymbols::lineAddress(const QString& file, int line, u32& addr, int& module) const
+{
+    module = -1;
+    if (!Cur)
+        return false;
+    int f = Cur->LineFiles.indexOf(file);
+    if (f < 0)
+        return false;
+    bool found = false;
+    for (int m = 0; m < (int)Cur->Modules.size(); m++)
+    {
+        const Module& mod = Cur->Modules[m];
+        bool live = mod.Overlay < 0 || std::find(Loaded.begin(), Loaded.end(), mod.Overlay) != Loaded.end();
+        for (const LineRow& r : mod.Lines)
+        {
+            if (r.File != f || r.Line != line || !r.Stmt)
+                continue;
+            if (!live)
+            {
+                if (module < 0)
+                    module = m;
+                break;
+            }
+            if (!found || r.Addr < addr)
+                addr = r.Addr;
+            found = true;
+            module = m;
+        }
+        if (found)
+            return true;
+    }
+    return false;
 }
 
 void DebugSymbols::clear()
