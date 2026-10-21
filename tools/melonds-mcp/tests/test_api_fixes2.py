@@ -176,5 +176,78 @@ class FrameBoundaryRequestPc(ConsoleTest):
         self.c.wait(10000)
 
 
+POWCNT1 = 0x04000304
+VRAMCNT_A = 0x04000240
+
+
+class WriteRegions(ConsoleTest):
+    """mds_write writes palette, VRAM and OAM on the ARM9 bus (which ignores 8-bit writes there) with halfwords,
+    reads every write back, and fails naming the region where it cannot write."""
+
+    def setUp(self):
+        super().setUp()
+        a = A.Asm(CODE9)
+        a.ldr_const(0, POWCNT1)
+        a.ldr_const(1, 0x820F)                  # both 2D engines and the LCDs on
+        a.strh(1, 0, 0)
+        a.ldr_const(0, VRAMCNT_A)
+        a.mov(1, 0x80)                          # bank A enabled, LCDC (0x06800000)
+        a.strb(1, 0, 0)
+        a.label("spin")
+        a.b("spin")
+        self.load_program(a)
+        self.run_frames(1)
+
+    def test_palette_vram_oam(self):
+        for addr in (0x05000000, 0x05000400, 0x06800000, 0x07000000):
+            with self.subTest(hex(addr)):
+                self.c.write(addr, bytes(range(1, 9)))
+                self.assertEqual(self.c.read(addr, 8), bytes(range(1, 9)))
+
+    def test_odd_edges_keep_their_neighbours(self):
+        addr = 0x05000010
+        self.c.write(addr, bytes([0xAA] * 8))
+        self.c.write(addr + 1, bytes([1, 2, 3]))     # odd start, odd end
+        self.assertEqual(self.c.read(addr, 8), bytes([0xAA, 1, 2, 3, 0xAA, 0xAA, 0xAA, 0xAA]))
+        self.c.write(addr + 7, bytes([0x55]))        # one byte
+        self.assertEqual(self.c.read(addr + 6, 2), bytes([0xAA, 0x55]))
+
+    def test_unmapped_vram_fails(self):
+        with self.assertRaises(MelonError) as cm:
+            self.c.write(0x06820000, bytes([0x12, 0x34]))      # bank B is not mapped
+        self.assertIn("VRAM at 0x06820000 did not take the write", str(cm.exception))
+
+    def test_io_and_rom_fail_with_the_region(self):
+        cases = [(0x04000000, "I/O at 0x04000000 cannot be written"),
+                 (0x08000000, "the GBA ROM area at 0x08000000 is read-only"),
+                 (0x09FFFFFE, "the GBA ROM area at 0x09FFFFFE is read-only"),
+                 (0xFFFF0000, "ARM9 BIOS at 0xFFFF0000 is read-only")]
+        for addr, text in cases:
+            with self.subTest(hex(addr)):
+                with self.assertRaises(MelonError) as cm:
+                    self.c.write(addr, bytes([1, 2]))
+                self.assertIn(text, str(cm.exception))
+        with self.assertRaises(MelonError) as cm:
+            self.c.write(0x00000000, bytes([1]), cpu=7)
+        self.assertIn("ARM7 BIOS at 0x00000000 is read-only", str(cm.exception))
+
+    def test_main_ram_still_takes_bytes(self):
+        self.c.write(DATA + 3, bytes([1, 2, 3]))
+        self.assertEqual(self.c.read(DATA + 3, 3), bytes([1, 2, 3]))
+        self.c.write(DATA + 0x103, bytes([9]), cpu=7)
+        self.assertEqual(self.c.read(DATA + 0x103, 1, cpu=7), bytes([9]))
+
+    def test_lua_writes_the_same_way(self):
+        out = self.c.lua_exec(
+            "memory.write_u8(0x05000021, 0x5A, 'arm9'); memory.write_u16_le(0x07000040, 0x1234)\n"
+            "memory.write_bytes_as_array(0x06800011, {7, 8, 9}, 'arm9')\n"
+            "print(memory.read_u8(0x05000021, 'arm9'), memory.read_u16_le(0x07000040),"
+            " memory.read_u8(0x06800013, 'arm9'))")
+        self.assertEqual(out, "90\t4660\t9\n")
+        with self.assertRaises(MelonError) as cm:
+            self.c.lua_exec("memory.write_u32_le(0x04000208, 1)")
+        self.assertIn("memory write failed: I/O at 0x04000208", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

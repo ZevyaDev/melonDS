@@ -24,6 +24,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -193,6 +194,15 @@ public:
 
     u32 Peek(u8 cpu, u32 addr, u8 size) const;
     bool Poke(u8 cpu, u32 addr, u8 size, u32 value);
+    // Write len bytes as the CPU's bus sees them, for debugger clients (the C API, Lua). Byte writes where the
+    // bus takes them; on the ARM9 the palette, VRAM and OAM ignore 8-bit writes, so they get aligned halfwords
+    // (a byte at an odd edge is merged with the one beside it). Every write is read back. False with error
+    // naming the region for I/O (never written: side effects), the BIOSes and the GBA ROM area (read-only), and
+    // for a write that did not take (unmapped VRAM, palette powered off, no GBA cart for its SRAM, ...); the
+    // bytes before the failing one are written.
+    bool WriteMemory(u8 cpu, u32 addr, const u8* data, u32 len, std::string& error);
+    // The name of the memory region an address is in, as the CPU sees it ("main RAM", "VRAM", ...).
+    const char* RegionName(u8 cpu, u32 addr) const;
     void SyncPipelines(u32 addr, u32 size);
     int HookedCPU() const;
     ExecResult Execute(u8 cpu, const std::vector<u32>& ops);

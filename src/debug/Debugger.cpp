@@ -17,6 +17,7 @@
 */
 
 #include <algorithm>
+#include <cstdio>
 
 #include "Debugger.h"
 #include "../ARM.h"
@@ -500,6 +501,74 @@ bool Debugger::Poke(u8 cpu, u32 addr, u8 size, u32 value)
         else NDS.ARM7Write32(addr, value);
     }
     SyncPipelines(addr, size);
+    return true;
+}
+
+const char* Debugger::RegionName(u8 cpu, u32 addr) const
+{
+    if (cpu == 0)
+    {
+        ARMv5& arm9 = *NDS.ARM9;
+        if (addr < arm9.ITCMSize)
+            return "ITCM";
+        if ((addr & arm9.DTCMMask) == arm9.DTCMBase)
+            return "DTCM";
+        if (addr >= 0xFFFF0000)
+            return "ARM9 BIOS";
+    }
+    switch (addr >> 24)
+    {
+    case 0x00: return cpu ? "ARM7 BIOS" : "unmapped memory";
+    case 0x02: return "main RAM";
+    case 0x03: return cpu ? "WRAM" : "shared WRAM";
+    case 0x04: return "I/O";
+    case 0x05: return cpu ? "unmapped memory" : "palette";
+    case 0x06: return "VRAM";
+    case 0x07: return cpu ? "unmapped memory" : "OAM";
+    case 0x08: case 0x09: return "the GBA ROM area";
+    case 0x0A: return "GBA SRAM";
+    default: return "unmapped memory";
+    }
+}
+
+bool Debugger::WriteMemory(u8 cpu, u32 addr, const u8* data, u32 len, std::string& error)
+{
+    cpu &= 1;
+    auto fail = [&](u32 a, const std::string& why) {
+        char where[16];
+        snprintf(where, sizeof(where), "0x%08X", a);
+        error = std::string(RegionName(cpu, a)) + " at " + where + why;
+        return false;
+    };
+    for (u32 off = 0; off < len;)
+    {
+        u32 a = addr + off;
+        bool tcm = cpu == 0 && (a < NDS.ARM9->ITCMSize || (a & NDS.ARM9->DTCMMask) == NDS.ARM9->DTCMBase);
+        u8 top = a >> 24;
+        if (!tcm && top == 0x04)
+            return fail(a, " cannot be written by the debugger (I/O writes have side effects)");
+        if (!tcm && (top == 0x08 || top == 0x09 || (cpu == 0 && a >= 0xFFFF0000) || (cpu == 1 && top == 0x00)))
+            return fail(a, " is read-only");
+        if (!tcm && cpu == 0 && top >= 0x05 && top <= 0x07)
+        {
+            // the ARM9 bus drops 8-bit writes here: write the halfword with the neighbouring byte kept
+            u32 h = a & ~1u;
+            u16 v = Peek(cpu, h, 2);
+            for (u32 b = 0; b < 2; b++)
+                if (h + b - addr < len)
+                    v = (v & ~(0xFF << (8 * b))) | (data[h + b - addr] << (8 * b));
+            Poke(cpu, h, 2, v);
+            if (Peek(cpu, h, 2) != v)
+                return fail(a, top == 0x06 ? " did not take the write (no VRAM bank mapped there?)"
+                                           : " did not take the write (its 2D engine powered off?)");
+            off = h + 2 - addr;
+            continue;
+        }
+        Poke(cpu, a, 1, data[off]);
+        if (Peek(cpu, a, 1) != data[off])
+            return fail(a, top == 0x0A ? " did not take the write (no GBA cart SRAM?)" : " did not take the write");
+        off++;
+    }
     return true;
 }
 

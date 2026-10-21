@@ -249,6 +249,7 @@ int mds_has(const char* name)
         // API level 6 (fix/api-quirks-2)
         "interrupt_clean",      // a park and the end of a run drop leftover break requests; mds_interrupt ignores a stopped console
         "pc_next",              // mds_get_regs pc = each CPU's next instruction at every park; frame-boundary requests too
+        "write_regions",        // mds_write/Lua writes: halfwords for palette/VRAM/OAM, read back, errors name the region
     };
     static const char* const Functions[] = {
         "mds_has", "mds_serve_host", "mds_gdb_host", "mds_lastwriter_query",
@@ -764,13 +765,7 @@ int mds_write(int id, int cpu, uint32_t addr, uint32_t len, const uint8_t* data)
     if (!s)
         return -1;
     return OnEmu(s, [&](Instance& inst, std::string& error) {
-        for (u32 i = 0; i < len; i++)
-            if (!inst.NDS->Debugger.Poke(cpu == 7 || cpu == 1, addr + i, 1, data[i]))
-            {
-                error = "address not writable";
-                return -1;
-            }
-        return 0;
+        return inst.NDS->Debugger.WriteMemory(cpu == 7 || cpu == 1, addr, data, len, error) ? 0 : -1;
     });
 }
 

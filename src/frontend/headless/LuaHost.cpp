@@ -75,16 +75,26 @@ static int ReadValue(lua_State* L)
     return 1;
 }
 
+// Writes as mds_write does (Debugger::WriteMemory): a region the bus refuses bytes for gets halfwords, and a write
+// that cannot be made (I/O, ROM, a write that did not take) raises a Lua error naming the region.
+static int WriteGuest(lua_State* L, int cpu, u32 addr, const u8* data, u32 len)
+{
+    std::string error;
+    if (!Console(L).Debugger.WriteMemory(cpu, addr, data, len, error))
+        return luaL_error(L, "memory write failed: %s", error.c_str());
+    return 0;
+}
+
 template <int size>
 static int WriteValue(lua_State* L)
 {
     int cpu;
     u32 addr = DomainAddress(L, 3, (u32)luaL_checkinteger(L, 1), cpu);
     u32 v = (u32)luaL_checkinteger(L, 2);
-    melonDS::NDS& nds = Console(L);
+    u8 bytes[4];
     for (int i = 0; i < size; i++)
-        nds.Debugger.Poke(cpu, addr + i, 1, (v >> (8 * i)) & 0xFF);
-    return 0;
+        bytes[i] = (v >> (8 * i)) & 0xFF;
+    return WriteGuest(L, cpu, addr, bytes, size);
 }
 
 static int ReadBytes(lua_State* L)
@@ -107,15 +117,15 @@ static int WriteBytes(lua_State* L)
     int cpu;
     u32 addr = DomainAddress(L, 3, (u32)luaL_checkinteger(L, 1), cpu);
     luaL_checktype(L, 2, LUA_TTABLE);
-    melonDS::NDS& nds = Console(L);
     lua_Integer len = luaL_len(L, 2);
+    std::vector<u8> bytes(len > 0 ? len : 0);
     for (lua_Integer i = 0; i < len; i++)
     {
         lua_rawgeti(L, 2, i + 1);
-        nds.Debugger.Poke(cpu, addr + i, 1, (u32)lua_tointeger(L, -1) & 0xFF);
+        bytes[i] = (u32)lua_tointeger(L, -1) & 0xFF;
         lua_pop(L, 1);
     }
-    return 0;
+    return WriteGuest(L, cpu, addr, bytes.data(), (u32)bytes.size());
 }
 
 static int FrameCount(lua_State* L)
