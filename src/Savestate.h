@@ -25,7 +25,7 @@
 #include "types.h"
 
 #define SAVESTATE_MAJOR 14
-#define SAVESTATE_MINOR 1
+#define SAVESTATE_MINOR 2
 
 // bitmask for the savestate config word
 enum
