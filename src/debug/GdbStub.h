@@ -190,6 +190,7 @@ private:
 	u32 CurBkpt, CurWatchpt;
 	bool StatFlag;
 	bool NoAck;
+	bool ExtendedMode;
 
 	std::array<u8, GDBPROTO_BUFFER_CAPACITY> RecvBuffer;
 	u32 RecvBufferFilled = 0;

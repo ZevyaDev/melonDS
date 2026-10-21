@@ -58,7 +58,7 @@ namespace Gdb
 GdbStub::GdbStub(StubCallbacks* cb)
 	: Cb(cb), Port(0)
 	, SockFd(0), ConnFd(0)
-	, Stat(TgtStatus::None), CurBkpt(0), CurWatchpt(0), StatFlag(false), NoAck(false)
+	, Stat(TgtStatus::None), CurBkpt(0), CurWatchpt(0), StatFlag(false), NoAck(false), ExtendedMode(false)
 	, ServerSA((void*)new struct sockaddr_in())
 	, ClientSA((void*)new struct sockaddr_in())
 { }
@@ -160,6 +160,11 @@ void GdbStub::Disconnect()
 {
 	if (ConnFd > 0) closesocket(ConnFd);
 	ConnFd = 0;
+	NoAck = false;
+	ExtendedMode = false;
+	StatFlag = false;
+	RecvBufferFilled = 0;
+	DelAllBpWp();
 }
 
 GdbStub::~GdbStub()
@@ -284,6 +289,7 @@ StubState GdbStub::HandlePacket()
 	else
 	{
 		Stat = TgtStatus::None;
+		Disconnect();
 		return StubState::Disconnect;
 	}
 }
@@ -317,8 +323,7 @@ StubState GdbStub::Poll(bool wait)
 		if (WaitAckBlocking(&a, 1000) < 0)
 		{
 			Log(LogLevel::Error, "[GDB] inital handshake: didn't receive inital ack!\n");
-			closesocket(ConnFd);
-			ConnFd = 0;
+			Disconnect();
 			return StubState::Disconnect;
 		}
 
@@ -403,8 +408,7 @@ StubState GdbStub::Poll(bool wait)
 	case_gdbp_eof:
 	case ReadResult::Eof:
 		Log(LogLevel::Info, "[GDB] EOF!\n");
-		closesocket(ConnFd);
-		ConnFd = 0;
+		Disconnect();
 		return StubState::Disconnect;
 	case ReadResult::CksumErr:
 		Log(LogLevel::Info, "[GDB] checksum err!\n");

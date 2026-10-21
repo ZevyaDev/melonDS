@@ -620,6 +620,7 @@ ExecResult GdbStub::Handle_Question(GdbStub* stub, const u8* cmd, ssize_t len)
 
 ExecResult GdbStub::Handle_Exclamation(GdbStub* stub, const u8* cmd, ssize_t len)
 {
+	stub->ExtendedMode = true;
 	stub->RespStr("OK");
 	return ExecResult::Ok;
 }
@@ -838,13 +839,9 @@ ExecResult GdbStub::Handle_v_Attach(GdbStub* stub, const u8* cmd, ssize_t len)
 
 ExecResult GdbStub::Handle_v_Kill(GdbStub* stub, const u8* cmd, ssize_t len)
 {
-	TgtStatus st = stub->Stat;
-
-	stub->Cb->ResetGdb();
-
+	stub->DelAllBpWp();
 	stub->RespStr("OK");
-
-	return (st != TgtStatus::Running && st != TgtStatus::None) ? ExecResult::Detached : ExecResult::Ok;
+	return stub->ExtendedMode ? ExecResult::Ok : ExecResult::Detached;
 }
 
 ExecResult GdbStub::Handle_v_Run(GdbStub* stub, const u8* cmd, ssize_t len)
@@ -855,7 +852,11 @@ ExecResult GdbStub::Handle_v_Run(GdbStub* stub, const u8* cmd, ssize_t len)
 
 	// TODO: handle cmdline for homebrew?
 
-	return (st != TgtStatus::Running && st != TgtStatus::None) ? ExecResult::Continue : ExecResult::Ok;
+	if (st == TgtStatus::Running || st == TgtStatus::None)
+		return ExecResult::MustBreak;
+
+	stub->RespFmt("S%02X", GdbSignal::TRAP);
+	return ExecResult::Ok;
 }
 
 ExecResult GdbStub::Handle_v_Stopped(GdbStub* stub, const u8* cmd, ssize_t len)

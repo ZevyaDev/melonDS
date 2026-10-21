@@ -1134,7 +1134,7 @@ void ARM::WriteMem(u32 addr, int size, u32 v)
 
 void ARM::ResetGdb()
 {
-    NDS.Reset();
+    NDS.Restart();
     NDS.GPU.StartFrame(); // need this to properly kick off the scheduler & frame output
 }
 int ARM::RemoteCmd(const u8* cmd, size_t len)

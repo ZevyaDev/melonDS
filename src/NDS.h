@@ -392,6 +392,7 @@ public: // TODO: Encapsulate the rest of these members
     virtual bool NeedsDirectBoot() const;
     void SetupDirectBoot(const std::string& romname);
     virtual void SetupDirectBoot();
+    void Restart();
 
     [[nodiscard]] GBACart::CartCommon* GetGBACart() { return (ConsoleType == 1) ? nullptr : GBACartSlot.GetCart(); }
     [[nodiscard]] const GBACart::CartCommon* GetGBACart() const {  return (ConsoleType == 1) ? nullptr : GBACartSlot.GetCart(); }
@@ -538,6 +539,7 @@ protected:
     u16 KeyCnt[2];
     bool Running;
     bool RunningGame;
+    std::optional<std::string> DirectBootROM;
     u64 LastSysClockCycles;
     u64 FrameStartTimestamp;
     u64 NextTarget();

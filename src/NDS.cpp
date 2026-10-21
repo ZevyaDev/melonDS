@@ -412,6 +412,7 @@ void NDS::SetupDirectBoot(const std::string& romname)
 {
     const NDSHeader& header = NDSCartSlot.GetCart()->GetHeader();
     SetupDirectBoot();
+    DirectBootROM = romname;
 
     NDSCartSlot.SetupDirectBoot(romname);
 
@@ -462,6 +463,7 @@ void NDS::Reset()
     u32 i;
 
     RunningGame = false;
+    DirectBootROM.reset();
     LastSysClockCycles = 0;
     Debugger.Reset();
 
@@ -570,6 +572,14 @@ void NDS::Reset()
     SPI.Reset();
     RTC.Reset();
     Wifi.Reset();
+}
+
+void NDS::Restart()
+{
+    std::optional<std::string> rom = DirectBootROM;
+    Reset();
+    if (rom)
+        SetupDirectBoot(*rom);
 }
 
 void NDS::Start()
