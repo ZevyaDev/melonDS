@@ -1223,10 +1223,13 @@ emulated the same thing could save states that differed in those bytes.
 
 With these, after a load a reused console is byte for byte the same as a fresh console that loaded
 the same state, frame after frame (`tools/melonds-mcp/tests/test_savestate_reuse.py`; checked on 15
-DQ9 states over 30 frames), and a load reproduces the run that saved the state. **Runs from a
-loaded state made before level 7 can differ from runs made now** in their first frames (a fresh
-console now runs the first instructions at the speed the game ran them); states themselves are
-unchanged and load as before. Nothing else in the core was found to survive a load: with the
+DQ9 states for 20-30 frames after the load), and a load reproduces the run that saved the state.
+**Runs from a loaded state made before level 7 can differ from runs made now** in their first
+frames (a fresh console now runs the first instructions at the speed the game ran them); states
+themselves are unchanged and load as before. In dq9-re, 9 of 4084 scenario states built from their
+parents changed RAM hash (a few timing-dependent loader words; no screen changed), and in 89
+re-run diffcov pairs only raw call counts of two GX busy-wait polls moved (by 1-11), never which
+functions a pair singles out. Nothing else in the core was found to survive a load: with the
 fixes, the saved state of a reused console matched a fresh one in every section.
 
 Determinism: with 14.1 and later, a save, run, load, run sequence reproduces a run that never loaded
