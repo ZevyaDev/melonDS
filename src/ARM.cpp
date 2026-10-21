@@ -58,11 +58,13 @@ void ARM::GdbCheckB()
 }
 void ARM::GdbCheckC()
 {
-    while (NDS.Debugger.Armed[Num])
+    // a hook or a break that changes PC (memory.execute branching, a register write while parked) runs the
+    // hook again for the new instruction before anything executes
+    for (bool redirected = false; NDS.Debugger.Armed[Num]; redirected = true)
     {
         u32 pc = R[15];
         u32 thumb = CPSR & 0x20;
-        NDS.Debugger.OnInstr(*this, pc - (thumb ? 2 : 4));
+        NDS.Debugger.OnInstr(*this, pc - (thumb ? 2 : 4), redirected);
         if (R[15] == pc && (CPSR & 0x20) == thumb)
             break;
     }
@@ -107,11 +109,13 @@ void ARM::GdbCheckA() {}
 void ARM::GdbCheckB() {}
 void ARM::GdbCheckC()
 {
-    while (NDS.Debugger.Armed[Num])
+    // a hook or a break that changes PC (memory.execute branching, a register write while parked) runs the
+    // hook again for the new instruction before anything executes
+    for (bool redirected = false; NDS.Debugger.Armed[Num]; redirected = true)
     {
         u32 pc = R[15];
         u32 thumb = CPSR & 0x20;
-        NDS.Debugger.OnInstr(*this, pc - (thumb ? 2 : 4));
+        NDS.Debugger.OnInstr(*this, pc - (thumb ? 2 : 4), redirected);
         if (R[15] == pc && (CPSR & 0x20) == thumb)
             break;
     }

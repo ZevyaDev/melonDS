@@ -198,7 +198,9 @@ public:
     std::array<bool, 2> DataArmed {};
     bool CallsArmed = false;
 
-    void OnInstr(ARM& cpu, u32 pc);
+    // redirected: a repeat call for the same instruction slot because a hook or a break changed PC (see
+    // ARM::GdbCheckC); the instruction of the first call never ran, so the step countdown does not advance.
+    void OnInstr(ARM& cpu, u32 pc, bool redirected = false);
     void OnData(ARM& cpu, u32 addr, u8 size, u32 value, bool write);
     // A DMA unit was written (called after the write, so a break sees the new memory).
     void OnDMA(u8 cpu, u8 channel, u32 addr, u8 size, u32 value);

@@ -1183,7 +1183,7 @@ void Debugger::UnwindCalls(ARM& cpu, u32 pc)
     }
 }
 
-void Debugger::OnInstr(ARM& cpu, u32 pc)
+void Debugger::OnInstr(ARM& cpu, u32 pc, bool redirected)
 {
     u8 n = cpu.Num;
     u32 prev = CurPC[n];
@@ -1247,7 +1247,7 @@ void Debugger::OnInstr(ARM& cpu, u32 pc)
         ev.Kind = BreakKind::Request;
         raise = true;
     }
-    if (StepRemaining[n] && --StepRemaining[n] == 0 && !raise)
+    if (StepRemaining[n] && !redirected && --StepRemaining[n] == 0 && !raise)
     {
         ev.Kind = BreakKind::Step;
         raise = true;
