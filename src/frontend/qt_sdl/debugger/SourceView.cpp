@@ -20,9 +20,12 @@
 #include <vector>
 
 #include <QDesktopServices>
+#include <QDir>
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMouseEvent>
+#include <QPainter>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -122,6 +125,121 @@ private:
 
 }
 
+class CodeView : public QPlainTextEdit
+{
+public:
+    explicit CodeView(QWidget* parent);
+
+    std::function<void(int)> GutterClicked;
+    QSet<int> Breaks;
+    QSet<int> Disabled;
+    int PCLine = -1;
+
+    int gutterWidth() const;
+    void paintGutter(QPaintEvent* event);
+    void updateGutter() { Gutter->update(); }
+
+protected:
+    void resizeEvent(QResizeEvent* event) override;
+
+private:
+    QWidget* Gutter;
+};
+
+namespace
+{
+
+class GutterArea : public QWidget
+{
+public:
+    explicit GutterArea(CodeView* view) : QWidget(view), View(view) {}
+    QSize sizeHint() const override { return QSize(View->gutterWidth(), 0); }
+
+protected:
+    void paintEvent(QPaintEvent* event) override { View->paintGutter(event); }
+    void mousePressEvent(QMouseEvent* event) override
+    {
+        if (View->GutterClicked)
+            View->GutterClicked(View->cursorForPosition(QPoint(0, event->pos().y())).blockNumber());
+    }
+
+private:
+    CodeView* View;
+};
+
+}
+
+CodeView::CodeView(QWidget* parent) : QPlainTextEdit(parent)
+{
+    Gutter = new GutterArea(this);
+    connect(this, &QPlainTextEdit::blockCountChanged, this, [this] { setViewportMargins(gutterWidth(), 0, 0, 0); });
+    connect(this, &QPlainTextEdit::updateRequest, this, [this](const QRect& rect, int dy) {
+        if (dy)
+            Gutter->scroll(0, dy);
+        else
+            Gutter->update(0, rect.y(), Gutter->width(), rect.height());
+    });
+    setViewportMargins(gutterWidth(), 0, 0, 0);
+}
+
+int CodeView::gutterWidth() const
+{
+    int digits = (int)QString::number(std::max(1, blockCount())).size();
+    return fontMetrics().height() + fontMetrics().horizontalAdvance('9') * digits + 8;
+}
+
+void CodeView::resizeEvent(QResizeEvent* event)
+{
+    QPlainTextEdit::resizeEvent(event);
+    QRect cr = contentsRect();
+    Gutter->setGeometry(QRect(cr.left(), cr.top(), gutterWidth(), cr.height()));
+}
+
+void CodeView::paintGutter(QPaintEvent* event)
+{
+    QPainter p(Gutter);
+    p.fillRect(event->rect(), palette().window());
+    int lh = fontMetrics().height();
+    QTextBlock block = firstVisibleBlock();
+    int number = block.blockNumber();
+    int top = qRound(blockBoundingGeometry(block).translated(contentOffset()).top());
+    int bottom = top + qRound(blockBoundingRect(block).height());
+    while (block.isValid() && top <= event->rect().bottom())
+    {
+        if (block.isVisible() && bottom >= event->rect().top())
+        {
+            if (Breaks.contains(number))
+            {
+                p.setRenderHint(QPainter::Antialiasing);
+                if (Disabled.contains(number))
+                {
+                    p.setPen(QPen(QColor(200, 40, 40), 1.5));
+                    p.setBrush(Qt::NoBrush);
+                }
+                else
+                {
+                    p.setPen(Qt::NoPen);
+                    p.setBrush(QColor(200, 40, 40));
+                }
+                p.drawEllipse(QRect(3, top + 3, lh - 6, lh - 6));
+                p.setRenderHint(QPainter::Antialiasing, false);
+                p.setBrush(Qt::NoBrush);
+            }
+            if (number == PCLine)
+            {
+                p.setPen(palette().text().color());
+                p.drawText(QRect(0, top, lh, lh), Qt::AlignCenter, ">");
+            }
+            p.setPen(palette().placeholderText().color());
+            p.drawText(QRect(lh, top, Gutter->width() - lh - 4, lh), Qt::AlignRight | Qt::AlignVCenter, QString::number(number + 1));
+        }
+        block = block.next();
+        top = bottom;
+        bottom = top + qRound(blockBoundingRect(block).height());
+        ++number;
+    }
+}
+
 SourceView::SourceView(DebugBridge* bridge, QWidget* parent) : QWidget(parent), Bridge(bridge)
 {
     QVBoxLayout* layout = new QVBoxLayout(this);
@@ -136,11 +254,12 @@ SourceView::SourceView(DebugBridge* bridge, QWidget* parent) : QWidget(parent), 
     top->addWidget(Title, 1);
     top->addWidget(Open);
     layout->addLayout(top);
-    Text = new QPlainTextEdit(this);
+    Text = new CodeView(this);
     Text->setObjectName("SourceText");
     Text->setReadOnly(true);
     Text->setLineWrapMode(QPlainTextEdit::NoWrap);
     Text->setFont(MonoFont());
+    Text->GutterClicked = [this](int line) { clickLine(line); };
     layout->addWidget(Text);
     auto* highlighter = new CodeHighlighter(Text->document());
     highlighter->setPalette(palette());
@@ -163,7 +282,12 @@ void SourceView::message(const QString& title, const QString& text)
 {
     Title->setText(title);
     ShownLocation.clear();
+    ShownRel.clear();
     Shown = {};
+    ShownLine = -1;
+    Text->Breaks.clear();
+    Text->Disabled.clear();
+    Text->PCLine = -1;
     Text->setExtraSelections({});
     Text->setPlainText(text);
     Open->setEnabled(false);
@@ -191,10 +315,11 @@ void SourceView::showAddress(u32 addr)
 
     const DebugSymbols::Symbol* sym = syms.lookup(addr);
     std::string file;
-    bool haveFile = syms.sourceFile(addr, file);
+    int line = 0;
+    bool haveFile = syms.lineAt(addr, file, line) || syms.sourceFile(addr, file);
     QString rel = SymStr(file);
     QString label = sym ? SymStr(syms.name(*sym)) : Hex(addr);
-    QString key = rel + '\n' + (sym ? Hex(sym->Addr) + SymStr(sym->Name) : Hex(addr)) + (syms.demangle() ? "" : "\n");
+    QString key = rel + ':' + QString::number(line) + '\n' + (sym ? Hex(sym->Addr) + SymStr(sym->Name) : Hex(addr)) + (syms.demangle() ? "" : "\n");
     if (key == Key)
         return;
     Key = key;
@@ -215,22 +340,23 @@ void SourceView::showAddress(u32 addr)
     QString name = sym ? SymStr(sym->Name) : QString();
     QString pretty = sym ? SymStr(sym->Pretty) : QString();
     const void* owner = set.get();
-    auto withRoot = [this, request, rel, name, pretty, label, owner] {
+    bool absolute = QDir::isAbsolutePath(rel);
+    auto withRoot = [this, request, rel, name, pretty, label, owner, absolute, line] {
         if (request != Request || ForSet.get() != owner)
             return;
-        if (Root.isEmpty())
+        if (Root.isEmpty() && !absolute)
         {
             message(label, "Cannot find " + rel + " in " + SymStr(ForSet->Base) + " or the folders above it.");
             return;
         }
-        QString location = DebugSource::Join(Root, rel);
+        QString location = absolute ? rel : DebugSource::Join(Root, rel);
         if (Cache.contains(location))
         {
-            display(location, rel, name, pretty, label);
+            display(location, rel, name, pretty, label, line);
             return;
         }
         Title->setText(rel + " (loading)");
-        DebugSource::Read(location, this, [this, request, location, rel, name, pretty, label, owner](bool ok, const QByteArray& data) {
+        DebugSource::Read(location, this, [this, request, location, rel, name, pretty, label, owner, line](bool ok, const QByteArray& data) {
             if (ForSet.get() != owner)
                 return;
             if (ok)
@@ -240,10 +366,10 @@ void SourceView::showAddress(u32 addr)
             if (!ok)
                 message(label, "Cannot read " + location);
             else
-                display(location, rel, name, pretty, label);
+                display(location, rel, name, pretty, label, line);
         });
     };
-    if (!Root.isEmpty() || RootFailed)
+    if (!Root.isEmpty() || RootFailed || absolute)
     {
         withRoot();
         return;
@@ -291,7 +417,7 @@ void SourceView::findRoot(const QString& rel, QStringList candidates, std::funct
     });
 }
 
-void SourceView::display(const QString& location, const QString& rel, const QString& name, const QString& pretty, const QString& label)
+void SourceView::display(const QString& location, const QString& rel, const QString& name, const QString& pretty, const QString& label, int line)
 {
     const QString& text = Cache[location];
     if (location != ShownLocation)
@@ -301,34 +427,126 @@ void SourceView::display(const QString& location, const QString& rel, const QStr
         plain.remove('\r');
         Text->setPlainText(plain);
     }
+    ShownRel = rel;
+    ShownLine = line - 1;
     Open->setEnabled(true);
     Shown = DebugSource::FindFunction(text, rel, name, pretty);
-    QList<QTextEdit::ExtraSelection> marks;
-    if (Shown.First < 0)
+    applyMarks();
+    if (Shown.First < 0 && ShownLine < 0)
     {
         Title->setText(rel + "   " + label + " (not found in the file)");
-        Text->setExtraSelections(marks);
         Text->verticalScrollBar()->setValue(0);
         return;
     }
-    QColor color = palette().highlight().color();
-    color.setAlpha(HighlightAlpha);
-    for (int line = Shown.First; line <= Shown.Last; line++)
+    if (Shown.First >= 0)
+        Title->setText(QString("%1:%2-%3   %4").arg(rel).arg(Shown.First + 1).arg(Shown.Last + 1).arg(label)
+            + (ShownLine >= 0 ? QString("   line %1").arg(line) : QString()));
+    else
+        Title->setText(QString("%1:%2   %3").arg(rel).arg(line).arg(label));
+    int visible = std::max(1, Text->viewport()->height() / std::max(1, Text->fontMetrics().height()));
+    int top = (Shown.First >= 0 ? Shown.First : ShownLine) - ContextLines;
+    if (ShownLine >= 0 && (ShownLine < top || ShownLine >= top + visible - 1))
+        top = ShownLine - visible / 2;
+    Text->verticalScrollBar()->setValue(std::max(0, top));
+}
+
+void SourceView::applyMarks()
+{
+    Text->Breaks.clear();
+    Text->Disabled.clear();
+    Text->PCLine = -1;
+    if (ShownLocation.isEmpty())
     {
+        Text->updateGutter();
+        return;
+    }
+    QList<QTextEdit::ExtraSelection> marks;
+    auto mark = [&](int line, const QColor& color) {
         QTextEdit::ExtraSelection sel;
         sel.format.setBackground(color);
         sel.format.setProperty(QTextFormat::FullWidthSelection, true);
         sel.cursor = QTextCursor(Text->document()->findBlockByNumber(line));
         marks << sel;
+    };
+    QColor span = palette().highlight().color();
+    span.setAlpha(HighlightAlpha);
+    for (int line = Shown.First; line >= 0 && line <= Shown.Last; line++)
+        mark(line, span);
+    if (ShownLine >= 0)
+    {
+        QColor selected = palette().highlight().color();
+        selected.setAlpha(HighlightAlpha * 2);
+        mark(ShownLine, selected);
     }
+    DebugSymbols& syms = Bridge->symbols();
+    std::string shown = SymStr(ShownRel);
+    std::string file;
+    int line;
+    if (Stopped && syms.lineAt(PC, file, line) && file == shown)
+    {
+        Text->PCLine = line - 1;
+        mark(Text->PCLine, QColor(255, 200, 0, 90));
+    }
+    for (u32 addr : Exec)
+        if (syms.lineAt(addr, file, line) && file == shown)
+        {
+            Text->Breaks.insert(line - 1);
+            if (ExecDisabled.contains(addr))
+                Text->Disabled.insert(line - 1);
+        }
     Text->setExtraSelections(marks);
-    Title->setText(QString("%1:%2-%3   %4").arg(rel).arg(Shown.First + 1).arg(Shown.Last + 1).arg(label));
-    Text->verticalScrollBar()->setValue(std::max(0, Shown.First - ContextLines));
+    Text->updateGutter();
+}
+
+void SourceView::setMarks(u32 pc, bool stopped, const QSet<u32>& exec, const QSet<u32>& disabled)
+{
+    PC = pc;
+    Stopped = stopped;
+    Exec = exec;
+    ExecDisabled = disabled;
+    applyMarks();
+}
+
+void SourceView::clickLine(int line)
+{
+    if (ShownRel.isEmpty())
+        return;
+    DebugSymbols& syms = Bridge->symbols();
+    u32 addr;
+    int module;
+    if (syms.lineAddress(SymStr(ShownRel), line + 1, addr, module))
+    {
+        emit toggleBreakpoint(addr);
+        return;
+    }
+    auto set = syms.set();
+    if (syms.lineSource().empty())
+        Title->setText("No line info: Symbols > Line info loads an ELF linked with -sym on");
+    else if (module >= 0 && set)
+        Title->setText(QString("%1:%2 is in %3, which is not loaded").arg(ShownRel).arg(line + 1).arg(SymStr(set->Modules[module].Name)));
+    else
+        Title->setText(QString("%1:%2 has no code").arg(ShownRel).arg(line + 1));
 }
 
 QString SourceView::describe() const
 {
     QString out = Title->text();
+    QString marks;
+    if (ShownLine >= 0)
+        marks += QString(" line=%1").arg(ShownLine + 1);
+    if (Text->PCLine >= 0)
+        marks += QString(" pc=%1").arg(Text->PCLine + 1);
+    if (!Text->Breaks.isEmpty())
+    {
+        QList<int> lines = Text->Breaks.values();
+        std::sort(lines.begin(), lines.end());
+        QStringList list;
+        for (int l : lines)
+            list << QString::number(l + 1);
+        marks += " breaks=" + list.join(',');
+    }
+    if (!marks.isEmpty())
+        out += "\nmarks:" + marks;
     if (Shown.First < 0)
         return out + "\n" + Text->toPlainText().left(400);
     for (int line = Shown.First; line <= Shown.Last; line++)

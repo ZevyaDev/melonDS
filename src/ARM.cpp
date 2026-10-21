@@ -28,6 +28,7 @@
 #include "Platform.h"
 #include "GPU.h"
 #include "ARMJIT_Memory.h"
+#include "debug/RomOverlays.h"
 
 namespace melonDS
 {
@@ -1138,10 +1139,10 @@ void ARM::WriteMem(u32 addr, int size, u32 v)
 
 void ARM::ResetGdb()
 {
-    NDS.Reset();
+    NDS.Restart();
     NDS.GPU.StartFrame(); // need this to properly kick off the scheduler & frame output
 }
-int ARM::RemoteCmd(const u8* cmd, size_t len)
+int ARM::RemoteCmd(const u8* cmd, size_t len, std::string& out)
 {
     (void)len;
 
@@ -1149,6 +1150,20 @@ int ARM::RemoteCmd(const u8* cmd, size_t len)
     if (!strcmp((const char*)cmd, "reset") || !strcmp((const char*)cmd, "r"))
     {
         Reset();
+        return 0;
+    }
+    if (!strcmp((const char*)cmd, "overlays"))
+    {
+        char line[64];
+        for (const RomOverlay& ov : ReadRomOverlays(NDS))
+        {
+            if (!OverlayLoaded(NDS, ov.Base, ov.Size, ov.Image))
+                continue;
+            snprintf(line, sizeof(line), "overlay %d at 0x%08X-0x%08X\n", ov.Id, ov.Base, ov.Base + ov.Size);
+            out += line;
+        }
+        if (out.empty())
+            out = "no overlays loaded\n";
         return 0;
     }
 

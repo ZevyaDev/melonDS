@@ -192,14 +192,21 @@ ReadResult GdbStub::MsgRecv()
 #endif
 #endif
 
-		if (receivedNum <= 0)
+		if (receivedNum < 0)
 		{
-			if (first) return ReadResult::NoPacket;
-			else
-			{
-				Log(LogLevel::Debug, "[GDB] recv() error %zi, errno=%d (%s)\n", receivedNum, errno, strerror(errno));
-				return ReadResult::Eof;
-			}
+#ifdef _WIN32
+			bool wouldBlock = WSAGetLastError() == WSAEWOULDBLOCK;
+#else
+			bool wouldBlock = errno == EAGAIN || errno == EWOULDBLOCK;
+#endif
+			if (first && wouldBlock) return ReadResult::NoPacket;
+			Log(LogLevel::Debug, "[GDB] recv() error %zi, errno=%d (%s)\n", receivedNum, errno, strerror(errno));
+			return ReadResult::Eof;
+		}
+		if (receivedNum == 0)
+		{
+			Log(LogLevel::Info, "[GDB] connection closed by the client\n");
+			return ReadResult::Eof;
 		}
 		RecvBufferFilled += static_cast<u32>(receivedNum); 
 
@@ -268,7 +275,7 @@ int GdbStub::WaitAckBlocking(u8* ackp, int to_ms)
 	{
 		r = recv(ConnFd, (char*)ackp, 1, 0);
 		if (r < 0) return r;
-		return 0;
+		return (r == 1) ? 0 : -1;
 	}
 
 	return -1;

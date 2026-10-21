@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <assert.h>
 #include <string.h>
+#include <algorithm>
+#include <string>
 
 #include "../CRC32.h"
 #include "../Platform.h"
@@ -620,6 +622,7 @@ ExecResult GdbStub::Handle_Question(GdbStub* stub, const u8* cmd, ssize_t len)
 
 ExecResult GdbStub::Handle_Exclamation(GdbStub* stub, const u8* cmd, ssize_t len)
 {
+	stub->ExtendedMode = true;
 	stub->RespStr("OK");
 	return ExecResult::Ok;
 }
@@ -726,7 +729,17 @@ ExecResult GdbStub::Handle_q_Rcmd(GdbStub* stub, const u8* cmd, ssize_t len)
 		tempdatabuf[i] = unhex8(&cmd[i*2]);
 	}
 
-	int r = stub->Cb->RemoteCmd(tempdatabuf, len/2);
+	std::string out;
+	int r = stub->Cb->RemoteCmd(tempdatabuf, len/2, out);
+
+	for (size_t i = 0; i < out.size(); i += 256)
+	{
+		size_t n = std::min<size_t>(256, out.size() - i);
+		tempdatabuf[0] = 'O';
+		for (size_t k = 0; k < n; k++)
+			hexfmt8(&tempdatabuf[1 + k*2], (u8)out[i + k]);
+		stub->Resp(tempdatabuf, 1 + n*2);
+	}
 
 	if (r) stub->RespFmt("E%02X", r&0xff);
 	else stub->RespStr("OK");
@@ -838,13 +851,9 @@ ExecResult GdbStub::Handle_v_Attach(GdbStub* stub, const u8* cmd, ssize_t len)
 
 ExecResult GdbStub::Handle_v_Kill(GdbStub* stub, const u8* cmd, ssize_t len)
 {
-	TgtStatus st = stub->Stat;
-
-	stub->Cb->ResetGdb();
-
+	stub->DelAllBpWp();
 	stub->RespStr("OK");
-
-	return (st != TgtStatus::Running && st != TgtStatus::None) ? ExecResult::Detached : ExecResult::Ok;
+	return stub->ExtendedMode ? ExecResult::Ok : ExecResult::Detached;
 }
 
 ExecResult GdbStub::Handle_v_Run(GdbStub* stub, const u8* cmd, ssize_t len)
@@ -855,7 +864,11 @@ ExecResult GdbStub::Handle_v_Run(GdbStub* stub, const u8* cmd, ssize_t len)
 
 	// TODO: handle cmdline for homebrew?
 
-	return (st != TgtStatus::Running && st != TgtStatus::None) ? ExecResult::Continue : ExecResult::Ok;
+	if (st == TgtStatus::Running || st == TgtStatus::None)
+		return ExecResult::MustBreak;
+
+	stub->RespFmt("S%02X", GdbSignal::TRAP);
+	return ExecResult::Ok;
 }
 
 ExecResult GdbStub::Handle_v_Stopped(GdbStub* stub, const u8* cmd, ssize_t len)

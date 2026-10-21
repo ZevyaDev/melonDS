@@ -57,7 +57,7 @@ public:
 	virtual void WriteMem(u32 addr, int len, u32 value) = 0;
 
 	virtual void ResetGdb() = 0;
-	virtual int RemoteCmd(const u8* cmd, size_t len) = 0;
+	virtual int RemoteCmd(const u8* cmd, size_t len, std::string& out) = 0;
 };
 
 enum class StubState
@@ -192,6 +192,7 @@ private:
 	u32 CurBkpt, CurWatchpt;
 	bool StatFlag;
 	bool NoAck;
+	bool ExtendedMode;
 
 	std::array<u8, GDBPROTO_BUFFER_CAPACITY> RecvBuffer;
 	u32 RecvBufferFilled = 0;

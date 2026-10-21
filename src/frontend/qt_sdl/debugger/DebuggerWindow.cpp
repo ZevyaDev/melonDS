@@ -303,6 +303,7 @@ void DebuggerWindow::buildToolbar()
     QMenu* symbolMenu = new QMenu(symbols);
     symbolMenu->addAction("From a file...", this, &DebuggerWindow::loadSymbols);
     symbolMenu->addAction("From a URL...", this, &DebuggerWindow::loadSymbolsUrl);
+    symbolMenu->addAction("Line info from an ELF...", this, &DebuggerWindow::loadLines);
     symbols->setMenu(symbolMenu);
     bar->addWidget(symbols);
     bar->addAction("Labels...", this, &DebuggerWindow::loadLabels)
@@ -501,6 +502,7 @@ void DebuggerWindow::buildDocks()
     addDockWidget(Qt::RightDockWidgetArea, srcDock, Qt::Vertical);
     connect(Disasm, &DisasmView::selectionChanged, Source, &SourceView::showAddress);
     connect(Bridge, &DebugBridge::symbolsChanged, Source, [this] { Source->showAddress(Disasm->selected()); });
+    connect(Source, &SourceView::toggleBreakpoint, this, &DebuggerWindow::toggleBreakpoint);
 }
 
 void DebuggerWindow::refresh()
@@ -572,6 +574,7 @@ void DebuggerWindow::applySnapshot(const DebugSnapshot& s)
                 disabled.insert(p.Start);
         }
     Disasm->setBreakpoints(exec, disabled);
+    Source->setMarks(s.CPU[c].PC, stopped, exec, disabled);
     if (FollowPC && stopped)
     {
         Disasm->goToPC();
@@ -755,8 +758,9 @@ void DebuggerWindow::updateStatus()
                 for (const auto& mod : syms.set()->Modules)
                     if (mod.Overlay == id)
                         ovs << SymStr(mod.Name);
-        SymbolStatus->setText(QString("%1 symbols, overlays: %2").arg(syms.set()->SymbolCount).arg(ovs.isEmpty() ? "none" : ovs.join(' ')));
-        SymbolStatus->setToolTip(SymStr(syms.source()));
+        SymbolStatus->setText(QString("%1 symbols%2, overlays: %3").arg(syms.set()->SymbolCount)
+            .arg(syms.lineSource().empty() ? QString() : " + line info").arg(ovs.isEmpty() ? "none" : ovs.join(' ')));
+        SymbolStatus->setToolTip(SymStr(syms.lineSource().empty() ? syms.source() : syms.source() + "\n" + syms.lineSource()));
     }
 }
 
@@ -938,6 +942,31 @@ void DebuggerWindow::loadLabels()
     emit Bridge->symbolsChanged();
     refresh();
     Disasm->reload();
+}
+
+void DebuggerWindow::loadLines()
+{
+    if (Bridge->symbols().empty())
+    {
+        QMessageBox::warning(this, "melonDS", "Load the symbols (a dsd config.yaml) first.");
+        return;
+    }
+    QString path = QFileDialog::getOpenFileName(this, "Load line info", QString(),
+        "ELF linked with -sym on (*.o *.elf);;All files (*)");
+    if (path.isEmpty())
+        return;
+    QString error;
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    bool ok = LoadLines(Bridge->symbols(), path, error);
+    QApplication::restoreOverrideCursor();
+    if (!ok)
+    {
+        QMessageBox::warning(this, "melonDS", error);
+        return;
+    }
+    DebugTools::rememberLines(Bridge, SymStr(Bridge->symbols().lineSource()));
+    emit Bridge->symbolsChanged();
+    refresh();
 }
 
 void DebuggerWindow::autoLoadSymbols()

@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "types.h"
+#include "debug/RomOverlays.h"
 
 namespace melonDS
 {
@@ -58,6 +59,15 @@ public:
         int File; // index into Set::SourceFiles
     };
 
+    // A row of a DWARF line table (DwarfLines): from Addr on, the code is File:Line (File -1: no line).
+    struct LineRow
+    {
+        melonDS::u32 Addr;
+        int File; // index into Set::LineFiles
+        int Line;
+        bool Stmt;
+    };
+
     struct Module
     {
         std::string Name;
@@ -67,6 +77,7 @@ public:
         std::vector<melonDS::u8> Image;
         std::vector<Symbol> Symbols;
         std::vector<FileRange> Files; // sorted by Start
+        std::vector<LineRow> Lines;   // sorted by Addr
 
         const Symbol* find(melonDS::u32 addr) const;
         bool covers(melonDS::u32 addr) const { return addr >= Base && addr - Base < Size; }
@@ -81,6 +92,9 @@ public:
         // name -> (module, symbol index), in insertion order
         std::unordered_map<std::string, std::vector<std::pair<int, int>>> ByName;
         int SymbolCount = 0;
+        std::string LineSource;             // the ELF the line info came from
+        std::vector<std::string> LineFiles; // relative to the decomp root, like SourceFiles
+        int LineCount = 0;
     };
 
     // Where symbol files are read from. The default reads local files only; the Qt frontend supplies one that
@@ -99,25 +113,27 @@ public:
     };
     static const Files& localFiles();
 
-    // An ARM9 overlay as stored in a ROM, decompressed.
-    struct RomOverlay
-    {
-        melonDS::u32 Base;
-        melonDS::u32 Size; // code + bss
-        std::vector<melonDS::u8> Image;
-    };
-    using RomOverlays = std::unordered_map<int, RomOverlay>;
+    // ARM9 overlays as stored in a ROM, decompressed, by id (melonDS::ReadRomOverlays in the core).
+    using RomOverlays = std::unordered_map<int, melonDS::RomOverlay>;
     // The overlays of the cart in nds (empty without a ROM). Reads the ROM: call it where the console is not
     // changing its cart (its emulator thread in headless).
     static RomOverlays readRomOverlays(melonDS::NDS* nds);
-    // Decompresses a BLZ (backwards LZ) overlay image in place; false if it is malformed.
-    static bool blzDecompress(std::vector<melonDS::u8>& data);
 
     // Loads a dsd config.yaml (or its folder) or an "address name [size]" text file. Overlay images come from
     // rom (the running ROM's overlays) when given and not empty, else from the extract the config's rom_config
-    // names. The overload with nds reads the overlays from its cart.
+    // names. The overload with nds reads the overlays from its cart. A local decomp config also loads the line info
+    // of its build/<region>/arm9.o when that exists (loadLines; a failure there does not fail the load).
     bool load(const std::string& path, std::string& error, const RomOverlays* rom = nullptr, const Files* files = nullptr);
     bool load(const std::string& path, std::string& error, melonDS::NDS* nds, const Files* files = nullptr);
+    // Line info: the DWARF .debug_line of an ELF linked with -sym on, matched to the modules through their
+    // delinked source files. Needs symbols loaded first; kept until the next load or clear (labels keep it).
+    bool loadLines(const std::string& path, std::string& error, const Files* files = nullptr);
+    std::string lineSource() const { return Cur ? Cur->LineSource : std::string(); }
+    // The file (relative, as in Set::LineFiles) and line of addr, among the static modules and loaded overlays.
+    bool lineAt(melonDS::u32 addr, std::string& file, int& line) const;
+    // The lowest statement address of file:line in a live module. module is the module that has the line
+    // (also when false is returned because that overlay is not loaded), or -1.
+    bool lineAddress(const std::string& file, int line, melonDS::u32& addr, int& module) const;
     void clear();
     bool empty() const { return !Cur || Cur->Modules.empty(); }
     std::string source() const { return Base ? Base->Source : std::string(); }

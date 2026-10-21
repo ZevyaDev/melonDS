@@ -285,6 +285,9 @@ void autoLoadSymbols(DebugBridge* bridge)
         else if (symbols.loadLabels(SymStr(labels), labelError))
             changed = true;
     }
+    QString lines = QString::fromStdString(cfg.GetString("Debugger.Lines." + code.toStdString()));
+    if (!lines.isEmpty() && !symbols.empty() && SymStr(DebugSource::Normalize(lines)) != symbols.lineSource())
+        changed |= LoadLines(symbols, lines, error);
     if (changed)
         emit bridge->symbolsChanged();
 }
@@ -296,6 +299,17 @@ void rememberSymbols(DebugBridge* bridge, const QString& path)
         return;
     Config::Table& cfg = bridge->instance()->getGlobalConfig();
     cfg.SetString("Debugger.Symbols." + code.toStdString(), path.toStdString());
+    cfg.SetString("Debugger.Lines." + code.toStdString(), "");
+    Config::Save();
+}
+
+void rememberLines(DebugBridge* bridge, const QString& path)
+{
+    QString code = gameCode(bridge);
+    if (code.isEmpty())
+        return;
+    Config::Table& cfg = bridge->instance()->getGlobalConfig();
+    cfg.SetString("Debugger.Lines." + code.toStdString(), path.toStdString());
     Config::Save();
 }
 

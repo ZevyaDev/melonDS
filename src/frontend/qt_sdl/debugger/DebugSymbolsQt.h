@@ -75,6 +75,16 @@ inline bool LoadSymbols(DebugSymbols& syms, const QString& location, QString& er
     return ok;
 }
 
+// Loads line info from an ELF at a path or URL (DebugSymbols::loadLines).
+inline bool LoadLines(DebugSymbols& syms, const QString& location, QString& error)
+{
+    static const QtSymbolFiles files;
+    std::string err;
+    bool ok = syms.loadLines(SymStr(location), err, &files);
+    error = SymStr(err);
+    return ok;
+}
+
 // The colour of an instruction kind in the disassembly and the trace (DisasmLine::Kind).
 inline QColor InstrColor(InstrKind kind, const QPalette& pal)
 {

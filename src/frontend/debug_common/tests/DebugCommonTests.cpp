@@ -23,6 +23,8 @@
 #include "Harness.h"
 #include "DebugSymbols.h"
 #include "Disassembler.h"
+#include "NDS_Header.h"
+#include "debug/RomOverlays.h"
 
 #if __has_include(<cxxabi.h>)
 #define HAVE_DEMANGLE
@@ -505,6 +507,260 @@ TEST(DisasmThumb)
     l = dis.decode(0x02000000, b, 1, true);
     CHECK_EQ(l.Mnemonic, std::string("??"));
     CHECK_EQ(l.Size, (u8)2);
+}
+
+// ---- ROM overlays (the core's RomOverlays.cpp, which links without the emulator) and DWARF line info
+
+namespace
+{
+
+void Put32(std::string& buf, size_t at, u32 v)
+{
+    if (buf.size() < at + 4)
+        buf.resize(at + 4, '\0');
+    memcpy(&buf[at], &v, 4);
+}
+
+// "ABC" * 6 as BLZ: three literals from the end, then a 15-byte copy at distance 3.
+std::vector<u8> BlzSample()
+{
+    std::vector<u8> v = {0x00, 0xC0, 'A', 'B', 'C', 0x10};
+    u32 footer = (8u << 24) | 14u, extra = 4;
+    v.resize(14);
+    memcpy(&v[6], &footer, 4);
+    memcpy(&v[10], &extra, 4);
+    return v;
+}
+
+}
+
+TEST(BlzImages)
+{
+    std::vector<u8> data = BlzSample();
+    CHECK(BlzDecompress(data));
+    CHECK_EQ(std::string(data.begin(), data.end()), std::string("ABCABCABCABCABCABC"));
+
+    // extra = 0: stored uncompressed, left alone
+    std::vector<u8> plain = {1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0};
+    CHECK(BlzDecompress(plain));
+    CHECK_EQ(plain.size(), (size_t)12);
+
+    std::vector<u8> tiny = {1, 2, 3};
+    CHECK(!BlzDecompress(tiny));
+    std::vector<u8> bad = BlzSample();
+    bad[6] = 0xFF; // packed size larger than the file
+    CHECK(!BlzDecompress(bad));
+}
+
+TEST(RomOverlayTable)
+{
+    // a ROM with an overlay table of two entries: ov 3 stored plain, ov 7 BLZ-compressed
+    std::string rom(0x400, '\0');
+    NDSHeader h {};
+    h.ARM9OverlayOffset = 0x100;
+    h.ARM9OverlaySize = 64;
+    h.FATOffset = 0x200;
+    std::string plainImage;
+    for (int i = 0; i < 0x40; i++)
+        plainImage += (char)(i * 5 + 1);
+    rom.replace(0x300, plainImage.size(), plainImage);
+    std::vector<u8> packed = BlzSample();
+    rom.replace(0x380, packed.size(), std::string(packed.begin(), packed.end()));
+
+    // entry: id, ram address, ram size, bss size, sinit start, sinit end, file id, flags
+    Put32(rom, 0x100, 3); Put32(rom, 0x104, 0x02200000); Put32(rom, 0x108, 0x40); Put32(rom, 0x10C, 0x10);
+    Put32(rom, 0x118, 0); Put32(rom, 0x11C, 0);
+    Put32(rom, 0x120, 7); Put32(rom, 0x124, 0x02200000); Put32(rom, 0x128, 18); Put32(rom, 0x12C, 2);
+    Put32(rom, 0x138, 1); Put32(rom, 0x13C, (1u << 24) | (u32)packed.size());
+    // FAT: file 0 at 0x300-0x340, file 1 at 0x380-0x38E
+    Put32(rom, 0x200, 0x300); Put32(rom, 0x204, 0x340);
+    Put32(rom, 0x208, 0x380); Put32(rom, 0x20C, 0x380 + (u32)packed.size());
+
+    auto ovs = ReadRomOverlays((const u8*)rom.data(), (u32)rom.size(), h);
+    CHECK_EQ(ovs.size(), (size_t)2);
+    if (ovs.size() != 2)
+        return;
+    CHECK_EQ(ovs[0].Id, 3);
+    CHECK_EQ(ovs[0].Base, 0x02200000u);
+    CHECK_EQ(ovs[0].Size, 0x50u);
+    CHECK_EQ(std::string(ovs[0].Image.begin(), ovs[0].Image.end()), plainImage);
+    CHECK_EQ(ovs[1].Id, 7);
+    CHECK_EQ(ovs[1].Size, 20u);
+    CHECK_EQ(std::string(ovs[1].Image.begin(), ovs[1].Image.end()), std::string("ABCABCABCABCABCABC"));
+
+    // the table size counts the entries; no ROM: none
+    h.ARM9OverlaySize = 32;
+    CHECK_EQ(ReadRomOverlays((const u8*)rom.data(), (u32)rom.size(), h).size(), (size_t)1);
+    CHECK(ReadRomOverlays(nullptr, 0, h).empty());
+
+    // detection: ov 3 resident in "memory", then overwritten by ov 7
+    std::string ram(0x100, '\0');
+    auto peek = [&ram](u32 addr) -> u32 {
+        u32 v = 0;
+        if (addr >= 0x02200000 && addr - 0x02200000 + 4 <= ram.size())
+            memcpy(&v, &ram[addr - 0x02200000], 4);
+        return v;
+    };
+    CHECK(!OverlayLoaded(peek, ovs[0].Base, ovs[0].Size, ovs[0].Image));
+    ram.replace(0, plainImage.size(), plainImage);
+    CHECK(OverlayLoaded(peek, ovs[0].Base, ovs[0].Size, ovs[0].Image));
+    CHECK(!OverlayLoaded(peek, ovs[0].Base, ovs[0].Size, {}));
+    ram.assign(0x100, '\0');
+    ram.replace(0, 18, std::string(ovs[1].Image.begin(), ovs[1].Image.end()));
+    CHECK(!OverlayLoaded(peek, ovs[0].Base, ovs[0].Size, ovs[0].Image));
+    CHECK(OverlayLoaded(peek, ovs[1].Base, ovs[1].Size, ovs[1].Image));
+
+    // the symbol table's detection is the core's
+    DebugSymbols::Set set;
+    DebugSymbols::Module mod;
+    mod.Overlay = 7;
+    mod.Base = ovs[1].Base;
+    mod.Size = ovs[1].Size;
+    mod.Image = ovs[1].Image;
+    set.Modules.push_back(mod);
+    CHECK(DebugSymbols::detect(set, peek) == std::vector<int>({7}));
+}
+
+namespace
+{
+
+// A 32-bit little-endian ELF with only .shstrtab and the given .debug_line.
+std::string MakeElf(const std::string& debugLine)
+{
+    std::string names = std::string("\0.shstrtab\0.debug_line\0", 23);
+    std::string elf(0x34, '\0');
+    memcpy(&elf[0], "\x7F" "ELF", 4);
+    elf[4] = 1; // 32-bit
+    elf[5] = 1; // little-endian
+    elf[6] = 1;
+    u32 namesAt = (u32)elf.size();
+    elf += names;
+    u32 lineAt = (u32)elf.size();
+    elf += debugLine;
+    while (elf.size() % 4)
+        elf += '\0';
+    u32 shoff = (u32)elf.size();
+    elf.resize(shoff + 3 * 40, '\0');
+    auto sh = [&](int i, u32 name, u32 off, u32 size) {
+        Put32(elf, shoff + i * 40 + 0, name);
+        Put32(elf, shoff + i * 40 + 16, off);
+        Put32(elf, shoff + i * 40 + 20, size);
+    };
+    sh(1, 1, namesAt, (u32)names.size());
+    sh(2, 11, lineAt, (u32)debugLine.size());
+    Put32(elf, 0x20, shoff);
+    u16 half[3] = {40, 3, 1}; // shentsize, shnum, shstrndx
+    memcpy(&elf[0x2E], half, 6);
+    return elf;
+}
+
+// One DWARF 2 line program for build/../src/game.c: line 10 at addr, line 12 at addr + 8, end at addr + 16.
+std::string LineProgram(u32 addr)
+{
+    std::string hdr;
+    hdr += '\x01';           // minimum instruction length
+    hdr += '\x01';           // default is_stmt
+    hdr += (char)-5;         // line base
+    hdr += '\x0E';           // line range
+    hdr += '\x0D';           // opcode base
+    hdr += std::string("\x00\x01\x01\x01\x01\x00\x00\x00\x01\x00\x00\x01", 12);
+    hdr += std::string("C:/decomp/src\0\0", 15);
+    hdr += std::string("game.c\0\x01\x00\x00\0", 11);
+    std::string prog;
+    prog += std::string("\x00\x05\x02", 3);
+    prog.append((const char*)&addr, 4);
+    prog += "\x03\x09\x01";  // advance_line 9 -> 10, copy
+    prog += "\x02\x08\x03\x02\x01"; // advance_pc 8, advance_line 2 -> 12, copy
+    prog += "\x02\x08";      // advance_pc 8
+    prog += std::string("\x00\x01\x01", 3); // end_sequence
+    std::string unit;
+    u16 version = 2;
+    unit.append((const char*)&version, 2);
+    u32 headerLength = (u32)hdr.size();
+    unit.append((const char*)&headerLength, 4);
+    unit += hdr;
+    unit += prog;
+    u32 unitLength = (u32)unit.size();
+    return std::string((const char*)&unitLength, 4) + unit;
+}
+
+void WriteDecomp(const TempDir& dir, bool withElf)
+{
+    dir.write("decomp/config/eur/arm9/config.yaml",
+        "main_module:\n"
+        "  name: main\n"
+        "  symbols: symbols.txt\n"
+        "  delinks: delinks.txt\n"
+        "overlays:\n"
+        "  - id: 2\n"
+        "    name: ov002\n"
+        "    symbols: overlays/ov002/symbols.txt\n"
+        "    delinks: overlays/ov002/delinks.txt\n");
+    dir.write("decomp/config/eur/arm9/symbols.txt", "fn_main kind:function(size=0x10) addr:0x02000100\n");
+    dir.write("decomp/config/eur/arm9/delinks.txt", "src/main.c:\n    .text start:0x02000100 end:0x02000110\n");
+    dir.write("decomp/config/eur/arm9/overlays/ov002/symbols.txt", "fn_game kind:function(size=0x10) addr:0x02200000\n");
+    dir.write("decomp/config/eur/arm9/overlays/ov002/delinks.txt", "src/game.c:\n    .text start:0x02200000 end:0x02200010\n");
+    if (withElf)
+        dir.write("decomp/build/eur/arm9.o", MakeElf(LineProgram(0x02200000)));
+}
+
+}
+
+TEST(DwarfLineInfo)
+{
+    TempDir dir("lines");
+    WriteDecomp(dir, true);
+    DebugSymbols syms;
+    std::string err;
+    // the decomp's build/<region>/arm9.o loads with its config
+    CHECK(syms.load(dir.file("decomp/config/eur/arm9/config.yaml"), err));
+    auto set = syms.set();
+    CHECK(set != nullptr);
+    if (!set)
+        return;
+    CHECK_EQ(syms.lineSource(), dir.file("decomp/build/eur/arm9.o"));
+    CHECK_EQ(set->LineCount, 2);
+    CHECK(set->LineFiles == std::vector<std::string>({"src/game.c"}));
+    CHECK_EQ(set->Modules[1].Lines.size(), (size_t)3);
+
+    // overlay lines resolve only while it is loaded
+    std::string file;
+    int line = 0;
+    u32 addr = 0;
+    int module = -1;
+    CHECK(!syms.lineAt(0x02200004, file, line));
+    CHECK(!syms.lineAddress("src/game.c", 12, addr, module));
+    CHECK_EQ(module, 1);
+    syms.setLoaded({2});
+    CHECK(syms.lineAt(0x02200004, file, line) && file == "src/game.c" && line == 10);
+    CHECK(syms.lineAt(0x02200009, file, line) && line == 12);
+    CHECK(!syms.lineAt(0x02200010, file, line)); // past the end of the sequence
+    CHECK(syms.lineAddress("src/game.c", 12, addr, module) && addr == 0x02200008 && module == 1);
+    CHECK(!syms.lineAddress("src/game.c", 11, addr, module));
+    CHECK(!syms.lineAddress("src/other.c", 10, addr, module));
+
+    // labels keep the line info; a new load drops it
+    dir.write("labels.txt", "02200000 game_entry ov002\n");
+    CHECK(syms.loadLabels(dir.file("labels.txt"), err));
+    CHECK(syms.lineAt(0x02200004, file, line) && line == 10);
+    CHECK_EQ(syms.describe(0x02200000), std::string("game_entry [ov002]"));
+
+    TempDir bare("lines_bare");
+    WriteDecomp(bare, false);
+    DebugSymbols other;
+    CHECK(other.load(bare.file("decomp/config/eur/arm9/config.yaml"), err));
+    CHECK(other.lineSource().empty());
+    CHECK(!other.loadLines(bare.file("decomp/build/eur/arm9.o"), err));
+    CHECK_EQ(err, "not found: " + bare.file("decomp/build/eur/arm9.o"));
+    bare.write("noline.o", MakeElf(""));
+    CHECK(!other.loadLines(bare.file("noline.o"), err));
+    // any ELF can be loaded by hand
+    CHECK(other.loadLines(dir.file("decomp/build/eur/arm9.o"), err));
+    CHECK_EQ(other.set()->LineCount, 2);
+
+    DebugSymbols none;
+    CHECK(!none.loadLines(dir.file("decomp/build/eur/arm9.o"), err));
+    CHECK_EQ(err, std::string("load symbols first"));
 }
 
 TEST_MAIN()

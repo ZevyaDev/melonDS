@@ -220,7 +220,7 @@ public:
     void WriteMem(u32 addr, int size, u32 v) override;
 
     void ResetGdb() override;
-    int RemoteCmd(const u8* cmd, size_t len) override;
+    int RemoteCmd(const u8* cmd, size_t len, std::string& out) override;
 
 protected:
 #endif

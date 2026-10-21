@@ -26,7 +26,8 @@
 #include <string>
 
 #include "DebugSymbols.h"
-#include "NDS.h"
+#include "debug/DwarfLines.h"
+#include "debug/RomOverlays.h"
 
 #if __has_include(<cxxabi.h>)
 #include <cxxabi.h>
@@ -162,9 +163,6 @@ std::string Simplify(const std::string& s)
         out.pop_back();
     return out;
 }
-
-constexpr int SampleWindows = 8;
-constexpr int SampleBytes = 16;
 
 struct YNode
 {
@@ -564,57 +562,6 @@ const DebugSymbols::Files& DebugSymbols::localFiles()
     return local;
 }
 
-bool DebugSymbols::blzDecompress(std::vector<u8>& data)
-{
-    u32 len = (u32)data.size();
-    if (len < 8)
-        return false;
-    const u8* src = data.data();
-    u32 footer, extra;
-    memcpy(&footer, src + len - 8, 4);
-    memcpy(&extra, src + len - 4, 4);
-    if (!extra)
-        return true;
-    u32 packed = footer & 0xFFFFFF;
-    u32 header = footer >> 24;
-    if (packed > len || header > packed || header < 8)
-        return false;
-    std::vector<u8> out(len + extra);
-    memcpy(out.data(), src, len);
-    u32 in = len - header;
-    u32 stop = len - packed;
-    u32 pos = len + extra;
-    while (in > stop)
-    {
-        u8 flags = src[--in];
-        for (int bit = 0; bit < 8 && in > stop; bit++, flags <<= 1)
-        {
-            if (!(flags & 0x80))
-            {
-                if (pos == 0)
-                    return false;
-                out[--pos] = src[--in];
-                continue;
-            }
-            if (in < stop + 2)
-                return false;
-            u32 hi = src[--in];
-            u32 lo = src[--in];
-            u32 count = (hi >> 4) + 3;
-            u32 disp = (((hi & 0xF) << 8) | lo) + 3;
-            for (u32 n = 0; n < count; n++)
-            {
-                if (pos == 0 || pos - 1 + disp >= out.size())
-                    return false;
-                out[pos - 1] = out[pos - 1 + disp];
-                pos--;
-            }
-        }
-    }
-    data = std::move(out);
-    return true;
-}
-
 bool DebugSymbols::load(const std::string& rawPath, std::string& error, const RomOverlays* rom, const Files* reader)
 {
     if (Loading)
@@ -707,7 +654,8 @@ bool DebugSymbols::load(const std::string& rawPath, std::string& error, const Ro
                     {
                         std::string image;
                         ReadFile(JoinPath(romDir, "arm9_overlays/" + ov.str("file_name")), image);
-                        table[(int)ov.num("id")] = {ov.num("base_address"), ov.num("code_size") + ov.num("bss_size"),
+                        int id = (int)ov.num("id");
+                        table[id] = {id, ov.num("base_address"), ov.num("code_size") + ov.num("bss_size"),
                             std::vector<u8>(image.begin(), image.end())};
                     }
         }
@@ -771,7 +719,179 @@ bool DebugSymbols::load(const std::string& rawPath, std::string& error, const Ro
     Base = set;
     rebuild();
     Loaded.clear();
+    // line info: a decomp's config/<region>/arm9/config.yaml has its ELF (linked with -sym on) at build/<region>/arm9.o
+    if (!remote && (suffix == "yaml" || suffix == "yml"))
+    {
+        std::string region = BaseName(DirName(set->Base));
+        std::string elf = JoinPath(DirName(DirName(DirName(set->Base))), "build/" + region + "/arm9.o");
+        std::error_code ec;
+        std::string ignored;
+        if (!region.empty() && fs::is_regular_file(fs::u8path(elf), ec))
+            loadLines(elf, ignored, &io);
+    }
     return true;
+}
+
+bool DebugSymbols::loadLines(const std::string& rawPath, std::string& error, const Files* reader)
+{
+    if (!Base)
+    {
+        error = "load symbols first";
+        return false;
+    }
+    const Files& io = reader ? *reader : localFiles();
+    std::string path = io.normalize(rawPath);
+    std::unordered_map<std::string, std::string> files;
+    io.readAll({path}, files);
+    auto found = files.find(path);
+    if (found == files.end())
+    {
+        error = (io.isRemote(path) ? "cannot download " : "not found: ") + path;
+        return false;
+    }
+    const std::string& elf = found->second;
+    std::vector<DwarfLineProgram> programs;
+    std::string why;
+    if (!ReadDwarfLines((const u8*)elf.data(), elf.size(), programs, why))
+    {
+        error = why + ": " + path;
+        return false;
+    }
+
+    auto set = std::make_shared<Set>(*Base);
+    set->LineSource = path;
+    set->LineFiles.clear();
+    set->LineCount = 0;
+    // a program belongs to the module whose delinked source files it names (paths compared case-insensitively,
+    // by their tail, as the ELF has absolute or build-relative paths)
+    std::unordered_map<std::string, int> moduleOf;
+    for (int m = 0; m < (int)set->Modules.size(); m++)
+    {
+        set->Modules[m].Lines.clear();
+        for (const FileRange& r : set->Modules[m].Files)
+            moduleOf.emplace(Lower(set->SourceFiles[r.File]), m);
+    }
+    std::unordered_map<std::string, int> fileIndex;
+    for (const DwarfLineProgram& prog : programs)
+    {
+        std::vector<std::string> paths;
+        for (std::string f : prog.Files)
+        {
+            std::replace(f.begin(), f.end(), '\\', '/');
+            paths.push_back(f);
+        }
+        int module = -1;
+        std::string root;
+        for (size_t f = 1; f < paths.size() && module < 0; f++)
+        {
+            const std::string& p = paths[f];
+            for (size_t i = 0;;)
+            {
+                auto it = moduleOf.find(Lower(p.substr(i)));
+                if (it != moduleOf.end())
+                {
+                    module = it->second;
+                    root = Lower(p.substr(0, i));
+                    break;
+                }
+                size_t slash = p.find('/', i);
+                if (slash == std::string::npos)
+                    break;
+                i = slash + 1;
+            }
+        }
+        if (module < 0)
+            continue;
+        std::vector<int> index(paths.size(), -1);
+        for (size_t f = 1; f < paths.size(); f++)
+        {
+            const std::string& p = paths[f];
+            std::string rel = (!root.empty() && Lower(p.substr(0, root.size())) == root) ? p.substr(root.size()) : p;
+            auto it = fileIndex.find(rel);
+            if (it == fileIndex.end())
+            {
+                it = fileIndex.emplace(rel, (int)set->LineFiles.size()).first;
+                set->LineFiles.push_back(rel);
+            }
+            index[f] = it->second;
+        }
+        std::vector<LineRow>& lines = set->Modules[module].Lines;
+        for (const DwarfLineRow& row : prog.Rows)
+        {
+            int file = row.End || row.File >= index.size() ? -1 : index[row.File];
+            lines.push_back({row.Addr, file, (int)row.Line, row.Stmt});
+            set->LineCount += file >= 0;
+        }
+    }
+    if (!set->LineCount)
+    {
+        error = "no line info for the source files of these symbols: " + path;
+        return false;
+    }
+    for (Module& mod : set->Modules)
+        std::stable_sort(mod.Lines.begin(), mod.Lines.end(), [](const LineRow& a, const LineRow& b) {
+            return a.Addr != b.Addr ? a.Addr < b.Addr : (a.File < 0 && b.File >= 0);
+        });
+    Base = set;
+    rebuild();
+    return true;
+}
+
+bool DebugSymbols::lineAt(u32 addr, std::string& file, int& line) const
+{
+    if (!Cur)
+        return false;
+    addr &= ~1u;
+    for (const Module& mod : Cur->Modules)
+    {
+        if (mod.Lines.empty() || (mod.Overlay >= 0 && std::find(Loaded.begin(), Loaded.end(), mod.Overlay) == Loaded.end()))
+            continue;
+        auto it = std::upper_bound(mod.Lines.begin(), mod.Lines.end(), addr, [](u32 a, const LineRow& r) { return a < r.Addr; });
+        if (it == mod.Lines.begin() || it == mod.Lines.end())
+            continue;
+        --it;
+        if (it->File < 0)
+            continue;
+        file = Cur->LineFiles[it->File];
+        line = it->Line;
+        return true;
+    }
+    return false;
+}
+
+bool DebugSymbols::lineAddress(const std::string& file, int line, u32& addr, int& module) const
+{
+    module = -1;
+    if (!Cur)
+        return false;
+    auto pos = std::find(Cur->LineFiles.begin(), Cur->LineFiles.end(), file);
+    if (pos == Cur->LineFiles.end())
+        return false;
+    int f = (int)(pos - Cur->LineFiles.begin());
+    bool found = false;
+    for (int m = 0; m < (int)Cur->Modules.size(); m++)
+    {
+        const Module& mod = Cur->Modules[m];
+        bool live = mod.Overlay < 0 || std::find(Loaded.begin(), Loaded.end(), mod.Overlay) != Loaded.end();
+        for (const LineRow& r : mod.Lines)
+        {
+            if (r.File != f || r.Line != line || !r.Stmt)
+                continue;
+            if (!live)
+            {
+                if (module < 0)
+                    module = m;
+                break;
+            }
+            if (!found || r.Addr < addr)
+                addr = r.Addr;
+            found = true;
+            module = m;
+        }
+        if (found)
+            return true;
+    }
+    return false;
 }
 
 bool DebugSymbols::loadLabels(const std::string& path, std::string& error)
@@ -894,30 +1014,8 @@ std::vector<int> DebugSymbols::detect(const Set& set, const std::function<u32(u3
 {
     std::vector<int> out;
     for (const Module& mod : set.Modules)
-    {
-        if (mod.Overlay < 0 || mod.Image.empty())
-            continue;
-        u32 code = std::min<u32>(mod.Image.size(), mod.Size);
-        int hits = 0;
-        for (int w = 0; w < SampleWindows; w++)
-        {
-            u32 off = (u32)((u64)code * (2 * w + 1) / (2 * SampleWindows)) & ~3u;
-            bool same = true;
-            for (u32 b = 0; b < SampleBytes && off + b + 4 <= (u32)mod.Image.size(); b += 4)
-            {
-                u32 want;
-                memcpy(&want, mod.Image.data() + off + b, 4);
-                if (peek(mod.Base + off + b) != want)
-                {
-                    same = false;
-                    break;
-                }
-            }
-            hits += same;
-        }
-        if (hits * 4 >= SampleWindows * 3)
+        if (mod.Overlay >= 0 && OverlayLoaded(peek, mod.Base, mod.Size, mod.Image))
             out.push_back(mod.Overlay);
-    }
     return out;
 }
 

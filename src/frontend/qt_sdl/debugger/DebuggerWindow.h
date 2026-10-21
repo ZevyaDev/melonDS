@@ -143,6 +143,7 @@ private:
     void loadLabels();
     void loadSymbolsUrl();
     void applySymbols(const QString& location);
+    void loadLines();
     void autoLoadSymbols();
     QString describeBreak(const melonDS::BreakEvent& ev) const;
 };
