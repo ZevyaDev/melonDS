@@ -11,14 +11,16 @@ reading the code but no test covers them. Claims marked *(verified)* were checke
 one-console experiment against this branch's DLL. Bugs and surprises are collected at the end, in
 [Known issues and surprises](#11-known-issues-and-surprises).
 
-This revision describes **API level 6**: the `fix/api-quirks` changes (level 2), Action Replay
+This revision describes **API level 7**: the `fix/api-quirks` changes (level 2), Action Replay
 cheat codes from the `feature/cheats` branch (level 3), the debugger work merged from
 ZevyaDev's `debug` branch on `merge/upstream-debug` (level 4: thread stacks, the new call tracker,
 PC changes at a break, pipeline refetch, Lua `memory.execute` and `wifi`), its next merge on
 `merge/upstream-debug-2` (level 5: `mds_overlays`, the GDB stub's session handling, extended mode
 and `monitor overlays`, DWARF line info in the symbol tables), and the `fix/api-quirks-2` fixes
 (level 6: interrupts leave nothing armed, the pc at a park, `mds_write` for palette/VRAM/OAM,
-packets that cannot block, errors for unknown ids, Lua hooks in the point list, GDB reset events).
+packets that cannot block, errors for unknown ids, Lua hooks in the point list, GDB reset events), and
+`feature/probes` (level 7: function probes, the memory access log, breakpoint actions and overlay tags, none of
+which parks the console; [section 5b](#5b-probes-the-memory-log-breakpoint-actions-and-overlay-tags)).
 See [Version and features](#version-and-features) for what changed at each level.
 
 Contents
@@ -28,6 +30,7 @@ Contents
 3. [Input](#3-input)
 4. [Memory and CPU](#4-memory-and-cpu)
 5. [Debugging](#5-debugging)
+5b. [Probes, the memory log, breakpoint actions and overlay tags](#5b-probes-the-memory-log-breakpoint-actions-and-overlay-tags)
 6. [Savestates](#6-savestates)
 6a. [Action Replay cheat codes](#6a-action-replay-cheat-codes)
 7. [Lua](#7-lua)
@@ -83,7 +86,7 @@ The calls fall into three groups by what they need:
 | --- | --- |
 | no console | `mds_version`, `mds_has`, `mds_error`, `mds_set_local_dir`, `mds_set_log_level`, `mds_set_pacing`, `mds_mp_timeout` (after the first `mds_create`), `mds_serve*`, `mds_set_instance_base` (no console may exist), `mds_instance_base` |
 | any state | `mds_destroy`, `mds_stop_after`, `mds_interrupt` (debugger), `mds_state`, `mds_take_break`, `mds_frames`, `mds_reset_count`, `mds_wait`, `mds_screen`, `mds_set_keys`, `mds_touch`, `mds_set_lid`, all `mds_input_*`, `mds_debug_recv_pending`, `mds_read`, `mds_write`, all `mds_cheat_*`, `mds_savestate`/`mds_loadstate` (accepted, but fail unless idle), `mds_lua_output`, `mds_packets`, `mds_packets_take`, `mds_debug_packet`, `mds_mac`, `mds_save_path` |
-| stopped (idle **or** parked; fails with `console N is running`) | `mds_set_rtc`, `mds_get_rtc`, `mds_run`, `mds_start`, `mds_get_regs`, `mds_set_reg`, `mds_lua_run`, `mds_lua_exec`, `mds_lua_stop`, and the debugger calls: `mds_gdb`, `mds_gdb_host`, `mds_bp_add`, `mds_wp_add`, `mds_point_remove`, `mds_point_enable`, `mds_point_list`, `mds_point_count`, `mds_step`, `mds_trace`, `mds_trace_take`, `mds_calls`, `mds_callstack`, `mds_threadstacks`, `mds_callcounts_take`, `mds_coverage`, `mds_coverage_take`, `mds_lastwriter`, `mds_lastwriter_get`, `mds_lastwriter_query`; `mds_overlays` (no debugger needed) |
+| stopped (idle **or** parked; fails with `console N is running`) | `mds_set_rtc`, `mds_get_rtc`, `mds_run`, `mds_start`, `mds_get_regs`, `mds_set_reg`, `mds_lua_run`, `mds_lua_exec`, `mds_lua_stop`, and the debugger calls: `mds_gdb`, `mds_gdb_host`, `mds_bp_add`, `mds_wp_add`, `mds_point_remove`, `mds_point_enable`, `mds_point_list`, `mds_point_count`, `mds_step`, `mds_trace`, `mds_trace_take`, `mds_calls`, `mds_callstack`, `mds_threadstacks`, `mds_callcounts_take`, `mds_coverage`, `mds_coverage_take`, `mds_lastwriter`, `mds_lastwriter_get`, `mds_lastwriter_query`, and every call of level 7 (`mds_probe_*`, `mds_memlog_*`, `mds_action_*`, `mds_overlay_tags`, `mds_overlay_at`, `mds_callcounts_take_ov`, `mds_coverage_take_ov`); `mds_overlays` (no debugger needed) |
 | idle only | `mds_load_rom` ("loading a ROM needs an idle console"), `mds_reset` ("reset needs an idle console"), `mds_savestate`, `mds_loadstate` ("savestates need a frame boundary; finish the frame first") |
 
 The calls marked *debugger* above (`mds_interrupt` and the debugger calls) also need a console created
@@ -158,6 +161,7 @@ does this: `native.api_version()`, `native.has(name)` (see [section 9](#9-python
 | 4 | `merge/upstream-debug` | `mds_threadstacks`; the call tracker, PC changes at a break, pipeline refetch, Lua `memory.execute`, `debugger.threadstacks` and `wifi.*`, ROM overlays for the server's symbols (the features of level 4 below) |
 | 5 | `merge/upstream-debug-2` | `mds_overlays`; the GDB stub's per-connection reset, EOF detection, extended mode and `monitor overlays`; ROM overlay detection in the core; DWARF line info in the symbol tables (the features of level 5 below) |
 | 6 | `fix/api-quirks-2` | `mds_point_count`, `mds_reset_count`, `mds_debug_packet` (test hook); `mds_destroy` returns int; `mds_packet.total`; `MDS_POINT_LUA`, `MDS_BREAK_RESET`, `MDS_FRAMES_ERROR`; the behaviour changes named by the features of level 6 below |
+| 7 | `feature/probes` | `melonds_probes.h`: `mds_probe_*`, `mds_memlog_*`, `mds_action_*`, `mds_overlay_tags`, `mds_overlay_at`, `mds_callcounts_take_ov`, `mds_coverage_take_ov` (the features of level 7 below); no existing call or output changed |
 
 Features of level 2 (`mds_has` also answers 1 for every exported function name, `"mds_serve_host"`,
 `"mds_read"`, ...):
@@ -218,6 +222,17 @@ Features of level 6 (the fixes are listed with what changed in
 | `point_lua_tag` | `mds_point_list` sets `MDS_POINT_LUA` in `flags` for Lua hooks; `mds_point_remove` refuses them ([Breakpoints and watchpoints](#breakpoints-and-watchpoints)) |
 | `point_count` | `mds_point_count`: how many points `mds_point_list` has to list |
 | `gdb_reset_event` | a GDB restart (`vRun`, `R`, `r`, `monitor reset`) queues an `MDS_BREAK_RESET` event, which the socket server forwards; `mds_reset_count` ([Breaks](#breaks-what-happens-and-mds_take_break), [section 8](#gdb-stub)) |
+
+Features of level 7 (`feature/probes`; all four in [section 5b](#5b-probes-the-memory-log-breakpoint-actions-and-overlay-tags)).
+They only add functions: a client that does not call them sees no change. Clients that must also work with libraries
+of other branches should ask `mds_has` for these names rather than compare levels:
+
+| feature | meaning |
+| --- | --- |
+| `probes` | `mds_probe_add`, `_remove`, `_list`, `_capacity`, `_take`, `_stats`: every call of a function with r0-r3, memory behind registers, LR, SP, depth and overlay at entry, and r0, r1 at its return, without parking |
+| `memlog` | `mds_memlog_add`, `_remove`, `_list`, `_capacity`, `_take`, `_stats`: every CPU (and DMA) read and write in ranges, without parking |
+| `bp_actions` | `mds_action_add`, `_remove`, `_list`, `_take`, `_stats`: return early, set a register, write memory or skip instructions at an address, without parking; every application logged and counted |
+| `overlay_tags` | `mds_overlay_tags`, `mds_overlay_at`, `mds_callcounts_take_ov`, `mds_coverage_take_ov`, and `mds_probe_record.overlay`: the overlay of ARM9 code judged from memory; call counts and coverage per (address, overlay) |
 
 ### Wireless between consoles, and one console per process
 
@@ -1115,6 +1130,12 @@ console's own traffic (`sent` 1 for a sent packet, `type` as above, timestamp 0)
 | armed step / break requests | cleared | kept (they are requests about the future) | resuming into them; every park and the end of a run drop the break requests (level 6), steps stay |
 | packets | kept | kept | `mds_packets` |
 | staged rest of a cut-short take | kept | kept | the next take |
+| probes, memory log ranges, actions (level 7) | kept | kept | `mds_probe_remove`, `mds_memlog_remove`, `mds_action_remove` |
+| probe, memory log and action records | kept | kept (a log) | the takes; `mds_probe_capacity` / `mds_memlog_capacity` empty their rings |
+| calls awaiting their return (probes) | given up | **given up** (`MDS_PROBE_RETURN_LOST`) | their return |
+| action hit counts, actions applied (`mds_action_stats`) | kept | kept | never (the counts of a removed action go with it) |
+| tagged call counts and coverage | kept | kept (a log) | `mds_callcounts_take_ov`, `mds_coverage_take_ov` |
+| the overlay table of the attribution | reread (the ROM may have changed) | kept (the cache checks memory) | - |
 
 The rule for a load (`Debugger::OnStateLoaded`, also used by the Qt frontend): what describes the
 execution or memory before the load is dropped (call stacks, the parked thread stacks and
@@ -1123,6 +1144,265 @@ interrupted contexts behind them, a pending watchpoint hit, last-writer records)
 (trace, call counts, coverage, packets) are kept. API level 1 kept everything over a load. From level 4
 a load also arms the stack seeding (the frames below the first call made after the load are read back
 from stack memory) and forgets the calls that `memory.execute` was waiting to return from.
+
+---
+
+## 5b. Probes, the memory log, breakpoint actions and overlay tags
+
+API level 7 (`feature/probes`), declared in `melonds_probes.h` (included by `melonds_api.h`), implemented in
+`src/debug/Probes.*` (core) and `src/frontend/headless/ApiProbes.cpp`. Four tools that log or act inside the run
+**without parking** the console, so a whole scenario can run with them on:
+
+| feature (`mds_has`) | calls | what it does |
+| --- | --- | --- |
+| `probes` | `mds_probe_add`, `_remove`, `_list`, `_capacity`, `_take`, `_stats` | every call of a function: r0-r3, memory behind registers, LR, SP, call depth and overlay at entry; r0, r1 (and memory) at its return |
+| `memlog` | `mds_memlog_add`, `_remove`, `_list`, `_capacity`, `_take`, `_stats` | every CPU (and DMA) read and/or write in address ranges: frame, cycle, CPU, PC, address, size, value |
+| `bp_actions` | `mds_action_add`, `_remove`, `_list`, `_take`, `_stats` | at an address: return early with a value, set a register, write memory or skip instructions; each application logged |
+| `overlay_tags` | `mds_overlay_tags`, `mds_overlay_at`, `mds_callcounts_take_ov`, `mds_coverage_take_ov` | which cart overlay the code at an address belongs to now; call counts and coverage per (address, overlay) |
+
+Every call needs a console created with the debugger and **stopped** (idle or parked), like the other debugger
+calls (`console N is running`, `... created without the debugger (debug = 0)`), and runs on the emulator thread.
+Ids of probes, ranges and actions come from one counter per console (1, 2, ...; never reused), separate from the
+point ids. The takes are staged like `mds_trace_take`: each call returns what fits and keeps the rest; loop until
+0. Records carry `frame` (the `mds_frames` value of the frame they happened in) and `cycle` (the CPU's timestamp,
+ARM9 in system cycles, as `mds_trace_entry.cycle`), so records of all three logs and the trace can be ordered.
+
+**Cost and determinism.** Probes and actions arm the instruction hook of their CPUs (as a breakpoint does: one hook
+call per instruction and a 1 MiB page table lookup); the memory log arms only the data hook (one call per load or
+store, and per DMA unit); none of them adds emulated cycles. Measured on a DQ9 battle round (720 frames,
+`woodus-battle-round2-muriel-target`, interpreter with debug on): no hooks 176-182 fps; a probe on `NextRandomMax`
+(47 calls) x1.16-1.26; a probe on the hottest function (219,052 calls, every record taken) x1.44-1.49; the memory log
+over the hero's 0x964-byte party record x1.06; probe + memory log + call tracking + overlay tags x1.76-1.85; call
+tracking alone (as dq9-re's diffcov) x1.57-1.64. Every case ended with the same RAM as the run without hooks:
+probes, the memory log and overlay tags only read memory (without side effects, as `mds_read`) and do not change
+the run. **Actions change the run** by design; each is logged so a run that used one can be marked.
+
+### Function probes
+
+```c
+typedef struct { int32_t reg; int32_t offset; uint32_t len; uint32_t when; } mds_probe_read;
+typedef struct {
+    uint32_t cpumask, addr, lr_start, lr_end, flags;   /* flags: MDS_PROBE_NO_RETURN */
+    mds_probe_read reads[4];
+} mds_probe_spec;
+
+int mds_probe_add(int id, const mds_probe_spec* spec);
+int mds_probe_remove(int id, int probe);
+int mds_probe_list(int id, int* probes, mds_probe_spec* specs, uint64_t* hits, int max);
+int mds_probe_capacity(int id, int capacity);
+int mds_probe_take(int id, mds_probe_record* out, uint8_t* data, int max, int max_data);
+int mds_probe_stats(int id, uint64_t* out4);
+```
+
+A probe watches the instruction at `addr` (bit 0 ignored; `cpumask` 1 ARM9, 2 ARM7, 3 both). Each time a CPU is
+about to execute it, a record is made with r0-r3, LR, SP, the call depth (`mds_calls` on: the call tracker's
+frames, the call's own included; else -1), the overlay at `addr` (ARM9; see [Overlay tags](#overlay-tags)) and up to
+four **reads**: `len` bytes (at most 256) from register `reg` + `offset` (`reg` 15 is the probed address), taken
+with `when` = `MDS_PROBE_READ_ENTRY` at entry and/or `MDS_PROBE_READ_RETURN` at the return (from the register's
+value at entry: an out-parameter). Reads go through the debugger (main RAM directly, TCM as the CPU sees it, I/O
+reads 0). `lr_start`/`lr_end` keep only calls whose return address (LR, bit 0 cleared) is in the range (0, 0: every
+call); `hits` counts the calls kept.
+
+**Returns.** Unless `MDS_PROBE_NO_RETURN`, the call is awaited: its return is the first time that CPU reaches the
+return address (LR at entry, bit 0 cleared) with the SP and CPU mode it had at entry. Then `returned` = 1, `ret` =
+r0, r1, `ret_frame`/`ret_cycle` are set and the return reads are appended. This matches tail calls (the callee
+returns to the caller's caller with its SP), recursion (the innermost awaited call returns first) and NitroSDK
+thread switches and interrupts (other stacks, other modes). A call whose return never comes that way (longjmp, a
+function entered without a real return address in LR, a thread that never resumes) stays awaited: at most 256 per
+CPU, the oldest given up beyond that, and all of them at a state load (`MDS_PROBE_RETURN_LOST` in their records).
+*(inferred)* A function entered by a jump with LR holding something else than its return address is matched at
+whatever LR points to, if ever.
+
+```c
+typedef struct {
+    uint64_t seq, frame, cycle, ret_frame, ret_cycle;
+    int32_t probe, cpu, kind, overlay, depth;
+    uint32_t addr, lr, sp, args[4], returned, ret[2], flags;
+    uint16_t entry_len[4], ret_len[4];
+    uint32_t data_len, pad;
+} mds_probe_record;   /* 128 bytes */
+```
+
+Records go into a ring of `capacity` records (`mds_probe_capacity`, default 65536, which also empties it); when it
+is full the oldest is dropped and counted. `seq` numbers the calls from 0 per console, so a gap shows dropped
+records. A record is made at entry and completed in place at the return; **a call taken before it returned**
+(`mds_probe_take` while it runs, for example a take at every frame boundary) comes back with `returned` = 0, and its
+return arrives later as a record of `kind` 1 (a late return) with the same `seq`, `ret`, `ret_frame` and the return
+reads (`frame`, `cycle`, `args` and `depth` are 0/-1 there). `flags`: `MDS_PROBE_FORCED` when a breakpoint action
+fired at the same instruction (the return is the forced one), `MDS_PROBE_RETURN_LOST` when the return was given up.
+
+`mds_probe_take` copies up to `max` records, oldest first, and packs each record's bytes into `data`: the entry
+reads in order (`entry_len[i]` bytes for read i, 0 for none), then the return reads (`ret_len[i]`); `data_len` is
+the total. A record whose bytes do not fit in what is left of `max_data` is left for the next call, unless it is the
+first of the call: then its first `max_data` bytes are copied (`data_len` smaller than the lengths' sum).
+`mds_probe_stats` fills `out4` with: records made, records dropped from the full ring, calls awaiting their return,
+records in the ring. Errors: `probe read N: register must be 0-15 or -1`, `... at most 256 bytes`, `... when must
+be MDS_PROBE_READ_ENTRY and/or _RETURN`, `cpumask selects no CPU`, `no probe N`.
+
+Probes are kept over resets, ROM loads and state loads; the awaited returns are not (a reset or load starts the CPUs
+elsewhere). Tests: `test_probes.py` (`Probes`, `LateReturn`, `Determinism`).
+
+### Memory access log
+
+```c
+typedef struct { uint32_t cpumask, start, size, flags, pc_start, pc_end; } mds_memlog_spec;
+/* flags: MDS_MEMLOG_READ 1 | MDS_MEMLOG_WRITE 2, | MDS_MEMLOG_DMA 4 */
+typedef struct {
+    uint64_t seq, frame, cycle;
+    uint32_t pc, addr, value;
+    int32_t range;
+    uint8_t cpu, size, flags, dma;
+    uint32_t pad;
+} mds_memlog_record;   /* 48 bytes */
+
+int mds_memlog_add(int id, const mds_memlog_spec* spec);
+int mds_memlog_remove(int id, int range);
+int mds_memlog_list(int id, int* ranges, mds_memlog_spec* specs, uint64_t* hits, int max);
+int mds_memlog_capacity(int id, int capacity);
+int mds_memlog_take(int id, mds_memlog_record* out, int max);
+int mds_memlog_stats(int id, uint64_t* out4);
+```
+
+A range logs every read and/or write of the CPUs in `cpumask` that overlaps `[start, start + size)` (`size` > 0, at
+least one of read and write), as watchpoints would see them but **without parking**: CPU loads and stores
+(including TCM) and, with `MDS_MEMLOG_DMA`, DMA units of that CPU's DMA controller (both the source read and the
+destination write, unlike watchpoints, which see DMA writes only). `pc_start`/`pc_end` keep only accesses made by
+instructions in that range (0, 0: any); DMA units pass it. One record per access, for the first range (in creation
+order) that takes it:
+
+- `pc`: the instruction that made the access; for a DMA unit the DMA tag `0xFFFFFFF0 | channel << 1 | arm7` (as
+  watchpoint breaks and last-writer records), with `flags & MDS_MEMLOG_DMA` and the channel in `dma` (0xFF for an
+  instruction).
+- `value`: the value written; for a read, memory at `addr` read through the debugger as the access starts (what the
+  instruction reads; I/O reads 0, as `mds_read`). `size` 1, 2 or 4; `flags` `MDS_MEMLOG_READ` or `_WRITE`.
+- `cpu` 9 or 7, `range` the range id, `seq` the access number per console from 0.
+
+The ring holds `capacity` records (`mds_memlog_capacity`, default 1 << 20, 48 MiB at most; it empties the ring);
+when full the oldest are dropped and counted (`mds_memlog_stats`: made, dropped, 0, in the ring). The log does not
+need the instruction hook: the pc is taken from R15 inside the data hook (8 ahead of an ARM instruction, 4 of a
+Thumb one), which was checked against the instruction hook's pc over every data access of a DQ9 battle round. Ranges
+are kept over resets and loads. Errors: `memlog: size must be > 0`, `memlog: flags must have MDS_MEMLOG_READ and/or
+MDS_MEMLOG_WRITE`, `no memlog range N`. Tests: `test_probes.py` (`MemLog`).
+
+### Breakpoint actions
+
+```c
+typedef struct {
+    uint32_t cpumask, addr;
+    int32_t kind, reg;            /* MDS_ACTION_RETURN 1, _SET_REG 2, _WRITE 3, _SKIP 4 */
+    uint32_t value, value2, target, size, lr, first, times, flags;   /* flags: MDS_ACTION_SET_R1 */
+} mds_action_spec;
+typedef struct {
+    uint64_t seq, frame, cycle, hit;
+    int32_t action, cpu, kind;
+    uint32_t pc, lr, regs[4], value, target, pad;
+} mds_action_record;   /* 80 bytes */
+
+int mds_action_add(int id, const mds_action_spec* spec);
+int mds_action_remove(int id, int action);
+int mds_action_list(int id, int* actions, mds_action_spec* specs, uint64_t* matched, uint64_t* fired, int max);
+int mds_action_take(int id, mds_action_record* out, int max);
+int mds_action_stats(int id, uint64_t* out4);
+```
+
+An action does at `addr`, before the instruction there executes and without parking, what a client would do at a
+breakpoint with `mds_set_reg` and `mds_write`:
+
+| kind | effect |
+| --- | --- |
+| `MDS_ACTION_RETURN` | r0 = `value` (and r1 = `value2` with `MDS_ACTION_SET_R1`), then PC = LR (bit 0 picks Thumb, as `bx lr`): the function returns at once without running its body (a knockout, or a forced result) |
+| `MDS_ACTION_SET_REG` | register `reg` (0-15) = `value`; 15 jumps, keeping the ARM/Thumb state as `mds_set_reg` does |
+| `MDS_ACTION_WRITE` | writes `size` (1, 2, 4) bytes of `value` at `target` through the CPU's bus (not I/O); code written there takes effect (`pipeline_refetch`) |
+| `MDS_ACTION_SKIP` | PC += `size` instructions: the instruction at `addr` and the next `size - 1` do not run |
+
+Matching: `lr` (bit 0 cleared; 0 = any) keeps only hits with that return address in LR; of the matching hits it
+fires from the `first`-th (1-based, 0 = 1) at most `times` times (0 = every one from `first`). So `first` = k,
+`times` = 1 is the dq9-re harness's `--force-roll ADDR=VALUE@LR#k`. `matched` and `fired` count per action.
+
+An action that moves PC (return, skip, set r15) means the instruction at `addr` does not run: the hooks run again at
+the new PC (level 4's `step_redirect`), where a breakpoint fires and an armed step counts from there. A breakpoint at
+`addr` itself does not fire then, and the other actions at `addr` (in creation order) are not applied. A probe at
+`addr` still records the call (entry first, then the actions), with `MDS_PROBE_FORCED`, and its return is the forced
+one. Actions that do not move PC (a register other than 15, a write) let the instruction and the breakpoints there
+run as usual.
+
+Every application is logged: `mds_action_take` returns the last 65536 (oldest first; older ones are dropped and
+counted) with the hit number, pc, LR, r0-r3 before the action and the value. `mds_action_stats` `out4[0]` counts
+every action applied since the console was created and is never reset (not by a take, a reset or a load), so a
+client can check before and after a run whether anything was forced. Errors: `action: register must be 0-15`,
+`action: write size must be 1, 2 or 4`, `action: I/O cannot be written (side effects)`, `action: skip at least 1
+instruction`, `action: unknown kind N`, `no action N`. Tests: `test_probes.py` (`Actions`).
+
+### Overlay tags
+
+```c
+int mds_overlay_tags(int id, int enabled);
+int mds_overlay_at(int id, uint32_t addr);   /* INT32_MIN on error */
+int mds_callcounts_take_ov(int id, int cpu, uint32_t* entries, int32_t* overlays, uint64_t* counts, int max);
+int mds_coverage_take_ov(int id, int cpu, uint32_t* addrs, int32_t* overlays, int max);
+/* MDS_OVERLAY_STATIC -1, MDS_OVERLAY_AMBIGUOUS -2, MDS_OVERLAY_UNKNOWN -3 */
+```
+
+Several overlays can occupy one address range (DQ9 has six regions for 35 overlays), so an address alone does not
+say which function ran there. The core attributes ARM9 code to the cart overlay whose **image matches the memory at
+the address at that moment**, with no game-specific table: the cart's ARM9 overlay table and images are read once
+per ROM (as `mds_overlays` reads them, decompressed), overlays whose code ranges overlap form regions, and for an
+address inside a region the candidates are the overlays whose code covers it. The candidate with the most equal
+words in a 16-word window from the address wins (64 words if that ties); a remaining tie goes to the overlay whose
+first 8 words match memory best (the region-start rule); fewer than half the words equal means no overlay's code is
+there. A small cache per address, validated against the memory at the address and at the region's start, makes a
+repeat lookup a handful of reads. `mds_overlay_at` returns the id, `MDS_OVERLAY_STATIC` (no overlay covers the
+address: the main module, TCM, ...; also every ARM7 address), `MDS_OVERLAY_AMBIGUOUS` or `MDS_OVERLAY_UNKNOWN` (in
+an overlay range but matching none: an all-bss overlay, cleared or overwritten memory).
+
+A patched instruction (an Action Replay code) or a stale tail left by a smaller overlay does not change the answer
+(the window still matches the overlay whose code is there). Checked on DQ9 (a battle round sampled every 4 frames,
+1,101 samples): every resident overlay with code agreed with the game's own slot table (`0x01FFD364`) and with
+dq9-re's detection; the only difference was ov032, which is all bss (`UNKNOWN`). Every one of the 610
+overlay-tagged call entries of that round starts a symbol of its overlay.
+
+`mds_overlay_tags(id, 1)` also keeps **call counts and coverage per (address, overlay)**, beside the untagged ones:
+`mds_callcounts_take`, `mds_coverage_take` and their outputs are unchanged, and the tagged ones are taken with
+`mds_callcounts_take_ov` (each (entry, overlay) pair with its count, in no particular order) and
+`mds_coverage_take_ov` (each (address, overlay) pair, sorted by address then overlay). They need call tracking
+(`mds_calls`) and coverage (`mds_coverage`) on, as the untagged ones do; they accumulate until taken and survive
+resets and loads; turning tags off keeps them. Probe records carry the overlay at the probed address in `overlay`.
+Cost: an attribution per call (a cache hit is 8 word reads) and, for tagged coverage, one each time execution moves
+to another 4 KiB page or overlay range. Tests: `test_probes.py` (`OverlayTags`; without a cart everything is
+static), `debug_common_tests` (`OverlayMatch*`, the matching on synthetic images).
+
+### Python
+
+`melonds_mcp.native.Console` (and dq9-re's `melonds/probes.py`, which adds the same methods to its copy):
+
+| C | Python |
+| --- | --- |
+| `mds_probe_add` | `add_probe(addr, cpu=9, reads=(), lr_range=None, returns=True)`; reads: `(reg, len[, offset[, when]])`, reg `"r1"` or 1, when `"entry"`/`"return"`/`"both"` -> id |
+| `mds_probe_remove` / `_list` / `_capacity` / `_stats` | `remove_probe(id)` / `probes()` / `probe_capacity(n)` / `probe_stats()` |
+| `mds_probe_take` | `take_probes(pending=None)` -> list of dicts (`"reads"`, `"ret_reads"`: bytes per read); pass one dict as `pending` to every take and late returns are merged into the records taken earlier |
+| `mds_memlog_add` | `memlog_add(start, size, read=True, write=True, dma=True, cpu=9, pc_range=None)` -> id |
+| `mds_memlog_*` | `memlog_remove(id)`, `memlog_ranges()`, `memlog_capacity(n)`, `take_memlog()`, `memlog_stats()` |
+| `mds_action_add` | `add_action(addr, kind, value=0, cpu=9, reg=-1, value2=None, target=0, size=0, lr=None, first=1, times=0)`; kind `"return"`, `"set_reg"`, `"write"`, `"skip"` -> id |
+| `mds_action_*` | `remove_action(id)`, `actions()`, `take_actions()`, `action_stats()` (`"applied"`) |
+| `mds_overlay_tags` / `_at` | `overlay_tags(enabled=True)` / `overlay_at(addr)` |
+| `mds_callcounts_take_ov` / `mds_coverage_take_ov` | `take_call_counts_ov(cpu=9)` -> `{(entry, overlay): n}` / `take_coverage_ov(cpu=9)` -> `[(addr, overlay)]` |
+
+```python
+c.load_state("work/battle.mln")
+p = c.add_probe(0x020742FC)                     # NextRandomMax(Random*, n): n in r1, the draw in r0 at return
+c.memlog_add(0x020F5478, 0x964)                  # the hero's party record
+pending, calls = {}, []
+for keys, frames in steps:
+    c.set_keys(keys)
+    c.run(frames)
+    calls += c.take_probes(pending)              # take every step: the ring never fills
+for r in calls:
+    print(r["frame"], hex(r["lr"]), r["args"][1], r["ret"] and r["ret"][0])
+for a in c.take_memlog():
+    print(a["frame"], hex(a["pc"]), "w" if a["write"] else "r", hex(a["addr"] - 0x020F5478), hex(a["value"]))
+```
+
+Not in the socket protocol, the CLI, the MCP tools or Lua yet (see [section 11](#11-known-issues-and-surprises)).
 
 ---
 
@@ -1611,6 +1891,7 @@ melonds_headless library"). `native.has(name)` and `native.api_version()` tell w
 | `mds_serve_name` | via `serve(name=...)` |
 | `mds_set_instance_base` / `mds_instance_base` | `native.set_instance_base(base)` / `native.instance_base()` |
 | `mds_mac` / `mds_save_path` | `mac()` -> 6 bytes / `save_path()` -> str |
+| level 7 (`melonds_probes.h`) | see [section 5b, Python](#python) |
 
 `mds_lua_run` raises for an error in the script's first step (API level 2).
 
@@ -1680,6 +1961,10 @@ print(c.last_writer(0x020F6D48))      # same question after the fact (needs trac
 ```
 
 ### Log a function's arguments at each call
+
+From level 7 a probe does this without parking: `c.add_probe(0x020D8B94, reads=[("r1", 64)])`, then
+`c.take_probes()` after the run (the paths in `"reads"`, the results in `"ret"`; [section 5b](#function-probes)).
+With breakpoints:
 
 ```python
 bp = c.add_breakpoint(0x020D8B94)      # e.g. the file-open function
@@ -1822,6 +2107,21 @@ renumbered each time.
 21. **Every park drops every break request** (level 6): a Lua `debugger.pause()` for one CPU that has
     not fired yet when the console parks for another reason (a breakpoint on the other CPU, an
     interrupt) is dropped with the rest. Armed step counts are kept.
+22. **Level 7 is C API and Python only**: probes, the memory log, actions and overlay tags have no socket
+    protocol messages, CLI commands, MCP tools or Lua functions yet.
+23. **A probe's return is a heuristic** (level 7): the first time the CPU reaches the return address with the
+    entry's SP and mode. A function that leaves by longjmp or never returns stays awaited (256 per CPU at most,
+    then the oldest is given up), and one entered by a jump whose LR is not its return address is matched at
+    wherever LR points, if ever. A state load gives up every awaited return.
+24. **Memory log reads show memory as the access starts** (level 7): the value is read through the debugger,
+    so I/O reads log 0.
+25. **A moving action hides a breakpoint at its address** (level 7): when a return, skip or set-r15 action fires,
+    the instruction at its address does not run and a breakpoint there does not fire (one at the new PC does).
+    Actions that do not move PC leave breakpoints alone.
+26. **Overlay attribution reads memory, not the game's tables** (level 7): code an unload left in memory is
+    still attributed to its overlay (that is the code there), an overlay with no code (all bss) is
+    `MDS_OVERLAY_UNKNOWN`, and two overlays with identical code at an address and at their starts are
+    `MDS_OVERLAY_AMBIGUOUS`.
 
 ### Fixed in fix/api-quirks-2
 
