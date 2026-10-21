@@ -257,11 +257,21 @@ static int NativeSetRegister(lua_State* L)
     bool found = false;
     Exec(L, [&](NDS& nds) {
         ARM& arm = cpu ? (ARM&)*nds.ARM7 : (ARM&)*nds.ARM9;
-        if (u32* slot = RegisterSlot(arm, name))
+        u32* slot = RegisterSlot(arm, name);
+        found = slot;
+        if (slot == &arm.R[15])
+            arm.JumpTo(value | ((arm.CPSR & 0x20) ? 1 : 0));
+        else if (slot == &arm.CPSR)
         {
-            found = true;
-            *slot = value;
+            u32 pc = arm.R[15] - ((arm.CPSR & 0x20) ? 2 : 4);
+            u32 old = arm.CPSR;
+            arm.CPSR = value;
+            arm.UpdateMode(old, value);
+            if ((old ^ value) & 0x20)
+                arm.JumpTo(pc | ((value & 0x20) ? 1 : 0));
         }
+        else if (slot)
+            *slot = value;
     });
     if (!found)
         return luaL_argerror(L, 1, "unknown register");

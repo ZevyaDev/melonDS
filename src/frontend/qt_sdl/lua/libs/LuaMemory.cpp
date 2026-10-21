@@ -133,21 +133,41 @@ static void ARM7Access(u8* buffer, s64 address, s64 count, bool write,NDS* Curre
 	}
 }
 
+static void SyncCode(NDS* nds, const char* domain, isbus bus, s64 address, s64 count)
+{
+	u32 cpuAddress;
+	if (bus != isBus_NotBus)
+		cpuAddress = address;
+	else if (std::strcmp(domain, "Main RAM") == 0)
+		cpuAddress = 0x02000000 + address;
+	else if (std::strcmp(domain, "Instruction TCM") == 0)
+		cpuAddress = address;
+	else if (std::strcmp(domain, "ARM7 WRAM") == 0)
+		cpuAddress = 0x03800000 + address;
+	else
+		return;
+	nds->Debugger.SyncPipelines(cpuAddress, count);
+}
+
 void memoryDomain::write(u8* buffer,s64 address,s64 count){
+	s64 start = address, total = count;
 	switch (this->SystemBus)
 	{
 		case isBus_NotBus:
 			while (count--)
 			{
-				if (this->size<address) return;
+				if (this->size<address) break;
 				this->base[address++] = *(buffer++);
 			}
-			return;
+			break;
 		case isBus_ARM9_Bus:
-			return ARM9Access(buffer,address,count,true,this->CurrentNDS);
+			ARM9Access(buffer,address,count,true,this->CurrentNDS);
+			break;
 		case isBus_ARM7_Bus:
-			return ARM7Access(buffer,address,count,true,this->CurrentNDS);
+			ARM7Access(buffer,address,count,true,this->CurrentNDS);
+			break;
 	}
+	SyncCode(this->CurrentNDS, this->name, this->SystemBus, start, total);
 }
 void memoryDomain::read(u8* buffer,s64 address,s64 count){
 	switch (this->SystemBus)
