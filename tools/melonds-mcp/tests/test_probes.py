@@ -46,6 +46,9 @@ def caller(calls=10, forever=False):
 
 
 class Level7Features(unittest.TestCase):
+    def test_version(self):
+        self.assertGreaterEqual(native.api_version(), 7)
+
     def test_features(self):
         for name in ("probes", "memlog", "bp_actions", "overlay_tags", "mds_probe_add", "mds_probe_take",
                      "mds_memlog_take", "mds_action_add", "mds_overlay_at", "mds_callcounts_take_ov",

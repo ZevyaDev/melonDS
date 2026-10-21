@@ -139,7 +139,7 @@ debugger (debug = 0)` (see [section 2](#creating-and-destroying)).
 
 | Function | Does |
 | --- | --- |
-| `int mds_version(void)` | The API level: 6 for this branch (`MDS_API_VERSION` in `melonds_api.h`), 1 for every library before the level scheme. See [Version and features](#version-and-features). |
+| `int mds_version(void)` | The API level: 7 for this branch (`MDS_API_VERSION` in `melonds_api.h`), 1 for every library before the level scheme. See [Version and features](#version-and-features). |
 | `int mds_has(const char* name)` | 1 if the library has the named feature or exports the named function, else 0 (also for NULL). Level 2 and later; on a level-1 library look the symbol up. |
 | `void mds_set_local_dir(const char* dir)` | Directory for the files the melonDS core opens *by relative name* through `Platform::OpenLocalFile` (DSi NAND, SD/FAT image index, OpenGL shader cache). NULL means `.`. It does **not** affect BIOS, firmware, ROM, save or state paths: those are opened exactly as given, relative to the process's working directory. Process-wide, not synchronised: set it before creating consoles. |
 | `void mds_set_log_level(int level)` | Core log threshold: 0 Debug, 1 Info, 2 Warn (default), 3 Error. Messages at or above it go to stderr. Process-wide. |
