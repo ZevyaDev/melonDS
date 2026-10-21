@@ -112,6 +112,7 @@ DefaultList<bool> DefaultBools =
 #endif
     {"DSi.DSP.HLE", true},
     {"Instance*.RTC.SyncToHost", true},
+    {"Debugger.KeysInGameWindow", true},
 };
 
 DefaultList<std::string> DefaultStrings =

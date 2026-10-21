@@ -37,7 +37,8 @@ CPU is on, and a click in its margin toggles a breakpoint on that line. Line inf
 `.debug_line` of an ELF linked with `-sym on` (mwldarm; the ROM bytes do not change). For a local
 `config.yaml` it loads by itself from `build/<region>/arm9.o` of that decomp; Symbols... > Line
 info from an ELF... loads any other one. Rows are matched to modules through `delinks.txt`, so
-overlays that share addresses resolve to the loaded one.
+overlays that share addresses resolve to the loaded one. When that ELF is rebuilt, the symbols, line
+info and source files reload a second after the linker finishes writing it.
 
 ## Debugger window
 
@@ -54,6 +55,10 @@ overlays that share addresses resolve to the loaded one.
 | Enter, double-click | follow a branch or literal |
 | Backspace | back |
 
+Keys... changes the run and step keys (F4 to Ctrl+F11 above). While the debugger is open they also
+work in the game window, ahead of its own keys such as F1-F8 for loading states; Keys... turns that
+off.
+
 Step over (F10) steps over BL, BLX, SWI and calls made through `mov lr, pc` with `bx` or `ldr pc`,
 and steps through every other branch. Instructions are coloured by kind, in the disassembly and the
 trace: calls orange, returns red, branches purple, loads cyan, stores green, compares yellow,
@@ -67,6 +72,13 @@ The call stack is tracked in the core, per thread: BL/BLX, calls through `mov lr
 interrupts and SWIs, and thread switches (by stack pointer, including NitroSDK's context loads).
 Threads that are not running are listed under the current one. Frames that were already on the
 stack when tracking started or a savestate loaded are read back from stack memory at the next call.
+
+The Arguments column shows each tracked call's arguments as they were at the call: r0-r3, then the
+first four stack words. A C++ symbol's demangled signature gives their types: `this` for a member
+(static members are shown with one too), numbers by type, `char*` and `const char*` as strings.
+Without a signature it shows r0-r3, with any that point at text as strings. The tooltip lists every
+argument with its register and type and the full string; double-click or right-click opens a
+pointer argument in the memory viewer. Frames read back from stack memory have no arguments.
 
 ## Tools
 
@@ -110,7 +122,8 @@ with JIT off when you rerecord.
 The Qt console has #1671's API plus the debugger tables from the headless build: `event.onmemoryexecute`,
 `onmemoryread`, `onmemorywrite`, `onframeend`, `emu.getregister`, `setregister`, `getregisters` and
 `debugger.*` (`callstack`, `threadstacks`, `trackcalls`, `callcounts`, `coverage`, `trace`, `trackwriters`,
-`lastwriter`, `pause`, `step`, `resume`, `peek`).
+`lastwriter`, `pause`, `step`, `resume`, `peek`). A `callstack` frame of a tracked call carries
+`args`, r0-r3 at the call.
 
 `wifi.hook(fn, name)` installs a local wireless driver: `fn` sees every frame the console sends or
 receives (MP commands, replies and acks, beacons, management and data frames, local play and

@@ -1015,6 +1015,13 @@ void Debugger::ResumeContext(ARM& cpu, u32 pc, bool loaded)
         PushFrame(n, frame);
 }
 
+static CallFrame Called(const ARM& cpu, u32 site, u32 entry, u32 ret, u32 sp, u8 mode)
+{
+    CallFrame frame {site, entry, ret, sp, mode, false, true};
+    std::copy(cpu.R, cpu.R + 4, frame.Args);
+    return frame;
+}
+
 void Debugger::PushFrame(u8 n, const CallFrame& frame)
 {
     auto& stack = CallStack[n];
@@ -1045,7 +1052,7 @@ void Debugger::TrackEntry(ARM& cpu, u32 pc, u32 prev)
     bool literalReturn = !PrevThumb[n] && (Prev2Instr[n] & 0x0F7FF000) == 0x051FE000 && IsIndirectJump(PrevInstr[n], false);
     if (pc != next && pc != lr && (lr == next || literalReturn))
     {
-        PushFrame(n, {prev, pc, lr, sp, mode, false});
+        PushFrame(n, Called(cpu, prev, pc, lr, sp, mode));
         return;
     }
     if (!stack.empty())
@@ -1054,7 +1061,7 @@ void Debugger::TrackEntry(ARM& cpu, u32 pc, u32 prev)
         if (top.SP == sp && top.Return == lr && top.Mode == mode && !top.Exception
             && ((pc != next && IsIndirectJump(PrevInstr[n], PrevThumb[n])) || KnownEntries[n].count(pc)))
         {
-            top.Entry = pc;
+            top = Called(cpu, top.Site, pc, top.Return, top.SP, top.Mode);
             CallCounts[n][pc]++;
             return;
         }
@@ -1068,7 +1075,9 @@ void Debugger::TrackEntry(ARM& cpu, u32 pc, u32 prev)
             return;
     }
     u32 entry = pc - JumpTarget[n] <= MaxPrologueOffset ? JumpTarget[n] : pc;
-    PushFrame(n, {lr - ((cpu.R[14] & 1) ? 2 : 4), entry, lr, sp, mode, false});
+    CallFrame frame = Called(cpu, lr - ((cpu.R[14] & 1) ? 2 : 4), entry, lr, sp, mode);
+    frame.HasArgs = entry == pc;
+    PushFrame(n, frame);
 }
 
 static bool IsExceptionReturn(u32 instr, bool thumb)
@@ -1328,7 +1337,7 @@ void Debugger::OnCall(ARM& cpu)
 {
     u8 n = cpu.Num;
     u32 entry = cpu.R[15] - ((cpu.CPSR & 0x20) ? 2 : 4);
-    PushFrame(n, {CurPC[n], entry, cpu.R[14] & ~1u, cpu.R[13], (u8)(cpu.CPSR & 0x1F), false});
+    PushFrame(n, Called(cpu, CurPC[n], entry, cpu.R[14] & ~1u, cpu.R[13], (u8)(cpu.CPSR & 0x1F)));
 }
 
 void Debugger::OnException(ARM& cpu, u32 ret)

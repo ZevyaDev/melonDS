@@ -29,6 +29,8 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QInputDialog>
+#include <QKeyEvent>
+#include <QKeySequenceEdit>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMap>
@@ -52,6 +54,7 @@
 #include "DebugSource.h"
 #include "SourceView.h"
 #include "EmuInstance.h"
+#include "Window.h"
 #include "Config.h"
 #include "ARM.h"
 #include "NDSCart.h"
@@ -60,7 +63,30 @@ using namespace melonDS;
 
 static QMap<DebugBridge*, DebuggerWindow*> OpenWindows;
 
+struct RunKey
+{
+    const char* Id;
+    QKeyCombination Default;
+};
+
+static const RunKey RunKeys[] = {
+    {"Break", Qt::Key_F6},
+    {"Continue", Qt::Key_F5},
+    {"StepInto", Qt::Key_F11},
+    {"StepOver", Qt::Key_F10},
+    {"StepOut", Qt::SHIFT | Qt::Key_F11},
+    {"StepToBranch", Qt::CTRL | Qt::Key_F10},
+    {"RunToTakenBranch", Qt::CTRL | Qt::Key_F11},
+    {"RunToCursor", Qt::Key_F4},
+};
+
+static std::string KeyPath(const char* id)
+{
+    return std::string("Debugger.Keys.") + id;
+}
+
 constexpr int MaxStepCount = 1000000;
+constexpr int ArgsColumn = 6;
 constexpr int MaxUpdateMs = 10000;
 constexpr int UpdateStepMs = 50;
 
@@ -234,27 +260,20 @@ void DebuggerWindow::buildToolbar()
     QToolBar* bar = addToolBar("Run");
     bar->setObjectName("RunToolbar");
     ActBreak = bar->addAction("Break", this, [this] { Bridge->requestBreak(cpu()); });
-    ActBreak->setShortcut(Qt::Key_F6);
     ActContinue = bar->addAction("Continue", this, [this] { Bridge->resume(); });
-    ActContinue->setShortcut(Qt::Key_F5);
     ActStep = bar->addAction("Step into", this, [this] { Bridge->step(cpu(), (u32)StepCount->value()); });
-    ActStep->setShortcut(Qt::Key_F11);
     ActOver = bar->addAction("Step over", this, [this] { Bridge->stepOver(cpu()); });
-    ActOver->setShortcut(Qt::Key_F10);
     ActOut = bar->addAction("Step out", this, [this] { Bridge->stepOut(cpu()); });
-    ActOut->setShortcut(Qt::SHIFT | Qt::Key_F11);
     ActBranch = bar->addAction("Step to branch", this, [this] { Bridge->stepTo(cpu(), StepMode::Branch); });
-    ActBranch->setShortcut(Qt::CTRL | Qt::Key_F10);
+    ActBranch->setWhatsThis("Run to the next branch or return in this function, stepping over calls");
     ActTaken = bar->addAction("Run to taken branch", this, [this] { Bridge->stepTo(cpu(), StepMode::TakenBranch); });
-    ActTaken->setShortcut(Qt::CTRL | Qt::Key_F11);
+    ActTaken->setWhatsThis("Run until a branch, call or return actually jumps, and stop at its target");
     QAction* runTo = bar->addAction("Run to cursor", this, [this] { Bridge->runTo(cpu(), Disasm->selected()); });
-    runTo->setShortcut(Qt::Key_F4);
-    for (QAction* a : {ActBreak, ActContinue, ActStep, ActOver, ActOut, ActBranch, ActTaken, runTo})
-        a->setToolTip(a->text() + " (" + a->shortcut().toString() + ")");
-    ActBranch->setToolTip("Run to the next branch or return in this function, stepping over calls ("
-        + ActBranch->shortcut().toString() + ")");
-    ActTaken->setToolTip("Run until a branch, call or return actually jumps, and stop at its target ("
-        + ActTaken->shortcut().toString() + ")");
+    RunActions = {ActBreak, ActContinue, ActStep, ActOver, ActOut, ActBranch, ActTaken, runTo};
+    for (size_t i = 0; i < RunActions.size(); i++)
+        RunActions[i]->setObjectName(RunKeys[i].Id);
+    applyKeys();
+    qApp->installEventFilter(this);
     bar->addWidget(new QLabel(" Steps ", this));
     StepCount = new QSpinBox(this);
     StepCount->setObjectName("StepCount");
@@ -366,6 +385,123 @@ void DebuggerWindow::buildViewToolbar()
         refresh();
         Disasm->reload();
     })->setToolTip("Read registers, breakpoints and the listing again now");
+    bar->addAction("Keys...", this, &DebuggerWindow::editKeys)->setToolTip("Change the run and step keys");
+}
+
+void DebuggerWindow::applyKeys()
+{
+    Config::Table& cfg = Bridge->instance()->getGlobalConfig();
+    GameWindowKeys = cfg.GetBool("Debugger.KeysInGameWindow");
+    for (size_t i = 0; i < RunActions.size(); i++)
+    {
+        QAction* a = RunActions[i];
+        QString saved = QString::fromStdString(cfg.GetString(KeyPath(RunKeys[i].Id)));
+        a->setShortcut(saved.isEmpty() ? QKeySequence(RunKeys[i].Default)
+            : saved == "none" ? QKeySequence() : QKeySequence::fromString(saved, QKeySequence::PortableText));
+        QString help = a->whatsThis().isEmpty() ? a->text() : a->whatsThis();
+        a->setToolTip(a->shortcut().isEmpty() ? help : help + " (" + a->shortcut().toString(QKeySequence::NativeText) + ")");
+    }
+}
+
+void DebuggerWindow::editKeys()
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle("Debugger keys");
+    QFormLayout* form = new QFormLayout(&dlg);
+    std::vector<QKeySequenceEdit*> edits;
+    for (QAction* a : RunActions)
+    {
+        QWidget* row = new QWidget(&dlg);
+        QHBoxLayout* h = new QHBoxLayout(row);
+        h->setContentsMargins(0, 0, 0, 0);
+        QKeySequenceEdit* edit = new QKeySequenceEdit(a->shortcut(), row);
+        edit->setObjectName(a->objectName());
+        connect(edit, &QKeySequenceEdit::editingFinished, edit, [edit] {
+            if (edit->keySequence().count() > 1)
+                edit->setKeySequence(QKeySequence(edit->keySequence()[0]));
+        });
+        QToolButton* clear = new QToolButton(row);
+        clear->setText("Clear");
+        connect(clear, &QToolButton::clicked, edit, &QKeySequenceEdit::clear);
+        h->addWidget(edit, 1);
+        h->addWidget(clear);
+        form->addRow(a->text(), row);
+        edits.push_back(edit);
+    }
+    QCheckBox* game = new QCheckBox("Also while the game window has focus", &dlg);
+    game->setChecked(GameWindowKeys);
+    form->addRow(game);
+    QLabel* note = new QLabel("In the game window these keys come before its own, such as F1-F8 for loading states.", &dlg);
+    note->setWordWrap(true);
+    form->addRow(note);
+    QDialogButtonBox* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel | QDialogButtonBox::RestoreDefaults, &dlg);
+    form->addRow(buttons);
+    connect(buttons->button(QDialogButtonBox::RestoreDefaults), &QPushButton::clicked, &dlg, [&edits] {
+        for (size_t i = 0; i < edits.size(); i++)
+            edits[i]->setKeySequence(QKeySequence(RunKeys[i].Default));
+    });
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, [&] {
+        QMap<QKeySequence, QString> used;
+        for (size_t i = 0; i < edits.size(); i++)
+        {
+            QKeySequence seq = edits[i]->keySequence().isEmpty() ? QKeySequence() : QKeySequence(edits[i]->keySequence()[0]);
+            if (seq.isEmpty())
+                continue;
+            if (used.contains(seq))
+            {
+                QMessageBox::warning(&dlg, "melonDS", QString("%1 is set for both %2 and %3.")
+                    .arg(seq.toString(QKeySequence::NativeText), used[seq], RunActions[i]->text()));
+                return;
+            }
+            used.insert(seq, RunActions[i]->text());
+        }
+        dlg.accept();
+    });
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    Config::Table& cfg = Bridge->instance()->getGlobalConfig();
+    for (size_t i = 0; i < edits.size(); i++)
+    {
+        QKeySequence seq = edits[i]->keySequence().isEmpty() ? QKeySequence() : QKeySequence(edits[i]->keySequence()[0]);
+        QString value = seq.isEmpty() ? "none" : seq == QKeySequence(RunKeys[i].Default) ? QString() : seq.toString(QKeySequence::PortableText);
+        cfg.SetString(KeyPath(RunKeys[i].Id), value.toStdString());
+    }
+    cfg.SetBool("Debugger.KeysInGameWindow", game->isChecked());
+    Config::Save();
+    for (DebuggerWindow* win : OpenWindows)
+        win->applyKeys();
+}
+
+QAction* DebuggerWindow::actionForKey(const QKeyEvent* event) const
+{
+    int key = event->key();
+    if (!key || key == Qt::Key_unknown || key == Qt::Key_Shift || key == Qt::Key_Control || key == Qt::Key_Alt
+        || key == Qt::Key_Meta)
+        return nullptr;
+    QKeySequence seq(QKeyCombination(event->modifiers() & ~Qt::KeypadModifier, Qt::Key(key)));
+    for (QAction* a : RunActions)
+        if (!a->shortcut().isEmpty() && a->shortcut() == seq)
+            return a;
+    return nullptr;
+}
+
+bool DebuggerWindow::eventFilter(QObject* obj, QEvent* event)
+{
+    if ((event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress) && GameWindowKeys && obj->isWidgetType())
+    {
+        MainWindow* win = qobject_cast<MainWindow*>(static_cast<QWidget*>(obj)->window());
+        if (win && win->getEmuInstance() == Bridge->instance())
+            if (QAction* act = actionForKey(static_cast<QKeyEvent*>(event)))
+            {
+                if (event->type() == QEvent::KeyPress && act->isEnabled())
+                    act->trigger();
+                event->accept();
+                return true;
+            }
+    }
+    return QMainWindow::eventFilter(obj, event);
 }
 
 void DebuggerWindow::setUpdateInterval(int ms)
@@ -479,12 +615,36 @@ void DebuggerWindow::buildDocks()
     addDockWidget(Qt::BottomDockWidgetArea, pdock);
 
     Stack = new QTreeWidget(this);
-    Stack->setHeaderLabels({"#", "Function", "Called from", "Returns to", "SP", "Mode"});
+    Stack->setHeaderLabels({"#", "Function", "Called from", "Returns to", "SP", "Mode", "Arguments"});
     Stack->setFont(MonoFont());
     connect(Stack, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int col) {
+        if (col == ArgsColumn)
+        {
+            QVariantList addrs = item->data(ArgsColumn, Qt::UserRole + 1).toList();
+            if (!addrs.isEmpty())
+                showArgumentMemory(addrs.first().toUInt());
+            return;
+        }
         QVariant addr = item->data(col == 1 ? 1 : 2, Qt::UserRole);
         if (addr.isValid())
             Disasm->goTo(addr.toUInt());
+    });
+    Stack->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(Stack, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+        QTreeWidgetItem* item = Stack->itemAt(pos);
+        if (!item)
+            return;
+        QStringList labels = item->data(ArgsColumn, Qt::UserRole).toStringList();
+        QVariantList addrs = item->data(ArgsColumn, Qt::UserRole + 1).toList();
+        if (labels.isEmpty())
+            return;
+        QMenu menu(this);
+        for (int i = 0; i < labels.size(); i++)
+        {
+            u32 addr = addrs[i].toUInt();
+            menu.addAction(QString("Memory at %1 (%2)").arg(labels[i], Hex(addr)), this, [this, addr] { showArgumentMemory(addr); });
+        }
+        menu.exec(Stack->viewport()->mapToGlobal(pos));
     });
     QDockWidget* sdock = new QDockWidget("Call stack", this);
     sdock->setObjectName("CallStack");
@@ -534,6 +694,7 @@ void DebuggerWindow::refresh()
             o.Halted = arm.Halted;
             s.Stack[c] = nds.Debugger.GetCallStack(c);
             s.Threads[c] = nds.Debugger.GetThreadStacks(c);
+            CallArgs::Collect(nds, c, s.Stack[c], s.Args[c]);
         }
         for (auto& b : nds.Debugger.GetBreakpoints())
             s.Points.push_back({b.ID, true, b.CPUMask, 0, b.Enabled, b.Addr, b.Addr, b.Hits, (bool)b.Callback, bridge->isTemp(b.ID)});
@@ -671,6 +832,18 @@ void DebuggerWindow::updateStack()
             item->setText(3, Hex(f.Return));
             item->setText(4, Hex(f.SP));
             item->setText(5, ModeName(f.Mode));
+            CallArgs::Shown args = CallArgs::Describe(f, syms, Snap.Args[c]);
+            item->setText(ArgsColumn, args.Text);
+            item->setToolTip(ArgsColumn, args.Detail);
+            QStringList labels;
+            QVariantList addrs;
+            for (const CallArgs::Pointer& p : args.Pointers)
+            {
+                labels << p.Label;
+                addrs << p.Addr;
+            }
+            item->setData(ArgsColumn, Qt::UserRole, labels);
+            item->setData(ArgsColumn, Qt::UserRole + 1, addrs);
         }
     };
     addFrames(frames, nullptr);
@@ -937,4 +1110,9 @@ void DebuggerWindow::loadLines()
 void DebuggerWindow::autoLoadSymbols()
 {
     DebugTools::autoLoadSymbols(Bridge);
+}
+
+void DebuggerWindow::showArgumentMemory(u32 addr)
+{
+    DebugTools::showMemory(Bridge, this, cpu() ? DebugTools::memSpace_ARM7 : DebugTools::memSpace_ARM9, addr);
 }

@@ -397,13 +397,23 @@ static void PushFrames(lua_State* L, const std::vector<CallFrame>& stack)
     for (size_t i = 0; i < stack.size(); i++)
     {
         const CallFrame& f = stack[stack.size() - 1 - i];
-        lua_createtable(L, 0, 6);
+        lua_createtable(L, 0, 7);
         lua_pushinteger(L, f.Entry); lua_setfield(L, -2, "entry");
         lua_pushinteger(L, f.Site); lua_setfield(L, -2, "site");
         lua_pushinteger(L, f.Return); lua_setfield(L, -2, "ret");
         lua_pushinteger(L, f.SP); lua_setfield(L, -2, "sp");
         lua_pushinteger(L, f.Mode); lua_setfield(L, -2, "mode");
         lua_pushboolean(L, f.Exception); lua_setfield(L, -2, "exception");
+        if (f.HasArgs)
+        {
+            lua_createtable(L, 4, 0);
+            for (int k = 0; k < 4; k++)
+            {
+                lua_pushinteger(L, f.Args[k]);
+                lua_rawseti(L, -2, k + 1);
+            }
+            lua_setfield(L, -2, "args");
+        }
         lua_rawseti(L, -2, i + 1);
     }
 }
