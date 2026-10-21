@@ -1,4 +1,4 @@
-"""A state load fully decides what runs next (API level 7, features ``savestate_derived`` and ``gx_fifo_zeroed``).
+"""A state load fully decides what runs next (API level 9, features ``savestate_derived`` and ``gx_fifo_zeroed``).
 
 A load must leave nothing of the console's previous run: a console that loads a state, a fresh
 console that loads it and the console that saved it and ran on all run the same. Two pieces of
@@ -123,9 +123,9 @@ def sections(data):
 
 
 @unittest.skipUnless(have_library(), "melonds_headless library not found")
-class Level7Features(unittest.TestCase):
+class Level9Features(unittest.TestCase):
     def test_version_and_features(self):
-        self.assertGreaterEqual(native.api_version(), 7)
+        self.assertGreaterEqual(native.api_version(), 9)
         for name in ("savestate_derived", "gx_fifo_zeroed"):
             with self.subTest(name):
                 self.assertTrue(native.has(name))
@@ -150,19 +150,21 @@ class LoadDecidesTheRun(unittest.TestCase):
         timeout, states = c.run(n)
         self.assertFalse(timeout)
 
-    def assertSameState(self, a, b):
+    def assertSameState(self, a, b, ignore=()):
         with open(a, "rb") as fa, open(b, "rb") as fb:
             sa, sb = sections(fa.read()), sections(fb.read())
         self.assertEqual(sorted(sa), sorted(sb))
-        differ = [k for k in sa if sa[k] != sb[k]]
+        differ = [k for k in sa if sa[k] != sb[k] and k not in ignore]
         self.assertEqual(differ, [], "sections that differ")
 
-    def play(self, program, cpu, after, probe):
+    def play(self, program, cpu, after, probe, setup=None):
         """The console that saves S runs on without loading (cont), then loads S (reused: it ran past
         S first); a fresh console loads S. Each runs `after` frames from S and saves. One console at a
         time. Returns probe(console) at S and after each run."""
         out = {}
         a = self.console()
+        if setup:
+            setup(a)
         try:
             a.write(program.base, program.assemble(), cpu=cpu)
             a.set_reg("pc", program.base, cpu=cpu)
@@ -179,6 +181,8 @@ class LoadDecidesTheRun(unittest.TestCase):
         finally:
             a.close()
         b = self.console()                                  # fresh: only a reset before the load
+        if setup:
+            setup(b)
         try:
             b.load_state(self.path("s"))
             self.run_frames(b, after)
@@ -204,13 +208,67 @@ class LoadDecidesTheRun(unittest.TestCase):
         self.assertSameState(self.path("cont"), self.path("reused"))
 
 
+def skip_drawing(c):
+    c.set_render(skip_2d=True, skip_3d=True)
+
+
+def threaded_3d(c):
+    c.set_threaded_3d(True)
+
+
+def probe_and_memlog(c):
+    c.add_probe(CODE7 + 4, cpu=7, returns=False)    # inside the setup code: hit once, before S
+    c.memlog_add(COUNT7, 4, cpu=7)
+
+
+@unittest.skipUnless(have_library(), "melonds_headless library not found")
+class LoadWithRenderControlAndProbes(LoadDecidesTheRun):
+    """Render skipping, threaded 3D (level 8) and probes / the memory log (level 7) keep out of the load-time
+    recompute: with them on, every console ends exactly where a plain console does."""
+
+    test_pending_irq_is_taken_after_a_load = None            # the base class runs these
+    test_code_timing_comes_from_the_loaded_cache_settings = None
+
+    def check(self, program, cpu, after, probe, setup):
+        plain = self.play(program, cpu, after, probe)
+        with open(self.path("cont"), "rb") as f:
+            want = f.read()
+        got = self.play(program, cpu, after, probe, setup)
+        self.assertEqual(got, plain)
+        for name in ("cont", "fresh", "reused"):
+            self.assertSameState(self.path("cont"), self.path(name))
+        with open(self.path("ref"), "wb") as f:
+            f.write(want)
+        # another console: its generated firmware (MAC, SPFW) differs; everything else must not
+        self.assertSameState(self.path("ref"), self.path("cont"), ignore=("SPFW",))
+
+    def test_pending_irq(self):
+        count = lambda c: int.from_bytes(c.read(COUNT7, 4, cpu=7), "little")
+        for name, setup in (("skip", skip_drawing), ("threaded", threaded_3d), ("probes", probe_and_memlog)):
+            with self.subTest(name):
+                self.check(pending_irq_then_enable(), 7, 8, count, setup)
+
+    def test_code_timing(self):
+        r1 = lambda c: c.regs(9)["r1"]
+        for name, setup in (("skip", skip_drawing), ("threaded", threaded_3d)):
+            with self.subTest(name):
+                self.check(cached_block(), 9, 1, r1, setup)
+
+
 @unittest.skipUnless(have_library(), "melonds_headless library not found")
 class GxFifoPadding(unittest.TestCase):
 
     def test_fifo_entries_are_zero_padded(self):
+        for name, setup in (("plain", None), ("skip", skip_drawing), ("threaded", threaded_3d)):
+            with self.subTest(name):
+                self.padding(setup)
+
+    def padding(self, setup):
         c = native.Console()
         c.reset()
         self.addCleanup(c.close)
+        if setup:
+            setup(c)
         a = A.Asm(CODE9)
         a.ldr_const(4, 0x04000000)
         a.ldr_const(0, 0x820F)                  # POWCNT1: LCDs, 2D A, 3D render and geometry, 2D B, swap

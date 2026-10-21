@@ -103,9 +103,10 @@ typedef struct
 
 // Reference: docs/headless-api.md, section 1 (library-wide settings, errors, version and features).
 // API level: 1 up to the IPC merge, 2 from fix/api-quirks, 3 from feature/cheats, 4 from merge/upstream-debug,
-// 5 from merge/upstream-debug-2, 6 from fix/api-quirks-2, 7 from fix/savestate-irq (MDS_API_VERSION). It goes up
-// whenever functions are added or behaviour changes; mds_has names the individual features.
-#define MDS_API_VERSION 7
+// 5 from merge/upstream-debug-2, 6 from fix/api-quirks-2, 7 from feature/probes, 8 from feature/render-control,
+// 9 from fix/savestate-irq (MDS_API_VERSION). It goes up whenever functions are added or behaviour changes; mds_has
+// names the features.
+#define MDS_API_VERSION 9
 MDS_API int mds_version(void);
 // 1 if the library has the named feature or exported function ("serve_host", "mds_serve_host", ...; the list
 // is in docs/headless-api.md, section 1), else 0. Absent from libraries before API level 2: look the symbol up.
@@ -182,6 +183,26 @@ typedef struct
 
 // Reference: docs/headless-api.md, section 4 (mds_screen) and section 3 (setters and queued input).
 MDS_API int mds_screen(int id, uint32_t* out);
+
+// Render control (API level 8; features "render_skip", "threaded_3d", "render_stats"; docs/headless-api.md,
+// section 4, "Render control"). Both settings are the caller's wish: the console applies them at its next frame
+// boundary, before the next frame runs. Neither changes emulated state, and savestates do not carry them.
+// mds_set_render: skip drawing to save time. MDS_RENDER_SKIP_2D skips BG/OBJ drawing and the framebuffer (mds_screen
+// keeps the last frame drawn); MDS_RENDER_SKIP_3D skips 3D rasterising. Display capture, which writes VRAM, still
+// gets what it needs. After clearing a bit, the screen is exactly the fully drawn one after 1 frame for 2D, 2 frames
+// for 3D (it shows the 3D drawn during the previous frame's VBlank): clear both 2 frames before a screenshot.
+// Unknown bits fail.
+#define MDS_RENDER_SKIP_2D 1
+#define MDS_RENDER_SKIP_3D 2
+MDS_API int mds_set_render(int id, uint32_t flags);
+// Draw 3D on a thread of its own (the soft renderer's threaded mode; off by default). Same pixels, less wall time.
+MDS_API int mds_set_threaded_3d(int id, int on);
+// Fills up to max of: [0] skip flags asked for, [1] skip flags in force, [2] threaded 3D asked for, [3] in force,
+// [4] visible lines 2D skipped, [5] 3D frames skipped, [6] lines drawn although 2D skipping was on (display capture),
+// [7] 3D frames drawn although 3D skipping was on (a capture was likely), [8] 3D frames drawn late for a capture
+// that started without one. Returns MDS_RENDER_STATS (more than max when cut short). Counters run from creation.
+#define MDS_RENDER_STATS 9
+MDS_API int mds_render_stats(int id, uint64_t* out, int max);
 MDS_API int mds_set_keys(int id, uint32_t pressed);
 MDS_API int mds_touch(int id, int x, int y);
 MDS_API int mds_set_lid(int id, int closed);
@@ -321,5 +342,8 @@ MDS_API int mds_save_path(int id, char* out, int max);
 #ifdef __cplusplus
 }
 #endif
+
+// Function probes, the memory access log, breakpoint actions and overlay tags (API level 7).
+#include "melonds_probes.h"
 
 #endif

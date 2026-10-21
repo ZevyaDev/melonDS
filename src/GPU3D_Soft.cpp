@@ -43,6 +43,7 @@ void SoftRenderer3D::StopRenderThread()
         Platform::Thread_Free(RenderThread);
         RenderThread = nullptr;
     }
+    Outstanding = false;
 }
 
 void SoftRenderer3D::SetupRenderThread()
@@ -80,6 +81,7 @@ void SoftRenderer3D::SetupRenderThread()
         // "I might need some of your scanlines before you finish the whole buffer,"
         // "so let me know as soon as you're done with each one."
         Platform::Semaphore_Reset(Sema_ScanlineCount);
+        Outstanding = false;
     }
     else
     {
@@ -92,6 +94,8 @@ void SoftRenderer3D::EnableRenderThread()
     if (Threaded && Sema_RenderStart)
     {
         Platform::Semaphore_Post(Sema_RenderStart);
+        Outstanding = true;
+        Skipped = false;    // the thread draws the current frame now (after a load, a reset, a restart)
     }
 }
 
@@ -133,8 +137,11 @@ void SoftRenderer3D::SetThreaded(bool threaded) noexcept
     if (Threaded != threaded)
     {
         Threaded = threaded;
+        // No render is started here (EnableRenderThread): the buffer already holds the current frame (the
+        // unthreaded RenderFrame drew it, or the stopped thread finished it), and GetLine and
+        // FinishRendering wait only for a render that was started (Outstanding). So switching changes no
+        // pixel: the next frame shows what it would have shown without the switch.
         SetupRenderThread();
-        EnableRenderThread();
     }
 }
 
@@ -1739,8 +1746,41 @@ void SoftRenderer3D::RenderPolygons(bool threaded, Polygon** polygons, int npoly
 
 void SoftRenderer3D::FinishRendering()
 {
-    if (RenderThreadRunning.load(std::memory_order_relaxed) && !GPU3D.AbortFrame)
+    // Outstanding: a frame skipped by SkipFrame started no render, so there is nothing to wait for
+    // (without skipping, a render is always outstanding here, as before)
+    if (RenderThreadRunning.load(std::memory_order_relaxed) && Outstanding && !GPU3D.AbortFrame)
+    {
         Platform::Semaphore_Wait(Sema_RenderDone);
+        Outstanding = false;
+        // every line the thread finished has been taken by now, unless 2D did not take them all (a
+        // render started late for a capture, or VCount writes): drop the rest, they belong to this frame
+        Platform::Semaphore_Reset(Sema_ScanlineCount);
+    }
+}
+
+void SoftRenderer3D::RenderLate()
+{
+    // a render the thread started after the skip (EnableRenderThread) already draws this frame
+    if (RenderThreadRunning.load(std::memory_order_relaxed) && Outstanding)
+    {
+        Skipped = false;
+        return;
+    }
+    RenderFrame();
+}
+
+void SoftRenderer3D::SkipFrame()
+{
+    // keep the texture caches exactly as RenderFrame leaves them, so the frame drawn after the skip
+    // sees the same cached textures as with every frame drawn
+    auto textureDirty = GPU.VRAMDirty_Texture.DeriveState(GPU.VRAMMap_Texture, GPU);
+    auto texPalDirty = GPU.VRAMDirty_TexPal.DeriveState(GPU.VRAMMap_TexPal, GPU);
+    GPU.MakeVRAMFlat_TextureCoherent(textureDirty);
+    GPU.MakeVRAMFlat_TexPalCoherent(texPalDirty);
+
+    FrameIdentical = false;
+    Skipped = true;
+    ForceFull = true;
 }
 
 void SoftRenderer3D::RenderFrame()
@@ -1751,12 +1791,16 @@ void SoftRenderer3D::RenderFrame()
     bool textureChanged = GPU.MakeVRAMFlat_TextureCoherent(textureDirty);
     bool texPalChanged = GPU.MakeVRAMFlat_TexPalCoherent(texPalDirty);
 
-    FrameIdentical = !(textureChanged || texPalChanged) && GPU3D.RenderFrameIdentical;
+    // after a skipped frame the buffer is stale: draw even an identical frame
+    FrameIdentical = !(textureChanged || texPalChanged) && GPU3D.RenderFrameIdentical && !ForceFull;
+    Skipped = false;
+    ForceFull = false;
 
     if (RenderThreadRunning.load(std::memory_order_relaxed))
     {
         // "Render thread, you're up! Get moving."
         Platform::Semaphore_Post(Sema_RenderStart);
+        Outstanding = true;
     }
     else if (!FrameIdentical)
     {
@@ -1813,7 +1857,7 @@ u32* SoftRenderer3D::GetLine(int line)
         return ScrolledLine;
     }
 
-    if (RenderThreadRunning.load(std::memory_order_relaxed))
+    if (RenderThreadRunning.load(std::memory_order_relaxed) && Outstanding)
     {
         if (line < 192)
             // We need a scanline, so let's wait for the render thread to finish it.

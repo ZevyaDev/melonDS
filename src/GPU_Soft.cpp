@@ -92,8 +92,62 @@ void SoftRenderer::SetRenderSettings(RendererSettings& settings)
 }
 
 
+void SoftRenderer::SetThreaded3D(bool threaded)
+{
+    static_cast<SoftRenderer3D*>(Rend3D.get())->SetThreaded(threaded);
+}
+
+bool SoftRenderer::IsThreaded3D() const
+{
+    return static_cast<const SoftRenderer3D*>(Rend3D.get())->IsThreaded();
+}
+
+void SoftRenderer::Start3DRendering()
+{
+    auto rend3d = static_cast<SoftRenderer3D*>(Rend3D.get());
+
+    // Display capture copies the 3D output (directly, or through BG0) into VRAM, so a frame that may be
+    // captured is drawn even when 3D is skipped: one whose capture is already requested (DISPCAPCNT bit 31,
+    // which starts it at VCount 0), or one that follows a frame with capture on (games that capture do so
+    // frame after frame). A capture requested later than this is caught at its first line (DrawScanline).
+    bool capture = CaptureSeen || (GPU.CaptureCnt & (1u << 31));
+    CaptureSeen = false;
+
+    if (SkipMask & SkipRender3D)
+    {
+        if (!capture)
+        {
+            rend3d->SkipFrame();
+            SkipStats.Frames3DSkipped++;
+            return;
+        }
+        SkipStats.Frames3DForCapture++;
+    }
+    rend3d->RenderFrame();
+}
+
 void SoftRenderer::DrawScanline(u32 line)
 {
+    if (SkipMask & SkipRender2D)
+    {
+        u32 vcount = GPU.VCount;
+        if (vcount >= 192 || !GPU.CaptureEnable)
+        {
+            if (vcount < 192)
+            {
+                // take the 3D line as drawing does (the threaded renderer counts the lines it hands
+                // out), and keep the VRAM caches as drawing leaves them
+                Rend3D->GetLine(vcount);
+                static_cast<SoftRenderer2D*>(Rend2D_A.get())->SyncScanlineVRAM();
+                static_cast<SoftRenderer2D*>(Rend2D_B.get())->SyncScanlineVRAM();
+            }
+            SkipStats.Lines2DSkipped++;
+            return;
+        }
+        // display capture is on: draw the line, the capture writes VRAM
+        SkipStats.CaptureLines++;
+    }
+
     u32 *dstA, *dstB;
     u32 dstoffset = 256 * line;
     if (GPU.ScreenSwap)
@@ -111,6 +165,18 @@ void SoftRenderer::DrawScanline(u32 line)
     line = GPU.VCount;
     if (line < 192)
     {
+        if (GPU.CaptureEnable)
+        {
+            CaptureSeen = true;
+            // a capture of a frame whose 3D was skipped (requested after VCount 215): draw it now
+            auto rend3d = static_cast<SoftRenderer3D*>(Rend3D.get());
+            if (rend3d->FrameSkipped())
+            {
+                rend3d->RenderLate();
+                SkipStats.Late3DFrames++;
+            }
+        }
+
         // retrieve 3D output
         Output3D = Rend3D->GetLine(line);
 
@@ -159,6 +225,14 @@ void SoftRenderer::DrawScanline(u32 line)
 
 void SoftRenderer::DrawSprites(u32 line)
 {
+    // Sprites are drawn one line ahead. Line 0's (drawn at VCount 262) is always drawn, so the first frame
+    // after 2D skipping ends is complete; the others follow DrawScanline (drawn while capture is on).
+    if ((SkipMask & SkipRender2D) && line != 0 && !GPU.CaptureEnable)
+    {
+        static_cast<SoftRenderer2D*>(Rend2D_A.get())->SyncSpriteVRAM();
+        static_cast<SoftRenderer2D*>(Rend2D_B.get())->SyncSpriteVRAM();
+        return;
+    }
     Rend2D_A->DrawSprites(line);
     Rend2D_B->DrawSprites(line);
 }

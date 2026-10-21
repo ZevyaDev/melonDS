@@ -7,6 +7,7 @@ endif()
 
 add_library(melonds_headless SHARED
     Api.cpp
+    ApiProbes.cpp
     Barrier.cpp
     Cheats.cpp
     Commands.cpp

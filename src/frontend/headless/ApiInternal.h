@@ -24,6 +24,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <vector>
 
 namespace Headless
@@ -53,6 +54,12 @@ bool MoreStaged(int id, Staged what, int cpu);
 // Copy guest memory as the given CPU sees it (cpu 0/9 = ARM9, 1/7 = ARM7). Must run on the
 // console's emulator thread (Instance::Call).
 void ReadGuest(Instance& inst, int cpu, uint32_t addr, uint32_t len, uint8_t* out);
+
+// Set the message mds_error returns on this thread (for C API functions outside Api.cpp).
+void SetError(const std::string& error);
+
+// Whether name is a feature or function of ApiProbes.cpp (for mds_has).
+bool ProbeFeature(const std::string& name);
 
 }
 

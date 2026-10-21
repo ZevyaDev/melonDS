@@ -161,6 +161,7 @@ Instance::Instance(int id, const Config& config, std::string& error) : ID(id)
     NDS->SetInputTimeline(&TouchLine);
     NDS->SetSavestateExtra([this](Savestate* file) { return DoSavestateExtra(file); });
     NDS->Debugger.SetBreakHandler([this](const BreakEvent& ev) { Park(ev); });
+    NDS->Debugger.Probes.FrameCounter = &FramesRun;   // stamps probe, memory log and action records
     NDS->Debugger.ResetHandler = [this](u8 cpu, bool console) { OnGdbReset(cpu, console); };
     Network().RegisterInstance(ID);
     Lua = std::make_unique<LuaHost>(*this);
@@ -385,6 +386,28 @@ void Instance::OnGdbReset(u8 cpu, bool console)
     Cond.notify_all();
 }
 
+SoftRenderer& Instance::Renderer()
+{
+    return static_cast<SoftRenderer&>(NDS->GPU.GetRenderer());
+}
+
+void Instance::ApplyRender()
+{
+    SoftRenderer& rend = Renderer();
+    u32 skip = WantedRenderSkip.load();
+    if (rend.GetRenderSkip() != skip)
+        rend.SetRenderSkip(skip);
+    ApplyThreaded3D();
+}
+
+void Instance::ApplyThreaded3D()
+{
+    SoftRenderer& rend = Renderer();
+    bool threaded = WantedThreaded3D.load();
+    if (rend.IsThreaded3D() != threaded)
+        rend.SetThreaded3D(threaded);
+}
+
 bool Instance::Call(const std::function<void(Instance&)>& fn)
 {
     return Commands.Call([this, &fn] { fn(*this); });
@@ -431,6 +454,7 @@ void Instance::ThreadMain()
                 continue;
             }
             ApplyInput(*this, applied);
+            ApplyRender();
             NDS->RunFrame();
             FramesRun++;
             EmuFrame++;

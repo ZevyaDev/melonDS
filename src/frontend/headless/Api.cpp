@@ -27,6 +27,7 @@
 #include "melonds_api.h"
 #include "ApiInternal.h"
 #include "Cheats.h"
+#include "GPU_Soft.h"
 #include "Instance.h"
 #include "LuaHost.h"
 #include "MPInterface.h"
@@ -255,7 +256,11 @@ int mds_has(const char* name)
         "point_lua_tag",        // mds_point_list flags MDS_POINT_LUA on Lua hooks; mds_point_remove refuses them
         "point_count",          // mds_point_count: the total mds_point_list has to list
         "gdb_reset_event",      // a GDB restart queues an MDS_BREAK_RESET event (socket: a break event); mds_reset_count
-        // API level 7 (fix/savestate-irq)
+        // API level 8 (feature/render-control)
+        "render_skip",          // mds_set_render: skip 2D / 3D drawing; capture-safe; applied at the next frame boundary
+        "threaded_3d",          // mds_set_threaded_3d: the soft 3D renderer on its own thread
+        "render_stats",         // mds_render_stats: the settings in force and the skip counters
+        // API level 9 (fix/savestate-irq)
         "savestate_derived",    // a load recomputes the CPUs' IRQ lines and the ARM9 code timing: nothing of the run before it survives
         "gx_fifo_zeroed",       // GX FIFO entries are written with zeroed padding, so states hold no stray bytes
     };
@@ -264,6 +269,7 @@ int mds_has(const char* name)
         "mds_cheat_add", "mds_cheat_remove", "mds_cheat_enable", "mds_cheat_clear", "mds_cheat_list",
         "mds_cheat_get", "mds_threadstacks", "mds_overlays",
         "mds_debug_packet", "mds_point_count", "mds_reset_count",
+        "mds_set_render", "mds_set_threaded_3d", "mds_render_stats",
     };
     if (!name)
         return 0;
@@ -274,6 +280,8 @@ int mds_has(const char* name)
     for (const char* f : Functions)
         if (n == f)
             return 1;
+    if (Headless::Api::ProbeFeature(n))    // probes, memlog, bp_actions, overlay_tags (ApiProbes.cpp)
+        return 1;
     // every function of API level 1 is still exported
     return n.rfind("mds_", 0) == 0 && Level1Function(n) ? 1 : 0;
 }
@@ -579,6 +587,49 @@ int mds_reset_count(int id)
 {
     Slot* s = Find(id);
     return s ? (int)s->Inst->Resets.load() : -1;
+}
+
+int mds_set_render(int id, uint32_t flags)
+{
+    Slot* s = Find(id);
+    if (!s)
+        return -1;
+    if (flags & ~(uint32_t)(MDS_RENDER_SKIP_2D | MDS_RENDER_SKIP_3D))
+        return Fail("unknown render flags " + std::to_string(flags));
+    s->Inst->WantedRenderSkip = flags;
+    return 0;
+}
+
+int mds_set_threaded_3d(int id, int on)
+{
+    Slot* s = Find(id);
+    if (!s)
+        return -1;
+    s->Inst->WantedThreaded3D = on != 0;
+    // at once on a stopped console, at the next frame boundary on a running one (the command queue)
+    return OnEmu(s, [](Instance& inst, std::string&) {
+        inst.ApplyThreaded3D();
+        return 0;
+    });
+}
+
+int mds_render_stats(int id, uint64_t* out, int max)
+{
+    Slot* s = Find(id);
+    if (!s || !CountOk(max, "max"))
+        return -1;
+    return OnEmu(s, [&](Instance& inst, std::string&) {
+        SoftRenderer& rend = inst.Renderer();
+        const SoftRenderer::RenderSkipStats& st = rend.GetRenderSkipStats();
+        const uint64_t v[MDS_RENDER_STATS] = {
+            inst.WantedRenderSkip.load(), rend.GetRenderSkip(),
+            inst.WantedThreaded3D.load() ? 1u : 0u, rend.IsThreaded3D() ? 1u : 0u,
+            st.Lines2DSkipped, st.Frames3DSkipped, st.CaptureLines, st.Frames3DForCapture, st.Late3DFrames,
+        };
+        for (int i = 0; i < MDS_RENDER_STATS && i < max; i++)
+            out[i] = v[i];
+        return MDS_RENDER_STATS;
+    });
 }
 
 int mds_screen(int id, uint32_t* out)
@@ -1472,6 +1523,11 @@ void SetConsoleHooks(std::function<void(Instance&)> created, std::function<void(
     std::lock_guard lock(HookLock);
     CreatedHook = std::move(created);
     DestroyedHook = std::move(destroyed);
+}
+
+void SetError(const std::string& error)
+{
+    LastError = error;
 }
 
 void ReadGuest(Instance& inst, int cpu, uint32_t addr, uint32_t len, uint8_t* out)

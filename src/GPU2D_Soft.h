@@ -37,6 +37,11 @@ public:
     void VBlank() override {}
     void VBlankEnd() override {};
 
+    // What DrawScanline / DrawSprites do to the VRAM caches, without drawing anything (the headless
+    // frontend's render control skips a line): the caches then match what drawing every line leaves.
+    void SyncScanlineVRAM();
+    void SyncSpriteVRAM();
+
 private:
     SoftRenderer& Parent;
 
