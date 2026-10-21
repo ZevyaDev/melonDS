@@ -11,13 +11,15 @@ reading the code but no test covers them. Claims marked *(verified)* were checke
 one-console experiment against this branch's DLL. Bugs and surprises are collected at the end, in
 [Known issues and surprises](#11-known-issues-and-surprises).
 
-This revision describes **API level 5**: the `fix/api-quirks` changes (level 2), Action Replay
+This revision describes **API level 6**: the `fix/api-quirks` changes (level 2), Action Replay
 cheat codes from the `feature/cheats` branch (level 3), the debugger work merged from
 ZevyaDev's `debug` branch on `merge/upstream-debug` (level 4: thread stacks, the new call tracker,
-PC changes at a break, pipeline refetch, Lua `memory.execute` and `wifi`), and its next merge on
+PC changes at a break, pipeline refetch, Lua `memory.execute` and `wifi`), its next merge on
 `merge/upstream-debug-2` (level 5: `mds_overlays`, the GDB stub's session handling, extended mode
-and `monitor overlays`, DWARF line info in the symbol tables). See
-[Version and features](#version-and-features) for what changed at each level.
+and `monitor overlays`, DWARF line info in the symbol tables), and the `fix/api-quirks-2` fixes
+(level 6: interrupts leave nothing armed, the pc at a park, `mds_write` for palette/VRAM/OAM,
+packets that cannot block, errors for unknown ids, Lua hooks in the point list, GDB reset events).
+See [Version and features](#version-and-features) for what changed at each level.
 
 Contents
 
@@ -80,8 +82,8 @@ The calls fall into three groups by what they need:
 | Needs | Calls |
 | --- | --- |
 | no console | `mds_version`, `mds_has`, `mds_error`, `mds_set_local_dir`, `mds_set_log_level`, `mds_set_pacing`, `mds_mp_timeout` (after the first `mds_create`), `mds_serve*`, `mds_set_instance_base` (no console may exist), `mds_instance_base` |
-| any state | `mds_destroy`, `mds_stop_after`, `mds_interrupt` (debugger), `mds_state`, `mds_take_break`, `mds_frames`, `mds_wait`, `mds_screen`, `mds_set_keys`, `mds_touch`, `mds_set_lid`, all `mds_input_*`, `mds_debug_recv_pending`, `mds_read`, `mds_write`, all `mds_cheat_*`, `mds_savestate`/`mds_loadstate` (accepted, but fail unless idle), `mds_lua_output`, `mds_packets`, `mds_packets_take`, `mds_mac`, `mds_save_path` |
-| stopped (idle **or** parked; fails with `console N is running`) | `mds_set_rtc`, `mds_get_rtc`, `mds_run`, `mds_start`, `mds_get_regs`, `mds_set_reg`, `mds_lua_run`, `mds_lua_exec`, `mds_lua_stop`, and the debugger calls: `mds_gdb`, `mds_gdb_host`, `mds_bp_add`, `mds_wp_add`, `mds_point_remove`, `mds_point_enable`, `mds_point_list`, `mds_step`, `mds_trace`, `mds_trace_take`, `mds_calls`, `mds_callstack`, `mds_threadstacks`, `mds_callcounts_take`, `mds_coverage`, `mds_coverage_take`, `mds_lastwriter`, `mds_lastwriter_get`, `mds_lastwriter_query`; `mds_overlays` (no debugger needed) |
+| any state | `mds_destroy`, `mds_stop_after`, `mds_interrupt` (debugger), `mds_state`, `mds_take_break`, `mds_frames`, `mds_reset_count`, `mds_wait`, `mds_screen`, `mds_set_keys`, `mds_touch`, `mds_set_lid`, all `mds_input_*`, `mds_debug_recv_pending`, `mds_read`, `mds_write`, all `mds_cheat_*`, `mds_savestate`/`mds_loadstate` (accepted, but fail unless idle), `mds_lua_output`, `mds_packets`, `mds_packets_take`, `mds_debug_packet`, `mds_mac`, `mds_save_path` |
+| stopped (idle **or** parked; fails with `console N is running`) | `mds_set_rtc`, `mds_get_rtc`, `mds_run`, `mds_start`, `mds_get_regs`, `mds_set_reg`, `mds_lua_run`, `mds_lua_exec`, `mds_lua_stop`, and the debugger calls: `mds_gdb`, `mds_gdb_host`, `mds_bp_add`, `mds_wp_add`, `mds_point_remove`, `mds_point_enable`, `mds_point_list`, `mds_point_count`, `mds_step`, `mds_trace`, `mds_trace_take`, `mds_calls`, `mds_callstack`, `mds_threadstacks`, `mds_callcounts_take`, `mds_coverage`, `mds_coverage_take`, `mds_lastwriter`, `mds_lastwriter_get`, `mds_lastwriter_query`; `mds_overlays` (no debugger needed) |
 | idle only | `mds_load_rom` ("loading a ROM needs an idle console"), `mds_reset` ("reset needs an idle console"), `mds_savestate`, `mds_loadstate` ("savestates need a frame boundary; finish the frame first") |
 
 The calls marked *debugger* above (`mds_interrupt` and the debugger calls) also need a console created
@@ -102,7 +104,7 @@ debugger (debug = 0)` (see [section 2](#creating-and-destroying)).
 - **`mds_destroy`** joins the emulator thread: it waits for the current frame (or wait/park) to
   end.
 - **Non-blocking:** `mds_start`, `mds_stop_after`, `mds_interrupt`, `mds_state`, `mds_frames`,
-  `mds_take_break`, the input setters and the `mds_input_*` calls (they only lock the input queue),
+  `mds_reset_count`, `mds_take_break`, the input setters and the `mds_input_*` calls (they only lock the input queue),
   `mds_lua_output`, the packet calls, `mds_save_path`.
 - The Lua calls run the script on the emulator thread, so they are serialised with every other
   caller's commands (the socket server's included); a script body runs there until its first
@@ -114,11 +116,12 @@ debugger (debug = 0)` (see [section 2](#creating-and-destroying)).
   return 0, or a count, an id, a queue depth, a length, as documented per function.
 - `mds_run` and `mds_wait` return 0 (all stopped), 1 (timeout) or -1.
 - `mds_take_break` returns 1 (an event was copied), 0 (none) or -1.
-- Exceptions to the -1 rule: `mds_frames` returns 0 for an unknown id; the legacy
+- Exceptions to the -1 rule: `mds_frames` returns `MDS_FRAMES_ERROR` (`UINT64_MAX`) for an unknown
+  id (level 6; it returned 0, which a fresh console also returns); the legacy
   `mds_lastwriter_get` returns 0 for every error (the same value as "no record"; use
-  `mds_lastwriter_query`); `mds_has` returns 0 or 1; `mds_destroy`, `mds_serve_stop`,
-  `mds_serve_name` and the setters `mds_set_local_dir`, `mds_set_log_level`, `mds_set_pacing`
-  return nothing.
+  `mds_lastwriter_query`); `mds_has` returns 0 or 1; `mds_serve_stop`, `mds_serve_name` and the
+  setters `mds_set_local_dir`, `mds_set_log_level`, `mds_set_pacing` return nothing. `mds_destroy`
+  returns 0 or -1 from level 6 (it returned nothing and ignored unknown ids).
 - Buffer sizes and counts (`max`, `max_packets`, `max_data`, `mds_run`/`mds_wait`'s `count`) must
   not be negative: a negative one fails with `max must not be negative` (or the parameter's name)
   before anything is copied. 0 is allowed and copies nothing.
@@ -133,7 +136,7 @@ debugger (debug = 0)` (see [section 2](#creating-and-destroying)).
 
 | Function | Does |
 | --- | --- |
-| `int mds_version(void)` | The API level: 5 for this branch (`MDS_API_VERSION` in `melonds_api.h`), 1 for every library before the level scheme. See [Version and features](#version-and-features). |
+| `int mds_version(void)` | The API level: 6 for this branch (`MDS_API_VERSION` in `melonds_api.h`), 1 for every library before the level scheme. See [Version and features](#version-and-features). |
 | `int mds_has(const char* name)` | 1 if the library has the named feature or exports the named function, else 0 (also for NULL). Level 2 and later; on a level-1 library look the symbol up. |
 | `void mds_set_local_dir(const char* dir)` | Directory for the files the melonDS core opens *by relative name* through `Platform::OpenLocalFile` (DSi NAND, SD/FAT image index, OpenGL shader cache). NULL means `.`. It does **not** affect BIOS, firmware, ROM, save or state paths: those are opened exactly as given, relative to the process's working directory. Process-wide, not synchronised: set it before creating consoles. |
 | `void mds_set_log_level(int level)` | Core log threshold: 0 Debug, 1 Info, 2 Warn (default), 3 Error. Messages at or above it go to stderr. Process-wide. |
@@ -154,6 +157,7 @@ does this: `native.api_version()`, `native.has(name)` (see [section 9](#9-python
 | 3 | `feature/cheats` | `mds_cheat_add`, `mds_cheat_remove`, `mds_cheat_enable`, `mds_cheat_clear`, `mds_cheat_list`, `mds_cheat_get` (feature `cheats`); a state load or ROM load clears the console's codes |
 | 4 | `merge/upstream-debug` | `mds_threadstacks`; the call tracker, PC changes at a break, pipeline refetch, Lua `memory.execute`, `debugger.threadstacks` and `wifi.*`, ROM overlays for the server's symbols (the features of level 4 below) |
 | 5 | `merge/upstream-debug-2` | `mds_overlays`; the GDB stub's per-connection reset, EOF detection, extended mode and `monitor overlays`; ROM overlay detection in the core; DWARF line info in the symbol tables (the features of level 5 below) |
+| 6 | `fix/api-quirks-2` | `mds_point_count`, `mds_reset_count`, `mds_debug_packet` (test hook); `mds_destroy` returns int; `mds_packet.total`; `MDS_POINT_LUA`, `MDS_BREAK_RESET`, `MDS_FRAMES_ERROR`; the behaviour changes named by the features of level 6 below |
 
 Features of level 2 (`mds_has` also answers 1 for every exported function name, `"mds_serve_host"`,
 `"mds_read"`, ...):
@@ -201,6 +205,20 @@ Features of level 5:
 | `gdb_session_reset` | a GDB disconnect, including the client closing the socket (EOF, now detected), clears the stub's breakpoints and watchpoints, no-ack mode and extended mode, so the next client starts clean |
 | `gdb_extended` | GDB extended mode (`!`, `target extended-remote`): `vKill` keeps the connection, `vRun` restarts the console, and a GDB restart (`monitor reset`, `vRun`) keeps a direct-booted ROM direct-booted |
 
+Features of level 6 (the fixes are listed with what changed in
+[Fixed in fix/api-quirks-2](#fixed-in-fixapi-quirks-2)):
+
+| feature | meaning |
+| --- | --- |
+| `interrupt_clean` | a park and the end of a run drop the break requests left over (the other CPU's half of `mds_interrupt`, and those of a group's consoles `mds_wait` interrupted); `mds_interrupt` ignores a stopped console ([Running](#running)) |
+| `pc_next` | `mds_get_regs` index 15 is each CPU's next instruction at every park, for both CPUs; a request served at a frame boundary reports the ARM9's next instruction ([Registers](#registers)) |
+| `write_regions` | `mds_write` and Lua `memory.write*` write palette, VRAM and OAM with halfwords on the ARM9, read every write back, and fail naming the region where they cannot write ([Reading and writing memory](#reading-and-writing-memory)) |
+| `packets_truncate` | `mds_packets_take` cuts a first packet longer than `max_data` short (`mds_packet.total` > `length`) instead of returning 0 forever ([Wireless packet capture](#wireless-packet-capture)) |
+| `unknown_id_errors` | `mds_frames` returns `MDS_FRAMES_ERROR` and `mds_destroy` -1 for an unknown id |
+| `point_lua_tag` | `mds_point_list` sets `MDS_POINT_LUA` in `flags` for Lua hooks; `mds_point_remove` refuses them ([Breakpoints and watchpoints](#breakpoints-and-watchpoints)) |
+| `point_count` | `mds_point_count`: how many points `mds_point_list` has to list |
+| `gdb_reset_event` | a GDB restart (`vRun`, `R`, `r`, `monitor reset`) queues an `MDS_BREAK_RESET` event, which the socket server forwards; `mds_reset_count` ([Breaks](#breaks-what-happens-and-mds_take_break), [section 8](#gdb-stub)) |
+
 ### Wireless between consoles, and one console per process
 
 The first `mds_create` installs melonDS's *LocalMP* interface: every console in the process is on
@@ -223,7 +241,7 @@ timeouts)*; the rule is empirical.
 
 ```c
 int  mds_create(const char* bios9, const char* bios7, const char* firmware, const char* nickname, int debug);
-void mds_destroy(int id);
+int  mds_destroy(int id);   /* void before level 6 */
 ```
 
 - `bios9`, `bios7`: paths to BIOS dumps, or NULL/"" for melonDS's built-in FreeBIOS. A file must be
@@ -236,7 +254,7 @@ void mds_destroy(int id);
   debugger hooks before every instruction and on every data access. **A console created with
   `debug = 0` has no debugger**: the hooks never run, so every call that would silently do nothing
   fails instead, with `console N was created without the debugger (debug = 0)`: `mds_bp_add`,
-  `mds_wp_add`, `mds_point_remove`, `mds_point_enable`, `mds_point_list`, `mds_step`, `mds_trace`,
+  `mds_wp_add`, `mds_point_remove`, `mds_point_enable`, `mds_point_list`, `mds_point_count`, `mds_step`, `mds_trace`,
   `mds_trace_take`, `mds_calls`, `mds_callstack`, `mds_threadstacks`, `mds_callcounts_take`, `mds_coverage`,
   `mds_coverage_take`, `mds_lastwriter`, `mds_lastwriter_query` (and `mds_lastwriter_get`, which
   returns 0), `mds_interrupt`, `mds_gdb`/`mds_gdb_host`, and in Lua the `event.onmemory*` hooks and
@@ -251,8 +269,10 @@ void mds_destroy(int id);
 
 `mds_destroy` stops the console (the frame in progress finishes), joins its thread, fails every
 command still queued for it ("console is shutting down"), releases barrier partners waiting for it
-and removes it from the wireless link. An unknown id is ignored. Do not destroy a console while
-another thread is still calling into it: the registry lookup does not keep it alive.
+and removes it from the wireless link. It returns 0, or -1 with `no console N` for an unknown id
+(level 6; before, it returned nothing and ignored unknown ids, so callers built against older
+headers simply ignore the value). Do not destroy a console while another thread is still calling
+into it: the registry lookup does not keep it alive.
 
 Consoles that are never destroyed do not hang process exit (the registry is never destructed; test
 `test_exit.py`), but closing them is cleaner.
@@ -305,6 +325,12 @@ the console. It also sets the frame counter to 0, empties the input queue, the i
 held input state, resets the touch timeline, empties the microphone FIFO and drops Lua's pending
 input. Debugger effects are listed in [section 5](#5-debugging).
 
+`int mds_reset_count(int id)` (level 6) returns how many times the console has been reset: by
+`mds_reset`, by `mds_load_rom`, and by a GDB client (`vRun`, `R`, `r`, `monitor reset`; see
+[section 8](#gdb-stub)), or -1 for an unknown id. A GDB restart does not restart `mds_frames`, so
+this counter (and the reset event, [Breaks](#breaks-what-happens-and-mds_take_break)) is how a
+caller tells a restarted run from an uninterrupted one.
+
 `mds_set_rtc` takes a full year 2000-2099 (else "RTC year must be 2000-2099"); other fields out of
 range are clamped by the core (month 1-12, day valid for the month, else 1; hour/minute/second
 else 0). The clock is emulated: it advances with emulated time, not wall time. It is not seeded
@@ -325,6 +351,7 @@ int      mds_interrupt(int id);
 int      mds_state(int id);
 int      mds_take_break(int id, mds_break* out);
 uint64_t mds_frames(int id);
+int      mds_reset_count(int id);   /* level 6 */
 ```
 
 **States.** *Idle*: at a frame boundary, nothing running. *Running*: the emulator thread is running
@@ -338,7 +365,8 @@ just very long. From idle, `frames = 0` stops again at once. From **parked** it 
 that was interrupted finishes and counts as one of the `frames`, and the remaining budget from
 before the break is discarded. `mds_start(id, 0)` and `mds_start(id, 1)` on a parked console both
 finish the current frame and go idle *(verified for 0)*. Starting a running console fails
-("console N is running"). Starting clears the pending break event, so call `mds_take_break` first.
+("console N is running"). Starting clears the pending break event, so call `mds_take_break` first
+(GDB reset events are kept).
 
 **`mds_run(ids, count, frames, timeout_ms, states)`** checks that every console is stopped (if one
 is running it fails and starts none), starts each with `frames`, then behaves as `mds_wait`.
@@ -346,7 +374,8 @@ is running it fails and starts none), starts each with `frames`, then behaves as
 **`mds_wait(ids, count, timeout_ms, states)`** waits until none of the consoles is running.
 `timeout_ms < 0` waits forever; 0 polls once. If one console parks while others are still running,
 `mds_wait` interrupts the running ones (once per call), so a break in one console stops the group;
-those consoles park too (break kind `request`). Returns 0 when none is running, 1 on timeout (the
+those consoles park too (break kind `request`; the requests they leave on their other CPU are
+dropped at the park, so the next run of the group runs). Returns 0 when none is running, 1 on timeout (the
 consoles **keep running**: stop them with `mds_stop_after` and wait again), -1 for an unknown id.
 `states`, if not NULL, receives each console's `MDS_*` state.
 
@@ -356,19 +385,22 @@ including that one, so 0 and 1 both stop at the end of the current frame. One di
 console blocked waiting for input stops without running a frame on 0, and runs one more frame
 (when input arrives) on 1.
 
-**`mds_interrupt(id)`** (needs the debugger) asks the console to park as soon as possible. It sets a break request on
-**both** CPUs; the first CPU to execute an instruction parks with kind `request`. A console blocked
-waiting for input (or at a barrier) parks at the frame boundary instead, without running a frame
-(test `test_interrupt_parks_at_the_frame_boundary`). Caveats *(verified)*: the other CPU's request
-stays armed, so the next resume parks again almost at once with a second `request` break on the
-other CPU; and an interrupt sent to an idle console parks the next run at its first instruction.
-There is no call to cancel a request. When a frame boundary is good enough, prefer
-`mds_stop_after(id, 0)`.
+**`mds_interrupt(id)`** (needs the debugger) asks a running console to park as soon as possible.
+It sets a break request on **both** CPUs; the first CPU to execute an instruction parks with kind
+`request`, and the park drops the other CPU's request (level 6; it used to stay armed and park the
+next resume again at once). A console blocked waiting for input (or at a barrier) parks at the
+frame boundary instead, without running a frame (test `test_interrupt_parks_at_the_frame_boundary`).
+On a stopped (idle or parked) console it does nothing and returns 0 (level 6; an interrupt sent to
+an idle console used to park its next run at its first instruction), and a run that ends before the
+request is served drops it. Every park drops the break requests of both CPUs, whoever made them
+(`mds_interrupt`, `mds_wait`, Lua `debugger.pause`); armed step counts are kept. When a frame
+boundary is good enough, prefer `mds_stop_after(id, 0)`.
 
 **`mds_state(id)`** returns `MDS_IDLE`, `MDS_RUNNING`, `MDS_PARKED` or -1.
 
-**`mds_frames(id)`** returns the number of frames completed since the last reset or ROM load (0
-for an unknown id). It is incremented at the end of each frame, so a parked console has not yet
+**`mds_frames(id)`** returns the number of frames completed since the last reset or ROM load
+(`MDS_FRAMES_ERROR`, `UINT64_MAX`, with `no console N` for an unknown id; 0 before level 6). A GDB
+restart does not reset it (see `mds_reset_count`). It is incremented at the end of each frame, so a parked console has not yet
 counted the frame it is in. It is **not** part of savestates: loading a state leaves it alone
 (test `test_save_modify_load_restores`). It counts the process's frames; the console's emulated
 frame count (which seeds the level-mic noise) is a separate counter that savestates 14.2 carry.
@@ -382,7 +414,7 @@ added and removed. Resume with `mds_start` or `mds_run`.
 
 ```c
 typedef struct {
-    int32_t  kind;   /* 0 exec, 1 read, 2 write, 3 step, 4 request, 5 fault */
+    int32_t  kind;   /* 0 exec, 1 read, 2 write, 3 step, 4 request, 5 fault, 6 reset (MDS_BREAK_RESET) */
     int32_t  cpu;    /* 9 or 7 */
     int32_t  size;   /* access size 1/2/4 for read/write; 0 otherwise */
     int32_t  id;     /* point id for exec/read/write; 0 for step, request, fault */
@@ -399,23 +431,29 @@ typedef struct {
 | read / write | the instruction that made the access | the accessed address (start of the access) | write: the value written; read: memory at `addr` read through the debug path | before the **next** instruction of that CPU (the access has completed) |
 | write by DMA (`dma >= 0`) | the DMA tag `0xFFFFFFF0 \| channel << 1 \| arm7` (no instruction made the write) | the unit's destination | the unit written | **at once**, inside the DMA: the unit is written, the next one is not (the CPUs are between two instructions) |
 | step | the next instruction | = pc | 0 | before that instruction |
-| request | the next instruction; for a request served at a frame boundary (waiting for input) it is the raw ARM9 R15, which is one pipeline stage ahead | = pc | 0 | before that instruction |
+| request | the next instruction; for a request served at a frame boundary (waiting for input or at a barrier) `cpu` is 9 and `pc` the ARM9's next instruction (level 6; it was the raw ARM9 R15, one pipeline stage ahead) | = pc | 0 | before that instruction |
 | fault | the faulting instruction (ARM9 MPU prefetch or data abort) | the data address, or pc | 0 | before the abort is taken |
+| reset (level 6) | the stub CPU's next instruction after the reset | 0 | 1: a GDB client reset the whole console (`vRun`, `R`, `r`); 0: only the stub's CPU (`monitor reset`) | **not a park**: the console keeps running |
 
 For a DMA break `cpu` is the CPU whose DMA controller made the write (9 for channels of the ARM9's
 DMA, 7 for the ARM7's), `dma` the channel 0-3 and `size` the unit size (2 or 4). The tag is the
 same encoding as the last-writer records, so `pc >= 0xFFFFFFF0` always means "a DMA, not an
 instruction". Resuming finishes the DMA (each further watched unit breaks again) and then the CPU
-continues. While parked there, `mds_get_regs` index 15 of that CPU is its last executed instruction,
-which did not make the write (use `r15_raw`). The program that started the DMA is not recorded.
-(API level 1 queued DMA hits for the CPU's next instruction and reported that CPU's last
-instruction as `pc`.)
+continues. **What pc means at a DMA break:** the event's `pc` is the DMA tag, never an
+instruction; `mds_get_regs` index 15 is, for both CPUs, the instruction each runs next (both are
+between two instructions while the DMA runs). For an immediate DMA that is the instruction after the
+store that started it. The program that started the DMA is not recorded. (API level 1 queued DMA
+hits for the CPU's next instruction and reported that CPU's last instruction as `pc`; up to level 5
+`mds_get_regs` index 15 was the CPU's last hooked instruction there.)
 
-`mds_take_break(id, out)` copies the **latest** break and clears it; it returns 0 if there is none.
-Only one event is kept: if the console parked twice without a take, the first is lost, and starting
-the console clears it. If several points match at once, the first one wins and the others only
-count a hit. While a socket client is connected, the server thread takes the break events itself
-(they go to the client), so in-process callers see 0.
+`mds_take_break(id, out)` copies the oldest undelivered event and clears it; it returns 0 if there is
+none. Only one **park** event is kept: if the console parked twice without a take, the first is lost,
+and starting the console clears it. If several points match at once, the first one wins and the
+others only count a hit. **Reset events** (level 6, kind 6) are queued separately, up to the newest
+64, ahead of the park event: a GDB client reset the running console (see
+[section 8](#gdb-stub)). Starting the console does not clear them. While a socket client is
+connected, the server thread takes the break events itself (they go to the client, reset events
+included), so in-process callers see 0.
 
 ### Stepping: `mds_step`
 
@@ -684,16 +722,31 @@ the emulator thread (at the next frame boundary when running) and work in any st
   ARM7 WRAM, palette, VRAM (as currently mapped), OAM, GBA slot, BIOS. The ARM7 BIOS
   (`< 0x4000`) reads as 0xFF unless the ARM7 PC is inside the BIOS (the core's BIOS protection).
 
-`mds_write` writes byte by byte through `Debugger::Poke`:
+`mds_write` writes through `Debugger::WriteMemory` (level 6), as that CPU's bus takes it, and reads
+every write back:
 
-- TCM and main RAM writes work; code written to RAM runs correctly (interpreter, no JIT cache).
-- **I/O writes are refused**: the call fails with "address not writable" at the first I/O byte,
-  after writing the bytes before it.
-- **ARM9 byte writes to palette, VRAM and OAM (`0x05`-`0x07`) and to the GBA ROM area are dropped by
-  the bus (as on hardware), but the call still returns 0** *(verified for palette)*. There is no
-  16- or 32-bit write in the C API.
+- Byte writes where the bus takes them: TCM, main RAM, shared and ARM7 WRAM, the ARM7's VRAM, GBA
+  SRAM. Code written to RAM runs correctly (interpreter, no JIT cache).
+- **ARM9 palette, VRAM and OAM (`0x05`-`0x07`)** ignore 8-bit writes on the bus (as on hardware),
+  so there the call writes aligned **halfwords**; a byte at an odd start or end is merged with the
+  byte beside it, which keeps its value (tests `WriteRegions` in `test_api_fixes2.py`). Up to level
+  5 these writes were dropped while the call returned 0.
+- **Refused, naming the region**, at the first byte that cannot be written, after writing the
+  bytes before it (`mds_error`, for example `I/O at 0x04000208 cannot be written by the debugger
+  (I/O writes have side effects)`):
+  - **I/O** (`0x04xxxxxx`): never written, because register writes have side effects (they start
+    DMAs, acknowledge interrupts, push FIFOs). It was already an error ("address not writable").
+    Change I/O from guest code or Lua hooks running in the game instead.
+  - **Read-only regions**: the GBA ROM area (`0x08000000`-`0x09FFFFFF`), the ARM9 BIOS
+    (`0xFFFF0000`+) and the ARM7 BIOS (`0x00xxxxxx` on the ARM7) fail with `... is read-only`.
+  - **A write that did not take** (the byte or halfword read back differs): VRAM with no bank
+    mapped there, the palette or OAM of a 2D engine that is powered off (`POWCNT1`), GBA SRAM
+    without a GBA cart, unmapped memory: `<region> at 0x... did not take the write (...)`.
 - Writes do not trigger watchpoints and are not recorded by the last-writer table *(inferred: they
   bypass the CPU access hooks)*.
+- Lua's `memory.write_*` and `memory.write_bytes_as_array` in the headless build write the same way
+  and raise `memory write failed: <the same message>` ([section 7](#7-lua)). The Qt frontend's Lua
+  and memory views are unchanged.
 
 ### Registers
 
@@ -707,16 +760,21 @@ int mds_set_reg(int id, int cpu, int reg, uint32_t value);
 | index | content |
 | --- | --- |
 | 0-14 | r0-r14 as seen in the CPU's **current mode** (melonDS keeps the active bank in `R[]`; other modes' banked r8-r14 are not exposed) |
-| 15 | pc: the address of the next instruction to execute. Idle: `R15 - 4` (ARM) or `- 2` (Thumb). Parked: the debugger's last-seen pc of that CPU (see the caveat) |
+| 15 | pc: the address of the instruction the CPU executes next, `R15 - 4` (ARM) or `- 2` (Thumb), idle and parked, for both CPUs; at a fault of that CPU, the faulting instruction |
 | 16 | CPSR |
 | 17 | SPSR of the current mode, 0 in User/System |
 | 18 | raw R15 (between instructions: pc + 4 in ARM, pc + 2 in Thumb) |
 
-Caveat *(verified)*: while parked, index 15 is `Debugger::CurPC` of the requested CPU. That is
-exact for the CPU that broke at an instruction (not for a DMA break, where it is that CPU's last
-executed instruction). For the other CPU it is the last instruction it executed, and if no
-debugger feature armed that CPU (for example only an ARM9 breakpoint exists) it is stale, 0 after a
-reset. For the other CPU use `out[18] - 4` (ARM) or `- 2` (Thumb), with the Thumb bit from CPSR.
+Both CPUs are between two instructions when idle and at every park but a fault: an instruction
+break parks before its instruction, a watchpoint before the accessing CPU's next one, a DMA break
+between two DMA units (see [Breaks](#breaks-what-happens-and-mds_take_break) for what pc means
+there), a request at a frame boundary or before an instruction. So index 15 is exact for the CPU
+that broke and for the other one, and it follows a pc changed while parked (tests
+`PcIsTheNextInstruction` in `test_api_fixes2.py`). A fault parks inside the faulting instruction:
+there index 15 of the faulting CPU is the event's pc until the pc is changed *(inferred: the tests'
+programs cannot raise an MPU fault)*. Up to level 5 index 15 was `Debugger::CurPC` while parked:
+the last instruction the CPU's hook saw, one behind for the CPU that did not break, and 0 or stale
+for a CPU without armed hooks.
 
 `mds_set_reg` sets r0-r15 of the current mode (`register out of range` otherwise); CPSR and SPSR
 cannot be set. `reg = 15` jumps (flushing the pipeline) to `value` and keeps the current ARM/Thumb
@@ -758,12 +816,15 @@ int mds_wp_add(int id, uint32_t cpumask, uint32_t addr, uint32_t size, uint32_t 
 int mds_point_remove(int id, int point);
 int mds_point_enable(int id, int point, int enabled);
 int mds_point_list(int id, mds_point* out, int max);
+int mds_point_count(int id);   /* level 6 */
+
+#define MDS_POINT_LUA 0x100    /* level 6 */
 
 typedef struct {
     int32_t  id;
     int32_t  watch;     /* 0 breakpoint, 1 watchpoint */
     uint32_t cpumask;
-    uint32_t flags;     /* watchpoints: 1 read, 2 write; breakpoints: 0 */
+    uint32_t flags;     /* watchpoints: 1 read, 2 write; breakpoints: 0; | MDS_POINT_LUA for a Lua hook */
     uint32_t enabled;
     uint32_t start;
     uint32_t end;       /* inclusive; = start for breakpoints */
@@ -783,11 +844,19 @@ typedef struct {
   [section 2](#breaks-what-happens-and-mds_take_break)). Debugger reads and writes
   (`mds_read`/`mds_write`) do not trigger watchpoints.
 - Ids come from one per-console counter starting at 1, shared by breakpoints, watchpoints and Lua
-  memory hooks; they are never reused. `mds_point_remove` / `mds_point_enable` fail with "no such
-  point".
+  memory hooks (and Lua `wifi.hook` ids); they are never reused. `mds_point_remove` /
+  `mds_point_enable` fail with "no such point".
 - `mds_point_list` copies up to `max` points (`max >= 0`), all breakpoints first then all
-  watchpoints, each in creation order, and returns the count copied (there is no total, so
-  `n == max` may mean truncation). Lua memory hooks appear here too.
+  watchpoints, each in creation order, and returns the count copied. **`mds_point_count`** (level
+  6) returns how many there are, so a buffer of that size gets them all; `mds_point_list` keeps
+  returning the number copied (callers that index their buffer with it stay safe), so `n ==
+  max` alone no longer has to stand in for truncation.
+- **Lua memory hooks** (`event.onmemoryexecute`/`onmemoryread`/`onmemorywrite`) are points with a
+  callback. They appear in the list with `MDS_POINT_LUA` (0x100) set in `flags` (level 6; the
+  watchpoint read/write bits are kept), and `mds_point_remove` refuses them, and wifi hook ids:
+  `point N is a Lua hook: the script removes it (event.unregisterbyid / unregisterbyname)`. Up to
+  level 5 they were plain points that `mds_point_remove` deleted, leaving the script with a dead id.
+  `mds_point_enable` works on them. The socket server's `point_list` carries the same flags.
 - `hits` counts every enabled match, including matches that did not park because another event
   was already pending or a Lua hook returned false. Disabled points are not matched.
 
@@ -1004,7 +1073,15 @@ debugger, and runs on the emulator thread; it reads and decompresses the overlay
 int mds_packets(int id, int enabled, int capacity);
 int mds_packets_take(int id, mds_packet* headers, uint8_t* data, int max_packets, int max_data);
 
-typedef struct { uint64_t timestamp; uint32_t sent; uint32_t type; uint32_t length; } mds_packet;
+int mds_debug_packet(int id, int sent, int type, const uint8_t* data, int len);   /* level 6, test hook */
+
+typedef struct {
+    uint64_t timestamp;
+    uint32_t sent;
+    uint32_t type;
+    uint32_t length;    /* bytes of the packet in data */
+    uint32_t total;     /* level 6: the packet's size; > length when it was cut short */
+} mds_packet;
 ```
 
 `mds_packets` turns capture on or off for one console and empties the ring and the staging; the
@@ -1013,10 +1090,16 @@ host command, 2 reply, 3 ack) and received packets (`type` 0 data, 1 host packet
 by a host are not logged. `timestamp` is the core's wireless timestamp. It works in any state and
 also when debug is off.
 
-`mds_packets_take` copies headers and packs the packet bytes back to back into `data`; it stops
-before the first packet that does not fit in `max_data` (see Known issues) and returns the number of
-packets copied. Staged like the others: loop until 0. `max_packets` and `max_data` must not be
-negative.
+`mds_packets_take` copies headers and packs the packet bytes back to back into `data`, and returns
+the number of packets copied. A packet that does not fit in what is left of `max_data` is left for
+the next call, unless it is the **first** of the call: then its first `max_data` bytes are copied
+(`length` = `max_data` < `total`) and the rest of it is dropped (level 6). So the call never blocks:
+up to level 5 a packet longer than `max_data` was never returned and every call returned 0. Staged
+like the others: loop until 0. `max_packets` and `max_data` must not be negative. `total` was the
+struct's trailing padding, so the layout is unchanged; older libraries leave it 0.
+
+`mds_debug_packet` (level 6) is a test hook: it logs a packet as the platform layer does for the
+console's own traffic (`sent` 1 for a sent packet, `type` as above, timestamp 0), if capture is on.
 
 ### Persistence of debugger data
 
@@ -1029,7 +1112,7 @@ negative.
 | call counts | kept | kept (a log) | `mds_callcounts_take` |
 | coverage | kept | kept (a log) | `mds_coverage_take` |
 | last-writer table | zeroed | **zeroed** (tracking stays on) | `mds_lastwriter(id, 0 or 1)` |
-| armed step / break requests | cleared | kept (they are requests about the future) | resuming into them |
+| armed step / break requests | cleared | kept (they are requests about the future) | resuming into them; every park and the end of a run drop the break requests (level 6), steps stay |
 | packets | kept | kept | `mds_packets` |
 | staged rest of a cut-short take | kept | kept | the next take |
 
@@ -1266,7 +1349,7 @@ Functions available (`LuaHost.cpp`, `lua_debug/LuaDebug.cpp`):
 
 | table | functions |
 | --- | --- |
-| `memory` | `read_u8` `read_s8` `read_u16_le` `read_s16_le` `read_u24_le` `read_s24_le` `read_u32_le` `read_s32_le` `readbyte`, the matching `write_*` and `writebyte`, `read_bytes_as_array(addr, len)`, `write_bytes_as_array(addr, table)`. Optional last argument: `"Main RAM"` (address relative to 0x02000000), a name starting with `ARM7` (ARM7 bus), `ARM9`/`"System Bus"` (ARM9 bus). Same rules as `mds_read`/`mds_write` (I/O reads 0, byte writes). |
+| `memory` | `read_u8` `read_s8` `read_u16_le` `read_s16_le` `read_u24_le` `read_s24_le` `read_u32_le` `read_s32_le` `readbyte`, the matching `write_*` and `writebyte`, `read_bytes_as_array(addr, len)`, `write_bytes_as_array(addr, table)`. Optional last argument: `"Main RAM"` (address relative to 0x02000000), a name starting with `ARM7` (ARM7 bus), `ARM9`/`"System Bus"` (ARM9 bus). Same rules as `mds_read`/`mds_write` (I/O reads 0; writes as `mds_write`: halfwords for ARM9 palette/VRAM/OAM, and a write that cannot be made raises `memory write failed: ...` naming the region, level 6). |
 | `emu` | `framecount()` (= `mds_frames`), `frameadvance()` (yields; only in the script body), `getsystemid()` ("NDS"/"DSi"), `getconsoleid()` (effective id), `getregister(name, [cpu])`, `getregisters()`, `setregister(name, value, [cpu])` (names `r0`-`r15`, `sp`, `lr`, `pc`, `cpsr`, optional `ARM7 `/`ARM9 ` prefix; `pc` = R15 - 4/2; `cpsr` read-only) |
 | `joypad` | `set{A=true, ...}` (key names as in the bit table; nil keys unchanged), `get()` (the pending state if set this step, else the applied one) |
 | `input` | `NDSTapDown(x, y)`, `NDSTapUp()` |
@@ -1278,7 +1361,8 @@ Functions available (`LuaHost.cpp`, `lua_debug/LuaDebug.cpp`):
 | global | `print` (to the output buffer) |
 
 Memory hooks are ordinary debugger points with a callback: they get ids from the same counter,
-appear in `mds_point_list`, and need the debugger (on a console without it `event.onmemory*`
+appear in `mds_point_list` (tagged `MDS_POINT_LUA` from level 6; `mds_point_remove` refuses them, so
+remove them with `event.unregisterbyid`/`unregisterbyname`), and need the debugger (on a console without it `event.onmemory*`
 raises). The callback runs on the emulator thread at
 the access or instruction, with arguments `(addr, value, pc)` (for a DMA write `pc` is the DMA
 tag `0xFFFFFFF0 | channel << 1 | arm7`); returning `true` parks the console
@@ -1357,7 +1441,15 @@ Behaviour of a GDB session (level 5, upstream's stub changes):
   console and, if the ROM was direct-booted, direct-boots it again (before, a reset from GDB
   dropped to the firmware). The headless library direct-boots a ROM when the console needs it
   (`NDS::NeedsDirectBoot`, no firmware boot), so there a GDB restart boots the game again; the
-  console's input queue, debugger points and Lua state are not reset by it.
+  console's input queue, debugger points, cheats and Lua state are not reset by it.
+- **The C API is told** (level 6, `gdb_reset_event`): a restart runs on the emulator thread while
+  the console runs, so it is not a park, but it queues an event of kind 6 (`MDS_BREAK_RESET`) for
+  `mds_take_break`: `cpu` the stub's CPU, `pc` that CPU's next instruction, `value` 1 for a
+  whole-console restart (`vRun`, `R`, `r`) and 0 for `monitor reset`, which resets only the stub's
+  CPU. The socket server forwards it as a `break_` event (kind 6). `mds_reset_count` goes up by one.
+  A whole-console restart also restarts the emulated frame count (which seeds the level-mic noise
+  and is saved in states) and drops Lua's pending input, as `mds_reset` does; `mds_frames` keeps
+  counting. Up to level 5 nothing was reported (test `GdbResetEvent` in `test_api_fixes2.py`).
 - **`monitor overlays`** (`gdb_monitor_overlays`): prints `overlay N at 0xBASE-0xEND` for each
   resident ARM9 overlay (as `mds_overlays`), or `no overlays loaded`. The text comes back as GDB
   console output (`O` packets) before `OK`. `monitor reset` resets the CPU as before; any other
@@ -1465,7 +1557,7 @@ melonds_headless library"). `native.has(name)` and `native.api_version()` tell w
 | `mds_mp_timeout` | `native.mp_timeout(ms=-1)` |
 | `mds_set_pacing` | `native.set_pacing(fps)` |
 | `mds_create` | `Console(bios9=None, bios7=None, firmware=None, nickname=None, debug=True)` |
-| `mds_destroy` | `close()` (also at interpreter exit) |
+| `mds_destroy` | `close()` (also at interpreter exit; ignores the result) |
 | `mds_load_rom` | `load_rom(path, save=None)` |
 | `mds_reset` | `reset()` |
 | `mds_set_rtc` / `mds_get_rtc` | `set_rtc(datetime)` / `rtc()` -> datetime |
@@ -1476,8 +1568,9 @@ melonds_headless library"). `native.has(name)` and `native.api_version()` tell w
 | `mds_stop_after` | `stop_after(frames=0)` |
 | `mds_interrupt` | `interrupt()` |
 | `mds_state` | `state` (property) |
-| `mds_take_break` | `take_break()` -> `Break(kind, cpu, pc, addr, value, size, id, dma)` or None; `kind` is a string from `native.BREAK_KINDS`; a DMA break has `pc >= native.DMA_TAG` |
-| `mds_frames` | `frames` (property) |
+| `mds_take_break` | `take_break()` -> `Break(kind, cpu, pc, addr, value, size, id, dma)` or None; `kind` is a string from `native.BREAK_KINDS` (level 6 adds `"reset"`); a DMA break has `pc >= native.DMA_TAG` |
+| `mds_frames` | `frames` (property; raises `MelonError` for `MDS_FRAMES_ERROR` from a level-6 library) |
+| `mds_reset_count` | `reset_count()` (level 6) |
 | `mds_screen` | `screen()` -> `c_uint32` array of 256*384 (`bytes()` gives BGRA) |
 | `mds_set_keys` | `set_keys(names or mask)` |
 | `mds_touch` | `touch(x=None, y=None)` (None = pen up) |
@@ -1494,7 +1587,7 @@ melonds_headless library"). `native.has(name)` and `native.api_version()` tell w
 | `mds_bp_add` | `add_breakpoint(addr, cpu=9)` (`cpu="both"` or 3 for both) |
 | `mds_wp_add` | `add_watchpoint(addr, size, read=False, write=True, cpu=9)` |
 | `mds_point_remove` / `_enable` | `remove_point(id)` / `enable_point(id, enabled)` |
-| `mds_point_list` | `points()` -> list of dicts (at most 512) |
+| `mds_point_list` / `mds_point_count` | `points()` -> list of dicts, all of them (sized by `point_count()` from level 6; at most 4096 with an older library), each with `"lua"` (a Lua hook) / `point_count()` |
 | `mds_step` | `step(count=1, cpu=9)` |
 | `mds_trace` | `trace(capacity, cpu="both", start=0, end=0xFFFFFFFF)` |
 | `mds_trace_take` | `take_trace()` -> list of `(cycle, cpu, pc, instr, cpsr)` (all of it) |
@@ -1511,7 +1604,8 @@ melonds_headless library"). `native.has(name)` and `native.api_version()` tell w
 | `mds_cheat_list` + `mds_cheat_get` | `cheats()` -> list of `{"id", "name", "enabled", "words", "code"}` (`code`: the text, normalised); `cheat(id)` -> one |
 | `mds_lua_run` / `_exec` / `_stop` | `lua_run(source, is_file=False)` / `lua_exec(code)` (returns the output) / `lua_stop()` |
 | `mds_lua_output` | `lua_output()` -> str |
-| `mds_packets` / `_take` | `packet_log(enabled=True, capacity=4096)` / `take_packets()` -> list of dicts |
+| `mds_packets` / `_take` | `packet_log(enabled=True, capacity=4096)` / `take_packets()` -> list of dicts (`"size"` added for a packet cut short, level 6) |
+| `mds_debug_packet` | not wrapped (`native.lib().mds_debug_packet(...)`; argtypes are set) |
 | `mds_serve` / `mds_serve_host` (+ `mds_serve_name`) | `native.serve(port=0, port_range=0, name=None, host=None)` -> bound port (`host` given: `mds_serve_host`) |
 | `mds_serve_stop` / `mds_serve_wait` | `native.serve_stop()` / `native.serve_wait(timeout_ms=0)` |
 | `mds_serve_name` | via `serve(name=...)` |
@@ -1601,7 +1695,7 @@ while c.frames < end:
         name = c.read(r["r1"], 64).split(b"\0")[0]
         calls.append((c.frames, r["r0"], name, r["lr"]))
     elif b.kind == "request":
-        continue                       # a leftover interrupt request; just resume
+        continue                       # an interrupt (level 6: never a leftover one); just resume
 c.remove_point(bp)
 if c.state == native.PARKED:
     c.run(0)
@@ -1653,92 +1747,122 @@ for e in c.input_log(from_frame=0, max=100000):
 ## 11. Known issues and surprises
 
 Bugs (not fixed here) and behaviour that is easy to get wrong. *(verified)* items were reproduced
-with one console against this branch's DLL. Items fixed in `fix/api-quirks` are listed after the
-open ones, with what changed; the open items were renumbered.
+with one console against this branch's DLL. Items fixed in `fix/api-quirks-2` (level 6) and in
+`fix/api-quirks` (level 2) are listed after the open ones, with what changed; the open items were
+renumbered each time.
 
-1. **`mds_interrupt` leaves a request armed on the other CPU** *(verified)*. It requests a break on
-   both CPUs; only the first parks. The next resume parks again at once with a second `request` on
-   the other CPU. An interrupt sent to an idle console parks the next run at its first instruction.
-   The core has `Debugger::CancelBreakRequests` but the C API never calls it. `mds_wait`/`mds_run`
-   interrupting the other consoles of a group leave the same leftovers there.
-2. **`mds_get_regs` pc of the non-breaking CPU is wrong while parked** *(verified)*. Index 15 is
-   `Debugger::CurPC`, which is 0 or stale for a CPU whose hooks are not armed (only an ARM9
-   breakpoint set: ARM7 pc reads 0) and one instruction behind for an armed one. At a DMA break it
-   is also only the DMA CPU's last executed instruction. Use `r15_raw`.
-3. **`mds_write` silently drops writes to palette, VRAM, OAM and the GBA ROM area on the ARM9 bus**
-   *(verified for palette)*. It writes one byte at a time and the DS bus ignores 8-bit writes
-   there, yet the call returns 0. Lua `memory.write_*` has the same limitation. I/O cannot be
-   written at all, and I/O reads return 0 *(verified)*.
-4. **`mds_input_log` `touch_count` is never 0**: a payload without touch points logs 1 (the held
+1. **The debugger cannot read or write I/O**: `mds_read` (and Lua `memory.read_*`) return 0 for
+   `0x04xxxxxx` *(verified)*, and `mds_write` refuses it (`I/O at 0x... cannot be written by the
+   debugger`), so register reads and writes, which have side effects, never happen behind the
+   game's back. Read I/O from guest code or a Lua hook that runs in the game.
+2. **`mds_input_log` `touch_count` is never 0**: a payload without touch points logs 1 (the held
    pen point is counted), unlike the payload header where 0 means "unchanged". The C API cannot
    return the logged touch points or mic samples.
-5. **`mds_packets_take` can get stuck**: a staged packet longer than `max_data` is never returned,
-   and every call returns 0 while it blocks the rest. *(inferred)*
-6. **Lua `savestate.save`/`load` fail inside a running script or hook**: the console is `Running`
+3. **Lua `savestate.save`/`load` fail inside a running script or hook**: the console is `Running`
    at frame end and inside hooks, and states need an idle console. They only work from
    `mds_lua_exec` or a script body's first step while idle. *(inferred)*
-7. **`mds_loadstate` rewrites the save file** from the state's save memory. Deliberate and kept for
+4. **`mds_loadstate` rewrites the save file** from the state's save memory. Deliberate and kept for
    now (see [section 6](#6-savestates)): a save booted in place is overwritten by the first load,
    so clients must boot a copy (the dq9-re harness does).
-8. **Loads leave the process counters alone**: `mds_frames` and the input log do not jump on a
+5. **Loads leave the process counters alone**: `mds_frames` and the input log do not jump on a
    load (the emulated frame that seeds the mic noise does; see [section 3](#microphone-fifo)).
    States older than 14.2 restore no input: after loading one, the keys and pen held before the
    load repeat until a payload arrives.
-9. **Serving changes in-process behaviour**: `mds_serve` and each client connect/disconnect reset
-   every console's input mode to repeat (stall 15); a connected client takes break events and Lua
-   output from in-process callers; a disconnect clears every console's input queue.
-10. **Barriers drop consoles that stop**: a console whose frame budget runs out leaves every barrier
-    group it is in, including groups for payloads still queued. Running the members one frame at a
-    time therefore never synchronises them (intended per the tests, but surprising).
-11. **Request breaks served at a frame boundary** (waiting for input or at a barrier) report the raw
-    ARM9 R15 as `pc`, not an instruction address.
-12. **`mds_stop_after(id, 0)` and `(id, 1)` are the same** while a frame is in progress, and so are
-    `mds_start(id, 0)` and `(id, 1)` on a parked console *(verified for start 0)*.
-13. **`mds_frames` returns 0 for an unknown id**, indistinguishable from a fresh console;
-    `mds_destroy` ignores unknown ids.
-14. **Lua memory hooks are plain points**: they show in `mds_point_list` and `mds_point_remove` can
-    delete them, leaving the Lua side with a dead id.
-15. **`mds_point_list` has no total count**; truncation is only detectable as `n == max`.
-16. **A DMA break parks inside the DMA**: between two units, with the CPUs between instructions.
-    Commands work as at any park, but the console is not at a frame boundary (no savestates), and
-    the program that started the DMA is not recorded (`pc` is the DMA tag).
-17. **Savestates 14.2 do not load in older builds** (upstream melonDS and builds before this
+6. **Serving changes in-process behaviour**: `mds_serve` and each client connect/disconnect reset
+   every console's input mode to repeat (stall 15); a connected client takes break events (reset
+   events included) and Lua output from in-process callers; a disconnect clears every console's
+   input queue.
+7. **Barriers drop consoles that stop**: a console whose frame budget runs out leaves every barrier
+   group it is in, including groups for payloads still queued. Running the members one frame at a
+   time therefore never synchronises them (intended per the tests, but surprising).
+8. **`mds_stop_after(id, 0)` and `(id, 1)` are the same** while a frame is in progress, and so are
+   `mds_start(id, 0)` and `(id, 1)` on a parked console *(verified for start 0)*.
+9. **A DMA break parks inside the DMA**: between two units, with the CPUs between instructions.
+   Commands work as at any park, but the console is not at a frame boundary (no savestates), and
+   the program that started the DMA is not recorded (the event's `pc` is the DMA tag; `mds_get_regs`
+   gives each CPU's next instruction).
+10. **Savestates 14.2 do not load in older builds** (upstream melonDS and builds before this
     branch reject them as "state from the future"); this build loads 14.0-14.2.
-18. **Documentation that disagrees with the code** (dq9-re `docs/playbook.md`, "The emulator
-    interfaces" and "How the emulator was changed"): `mds_set_local_dir` is not the BIOS/firmware
-    folder (those paths are opened as given); coverage is per instruction, not "every block";
-    many calls return counts or ids rather than "0 or a negative error"; the server serves one
-    client at a time, not "several clients".
-19. **The call tracker is heuristic** (level 4): besides `BL`/`BLX` it pushes frames for jumps made
+11. **The dq9-re playbook lags behind the API** (`docs/playbook.md`, "The emulator interfaces" and
+    "How the emulator was changed"). The four points this item named at level 5 are corrected
+    there (`mds_set_local_dir` is not the BIOS/firmware folder; coverage is per instruction; calls
+    return counts and ids as well as 0; the server serves one client at a time). It still points
+    to `merge/ipc` for this reference, lists no functions of levels 2-6 beyond the cheat calls and
+    describes the history in rounds that stop at level 3. The fix belongs in dq9-re.
+12. **The call tracker is heuristic** (level 4): besides `BL`/`BLX` it pushes frames for jumps made
     with the return address in LR and for functions that start with `PUSH {..., LR}`, and it seeds
     the frames below the first call from stack memory by scanning for prologues. Hand-written code
     that saves LR without being called can add a frame, a non-standard prologue can stop the seeding
     early, and call counts are higher than level 3 gave for the same run (they include those calls).
-20. **A PC change at a break re-runs the hooks there** (level 4, `step_redirect`): with a breakpoint
+13. **A PC change at a break re-runs the hooks there** (level 4, `step_redirect`): with a breakpoint
     at the new PC, the resume parks again at once (kind exec) before running anything. Resume again
     to go on.
-21. **`memory.execute` drops the callee's return value**: a call made with it returns with r0-r3,
+14. **`memory.execute` drops the callee's return value**: a call made with it returns with r0-r3,
     r12, LR and the flags as they were before. It works only inside an exec hook or at a break of
     the same CPU, never from a read/write hook or from `mds_lua_exec` on an idle console.
-22. **Lua `wifi` hooks and injected frames change the run**: a hook that drops or replaces frames,
+15. **Lua `wifi` hooks and injected frames change the run**: a hook that drops or replaces frames,
     or `wifi.inject`, alters what the console (and its partners) receive, so such runs are not
     deterministic replicas of runs without them. A hook that only looks returns nothing (or `true`)
     and changes nothing.
-23. **No thread stacks over the socket protocol or the CLI**: `mds_threadstacks` and Lua
+16. **No thread stacks over the socket protocol or the CLI**: `mds_threadstacks` and Lua
     `debugger.threadstacks` have no wire message yet; the MCP server uses the native library and has
     them (`callstack(threads=true)`).
-24. **The headless symbol loader reads local files only**; a URL (which the Qt debugger accepts)
+17. **The headless symbol loader reads local files only**; a URL (which the Qt debugger accepts)
     fails with "cannot download URL".
-25. **A GDB restart is a reset** (level 5): `monitor reset` and `vRun` reset the console on the
-    emulator thread while GDB holds it. The C API is not told (no break event, `mds_frames` keeps
-    counting) and recorded runs do not replay across it.
-26. **Overlay detection samples memory** (`mds_overlays`, `monitor overlays`, symbol tables): an
+18. **Overlay detection samples memory** (`mds_overlays`, `monitor overlays`, symbol tables): an
     overlay whose code was partly overwritten, or patched by more than 2 of the 8 sampled windows,
     is reported as not loaded, and one whose sampled bytes happen to match another overlay's code
     at the same address can be reported as loaded.
-27. **`src/debug/gdb_test` does not build**: upstream's mock stub predates the current `GdbStub`
+19. **`src/debug/gdb_test` does not build**: upstream's mock stub predates the current `GdbStub`
     constructor and `Init` signatures. The GDB behaviour is tested over a socket instead
-    (`test_gdb_overlays.py`).
+    (`test_gdb_overlays.py`, `test_api_fixes2.py`).
+20. **A GDB restart is still not replayable**: it is reported now (a reset event and
+    `mds_reset_count`), but a recorded run does not replay across it, and `mds_frames`, the input
+    queue and the input log keep counting through it.
+21. **Every park drops every break request** (level 6): a Lua `debugger.pause()` for one CPU that has
+    not fired yet when the console parks for another reason (a breakpoint on the other CPU, an
+    interrupt) is dropped with the rest. Armed step counts are kept.
+
+### Fixed in fix/api-quirks-2
+
+These were items of the level-5 list (old numbers in brackets); the tests are in
+`tools/melonds-mcp/tests/test_api_fixes2.py`.
+
+- **`mds_interrupt` left a break request armed on the other CPU** [1]: every park, and the end of
+  a run, drop the break requests of both CPUs (armed steps stay), so the resume after an interrupt
+  runs; the consoles of a group that `mds_wait`/`mds_run` interrupt are cleaned the same way.
+  `mds_interrupt` ignores a stopped console, whose next run it used to park at once
+  ([Running](#running); feature `interrupt_clean`).
+- **`mds_get_regs` pc was wrong while parked** [2], and **request breaks served at a frame boundary
+  reported the raw ARM9 R15** [11]: index 15 is the instruction each CPU runs next (`R15 - 4` / `- 2`)
+  at every park and for both CPUs, so neither the CPU without hooks (which read 0) nor the armed one
+  that did not break (one behind) is wrong any more; at a fault it is the faulting instruction. A
+  frame-boundary request reports the ARM9's next instruction as `pc`. `r15_raw` is unchanged; the
+  pc at a DMA break is documented ([Registers](#registers), [Breaks](#breaks-what-happens-and-mds_take_break);
+  feature `pc_next`).
+- **`mds_write` silently dropped palette, VRAM, OAM and GBA ROM area writes on the ARM9 bus** [3]:
+  palette, VRAM and OAM are written with halfwords (odd edges merged), every write is read back, and
+  what cannot be written fails naming the region: I/O (never written), the GBA ROM area and the
+  BIOSes (read-only), and writes that did not take (unmapped VRAM, a powered-off 2D engine, no GBA
+  cart SRAM). Lua `memory.write*` in the headless build does the same and raises the error
+  ([Reading and writing memory](#reading-and-writing-memory); feature `write_regions`). I/O reads
+  are still 0 (open item 1).
+- **`mds_packets_take` could get stuck on a packet longer than `max_data`** [5]: the first packet
+  of a call is cut to `max_data` bytes, with its size in the new `mds_packet.total` (former
+  padding), so a call never returns 0 while packets are staged
+  ([Wireless packet capture](#wireless-packet-capture); feature `packets_truncate`).
+- **`mds_frames` returned 0 for an unknown id; `mds_destroy` ignored unknown ids** [13]: `mds_frames`
+  returns `MDS_FRAMES_ERROR` and `mds_destroy` (now `int`) returns -1, both with `no console N`
+  (feature `unknown_id_errors`).
+- **Lua memory hooks were plain points** [14]: they are tagged `MDS_POINT_LUA` in `mds_point_list`,
+  and `mds_point_remove` refuses them and wifi hook ids (feature `point_lua_tag`).
+- **`mds_point_list` had no total count** [15]: `mds_point_count` returns it; `mds_point_list`
+  still returns the number copied ([Breakpoints and watchpoints](#breakpoints-and-watchpoints);
+  feature `point_count`).
+- **A GDB restart reset the console without telling the C API** [25]: `vRun`, `R`, `r` and
+  `monitor reset` queue a reset event (kind 6, `MDS_BREAK_RESET`; not a park) that
+  `mds_take_break` returns and the socket server forwards, and `mds_reset_count` counts it. What is
+  still missing is open item 20 ([GDB stub](#gdb-stub); feature `gdb_reset_event`).
 
 ### Fixed in fix/api-quirks
 

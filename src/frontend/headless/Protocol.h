@@ -1140,6 +1140,7 @@ struct FrameEvent
 };
 
 // break_: {u32 seq=0, i32 kind, i32 cpu, i32 size, i32 id, u32 pc, u32 addr, u32 value, i32 dma}
+//   kind as mds_break (melonds_api.h); kind 6 (API level 6) is a GDB reset of the running console, not a park.
 // (mds_break field for field)
 struct BreakEvent
 {
@@ -1221,7 +1222,7 @@ typedef SeqOnly<MsgType::point_list> PointList;
 
 // reply data: {u32 seq, u32 count, count x PointInfo} with PointInfo =
 // {i32 id, u8 watch (0 exec, 1 watch), u8 enabled, u32 cpuMask, u32 flags
-//  (read/write bits, mds_point.flags), u32 start, u32 end, u64 hits} = 30 bytes
+//  (read/write bits, mds_point.flags; 0x100 = a Lua hook from API level 6), u32 start, u32 end, u64 hits} = 30 bytes
 struct PointInfo
 {
     int32_t Id = 0;
