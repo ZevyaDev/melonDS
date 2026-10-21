@@ -34,11 +34,15 @@ jobs:
     steps:
     - name: Check out sources
       uses: actions/checkout@v6
+    - name: Read runner image version
+      id: image
+      shell: pwsh
+      run: echo "version=$env:ImageVersion" >> $env:GITHUB_OUTPUT
     - name: Restore vcpkg cache
       uses: actions/cache/restore@v4
       with:
         path: ${{ github.workspace }}/vcpkg_cache
-        key: vcpkg-${{ matrix.arch.name }}-windows-${{ hashFiles('vcpkg.json') }}
+        key: vcpkg-${{ matrix.arch.name }}-windows-${{ steps.image.outputs.version }}-${{ hashFiles('vcpkg.json') }}
         restore-keys: vcpkg-${{ matrix.arch.name }}-windows-
     - name: Set up vcpkg
       uses: lukka/run-vcpkg@v11
@@ -58,4 +62,4 @@ jobs:
       uses: actions/cache/save@v4
       with:
         path: ${{ github.workspace }}/vcpkg_cache
-        key: vcpkg-${{ matrix.arch.name }}-windows-${{ hashFiles('vcpkg.json') }}
+        key: vcpkg-${{ matrix.arch.name }}-windows-${{ steps.image.outputs.version }}-${{ hashFiles('vcpkg.json') }}

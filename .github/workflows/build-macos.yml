@@ -37,11 +37,15 @@ jobs:
           brew install autoconf automake autoconf-archive libtool python-setuptools
       - name: Set up CMake
         uses: lukka/get-cmake@latest
+      - name: Read runner image version
+        id: image
+        shell: bash
+        run: echo "version=$ImageVersion" >> "$GITHUB_OUTPUT"
       - name: Restore vcpkg cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}/vcpkg_cache
-          key: vcpkg-${{ matrix.arch }}-osx-${{ hashFiles('vcpkg.json') }}
+          key: vcpkg-${{ matrix.arch }}-osx-${{ steps.image.outputs.version }}-${{ hashFiles('vcpkg.json') }}
           restore-keys: vcpkg-${{ matrix.arch }}-osx-
       - name: Set up vcpkg
         uses: lukka/run-vcpkg@v11
@@ -69,7 +73,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ github.workspace }}/vcpkg_cache
-          key: vcpkg-${{ matrix.arch }}-osx-${{ hashFiles('vcpkg.json') }}
+          key: vcpkg-${{ matrix.arch }}-osx-${{ steps.image.outputs.version }}-${{ hashFiles('vcpkg.json') }}
 
   universal-binary:
     name: Universal binary
