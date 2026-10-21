@@ -1,13 +1,16 @@
 """MCP tools that match the melonds CLI and native.py (tool functions called directly, as in test_mcp_server).
 
 Consoles boot FreeBIOS without a cart (see base.py); programs are written to main RAM where needed."""
+import datetime
 import io
 import json
 import os
 import tempfile
 import unittest
 
-from .base import CODE9, have_library
+from .base import CODE7, CODE9, DATA, have_library
+from .test_api_fixes import can_connect, free_port
+from .test_cheats import HANDLER7, INCREMENT, TARGET, vblank_irq_program, write32
 from .test_mcp_server import RAM, server
 
 
@@ -187,6 +190,80 @@ class McpToolsTest(unittest.TestCase):
             self.assertEqual(len(s["data"][1]), 4)
         with self.assertRaises(server.MelonError):
             server.memory_sample([f"{RAM:#x}"], console=self.c)
+
+    # cheats
+
+    def test_cheat_round_trip(self):
+        code = write32(TARGET, 0x11223344).lower()
+        added = server.cheat_add(code, "set", console=self.c)
+        self.assertEqual(added, {"id": added["id"], "name": "set", "enabled": True, "words": 2, "code": code.upper()})
+        second = server.cheat_add(INCREMENT, "count", enabled=False, console=self.c)
+        self.assertEqual([(x["id"], x["enabled"]) for x in server.cheat_list(console=self.c)],
+                         [(added["id"], True), (second["id"], False)])
+        self.assertTrue(server.cheat_enable(second["id"], console=self.c)["enabled"])
+        self.assertEqual(server.cheat_remove(added["id"], console=self.c), "removed")
+        self.assertEqual([x["name"] for x in server.cheat_list(console=self.c)], ["count"])
+        self.assertEqual(server.console_info(console=self.c)["cheats"], 1)
+        self.assertEqual(server.cheat_clear(console=self.c), {"removed": 1})
+        self.assertEqual(server.cheat_list(console=self.c), [])
+        with self.assertRaisesRegex(server.MelonError, "line 1"):
+            server.cheat_add("not a code", console=self.c)
+        with self.assertRaises(server.MelonError):
+            server.cheat_remove(added["id"], console=self.c)
+
+    def test_cheat_runs_and_savestate_load_clears_it(self):
+        c = server.CONSOLES[self.c]
+        c.write(DATA, bytes(0x400))
+        main, handler = vblank_irq_program()
+        c.write(HANDLER7, handler.assemble(), cpu=7)
+        c.write(CODE7, main.assemble(), cpu=7)
+        c.set_reg("pc", CODE7, cpu=7)
+        server.run(2, [self.c])
+        state = self.path("s.mst")
+        server.savestate_save(state, console=self.c)
+        server.cheat_add(write32(TARGET, 0x11223344), console=self.c)
+        server.run(2, [self.c])
+        self.assertEqual(self.word(TARGET), 0x11223344)
+        server.savestate_load(state, console=self.c)
+        self.assertEqual(server.cheat_list(console=self.c), [])
+        server.run(2, [self.c])
+        self.assertEqual(self.word(TARGET), 0)
+
+    # clock, gdb, info
+
+    def test_rtc(self):
+        self.assertEqual(server.rtc_set("2009-07-11T12:34:56", console=self.c), "2009-07-11T12:34:56")
+        self.assertEqual(server.rtc_get(console=self.c), "2009-07-11T12:34:56")
+        self.assertEqual(server.console_info(console=self.c)["rtc"], "2009-07-11T12:34:56")
+        self.assertTrue(server.rtc_set("now", console=self.c).startswith(str(datetime.date.today().year)))
+        with self.assertRaises(server.MelonError):
+            server.rtc_set("yesterday", console=self.c)
+        with self.assertRaises(server.MelonError):
+            server.rtc_set("1999-01-01T00:00:00", console=self.c)
+
+    def test_gdb_start_stop(self):
+        p9, p7 = free_port(), free_port()
+        self.assertIn(str(p9), server.gdb_start(p9, p7, console=self.c))
+        try:
+            self.assertTrue(can_connect("127.0.0.1", p9))
+        finally:
+            self.assertEqual(server.gdb_stop(console=self.c), "stopped")
+
+    def test_server_and_console_info(self):
+        info = server.server_info()
+        self.assertGreaterEqual(info["api_version"], 3)
+        self.assertIn("cheats", info["features"])
+        self.assertEqual((info["pid"], info["consoles"]), (os.getpid(), [self.c]))
+        ci = server.console_info(console=self.c)
+        self.assertEqual((ci["console"], ci["state"], ci["rom"], ci["symbols"]), (self.c, "idle", None, None))
+        self.assertEqual(len(ci["mac"]), 17)
+        self.assertEqual(ci["queue_depth"], 0)
+
+    def test_wireless_timeout(self):
+        old = server.wireless_timeout()["ms"]
+        self.addCleanup(server.wireless_timeout, old)
+        self.assertEqual(server.wireless_timeout(40), {"ms": 40})
+        self.assertEqual(server.wireless_timeout(), {"ms": 40})
 
     # watches and symbols
 

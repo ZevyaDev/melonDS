@@ -909,6 +909,114 @@ def overlays_loaded(console: int = 0) -> list[str]:
     return [t.overlays[i].name for i in t.loaded_overlays(c)]
 
 
+@server.tool()
+def cheat_add(code: str, name: str = "", enabled: bool = True, console: int = 0) -> dict:
+    """Add an Action Replay (AR DS) code: "XXXXXXXX YYYYYYYY" lines. melonDS's AR engine runs the enabled codes once
+    per frame, when the ARM7 takes the VBlank IRQ. A malformed code fails naming the line and adds nothing.
+    Codes are not part of savestates: savestate_load and rom_load clear the list, so re-add codes after them.
+    Their writes do not trigger watchpoints or last-writer records."""
+    c = con(console)
+    return c.cheat(c.add_cheat(code, name, enabled))
+
+
+@server.tool()
+def cheat_list(console: int = 0) -> list[dict]:
+    """The console's cheat codes in list (= run) order: id, name, enabled, words, code text (normalised)."""
+    return con(console).cheats()
+
+
+@server.tool()
+def cheat_enable(cheat: int, enabled: bool = True, console: int = 0) -> dict:
+    """Enable or disable a code by id. Disabling does not undo what the code already wrote."""
+    c = con(console)
+    c.enable_cheat(cheat, enabled)
+    return c.cheat(cheat)
+
+
+@server.tool()
+def cheat_remove(cheat: int, console: int = 0) -> str:
+    """Remove a code by id (ids are never reused). Its earlier writes stay in memory."""
+    con(console).remove_cheat(cheat)
+    return "removed"
+
+
+@server.tool()
+def cheat_clear(console: int = 0) -> dict:
+    """Remove every code of the console."""
+    return {"removed": con(console).clear_cheats()}
+
+
+@server.tool()
+def rtc_get(console: int = 0) -> str:
+    """The console's real-time clock as ISO 8601 (console stopped)."""
+    return con(console).rtc().isoformat()
+
+
+@server.tool()
+def rtc_set(when: str, console: int = 0) -> str:
+    """Set the real-time clock: ISO 8601 date and time ("2009-07-11T12:00:00", year 2000-2099) or "now"
+    (the host's local time). The console must be stopped; reset keeps the clock."""
+    try:
+        t = datetime.now().replace(microsecond=0) if when == "now" else datetime.fromisoformat(when)
+    except ValueError as e:
+        raise MelonError(f"bad date and time {when!r}: {e}") from None
+    c = con(console)
+    c.set_rtc(t)
+    return c.rtc().isoformat()
+
+
+@server.tool()
+def gdb_start(port9: int = 3333, port7: int = 3334, break_on_start: bool = False, console: int = 0) -> str:
+    """Start the GDB stubs of a stopped console on 127.0.0.1 (ARM9 on port9, ARM7 on port7) for gdb's
+    `target remote`. break_on_start: both CPUs wait for GDB at their next instruction. While GDB holds a CPU
+    the console reports running and other tools wait."""
+    con(console).gdb(port9, port7, break_on_start)
+    return f"gdb on 127.0.0.1:{port9} (arm9), 127.0.0.1:{port7} (arm7)"
+
+
+@server.tool()
+def gdb_stop(console: int = 0) -> str:
+    """Stop the console's GDB stubs."""
+    con(console).gdb(0, 0)
+    return "stopped"
+
+
+@server.tool()
+def wireless_timeout(ms: int = -1) -> dict:
+    """Receive timeout of the in-process local-wireless link in ms (default 25); ms >= 0 sets it, -1 reads it.
+    Needs a console to exist."""
+    return {"ms": native.mp_timeout(ms)}
+
+
+@server.tool()
+def server_info() -> dict:
+    """The library's API level and features (mds_has), the process id, instance base and console ids:
+    what the CLI's `attach` reports for a socket server."""
+    return {"api_version": native.api_version(), "features": [f for f in FEATURES if native.has(f)],
+            "pid": os.getpid(), "instance_base": native.instance_base(), "consoles": sorted(CONSOLES)}
+
+
+@server.tool()
+def console_info(console: int = 0) -> dict:
+    """One console in detail: state, frames, ROM, save file, MAC, input queue, cheat count, symbol source, and
+    the RTC (when stopped)."""
+    c = con(console)
+    out = {"console": console, "state": STATE_NAMES[c.state], "frames": c.frames, "rom": c.rom,
+           "mac": c.mac().hex(":"), "queue_depth": c.input_depth(), "input_waiting": c.input_waiting(),
+           "symbols": syms(c).source}
+    try:
+        out["save"] = c.save_path() or None
+    except MelonError:
+        out["save"] = None
+    try:
+        out["cheats"] = len(c.cheats())
+    except MelonError:  # a library older than API level 3
+        pass
+    if c.state != RUNNING:
+        out["rtc"] = c.rtc().isoformat()
+    return out
+
+
 def main():
     native.lib().mds_set_local_dir(str(Path(os.environ.get("MELONDS_LOCAL_DIR", ".")).resolve()).encode())
     sym = os.environ.get("MELONDS_SYMBOLS", "")
