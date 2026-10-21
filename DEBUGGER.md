@@ -125,7 +125,10 @@ current state, a Thumb BL as one 32-bit value) runs those instructions as if the
 the hooked one, with PC reading as it would there. It returns `true` when one of them branched: the
 hooked instruction is skipped and execution continues at the target, so `memory.execute(0xE12FFF1E)`
 (`bx lr`, `0x4770` in Thumb) at a function's entry makes it return at once. A call (`bl`, `blx`,
-`swi`) returns to the hooked instruction. Otherwise the hooked instruction runs next. Code written
+`swi`) returns to the hooked instruction with r0-r3, r12, lr and the flags as they were before
+`memory.execute`, and that return does not fire the instruction's hooks again, so a hook can call a
+function on every hit without a guard; the callee's return value is not kept. Otherwise the hooked
+instruction runs next. Code written
 from a hook with `memory.write*` takes effect on the instruction about to run, and setting `pc` or
 the T bit with `emu.setregister` or DeSmuME's `memory.setregister` jumps there. It needs JIT off.
 

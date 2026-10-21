@@ -71,6 +71,7 @@ static bool WritesPC(u32 instr, bool thumb);
 constexpr u32 MainRAMWords = 0x400000 >> 2;
 constexpr u32 DMAWriterTag = 0xFFFFFFF0;
 constexpr u32 PipelineSentinel = 0xE7F0DEF0;
+constexpr size_t MaxReturnSkips = 16;
 
 Debugger::Debugger(melonDS::NDS& nds) noexcept : NDS(nds)
 {
@@ -91,6 +92,7 @@ void Debugger::Reset()
         LastSP[i] = {};
         CurPC[i] = 0;
         SeedPending[i] = false;
+        ReturnSkips[i].clear();
     }
     TraceHead = 0;
     TraceWrapped = false;
@@ -326,6 +328,7 @@ void Debugger::OnStateLoaded()
         Exceptions[i].clear();
         LastSP[i] = {};
         SeedPending[i] = CallTracking;
+        ReturnSkips[i].clear();
     }
 }
 
@@ -535,13 +538,22 @@ static bool IsLinkBranch(u32 op, bool thumb)
         || (op & 0x0FFFFFF0) == 0x012FFF30;
 }
 
-void Debugger::Redirected(ARM& cpu, u32 pc, bool thumb, u32 op, u32 lr)
+void Debugger::Redirected(ARM& cpu, bool thumb, u32 op, u32 lr, u32 sp, u8 callerMode, const ReturnSkip& entry)
 {
     u8 n = cpu.Num;
+    u32 pc = entry.PC;
     PrevInstr[n] = op;
     PrevThumb[n] = thumb;
     u32 vector = cpu.R[15] - 4 - cpu.ExceptionBase;
     u8 mode = cpu.CPSR & 0x1F;
+    auto expectReturn = [&] {
+        if (ReturnSkips[n].size() >= MaxReturnSkips)
+            ReturnSkips[n].erase(ReturnSkips[n].begin());
+        ReturnSkip skip = entry;
+        skip.SP = sp;
+        skip.Mode = callerMode;
+        ReturnSkips[n].push_back(skip);
+    };
     if ((vector == 0x04 && mode == 0x1B) || (vector == 0x08 && mode == 0x13))
     {
         u32 old = cpu.R[14];
@@ -552,6 +564,7 @@ void Debugger::Redirected(ARM& cpu, u32 pc, bool thumb, u32 op, u32 lr)
             if (!CallStack[n].empty())
                 CallStack[n].front().Site = CallStack[n].front().Return = pc;
         }
+        expectReturn();
         return;
     }
     if (!IsLinkBranch(op, thumb) || cpu.R[14] == lr)
@@ -560,6 +573,29 @@ void Debugger::Redirected(ARM& cpu, u32 pc, bool thumb, u32 op, u32 lr)
     cpu.R[14] = pc | (thumb ? 1 : 0);
     if (!CallStack[n].empty() && CallStack[n].back().Return == old)
         CallStack[n].back().Return = pc;
+    expectReturn();
+}
+
+bool Debugger::ReturnedToHook(ARM& cpu, u32 pc)
+{
+    auto& skips = ReturnSkips[cpu.Num];
+    if (skips.empty())
+        return false;
+    ReturnSkip& top = skips.back();
+    if (pc != top.PC)
+    {
+        top.Left = true;
+        return false;
+    }
+    if (!top.Left || cpu.R[13] != top.SP || (cpu.CPSR & 0x1F) != top.Mode)
+        return false;
+    for (int r = 0; r < 4; r++)
+        cpu.R[r] = top.Args[r];
+    cpu.R[12] = top.R12;
+    cpu.R[14] = top.LR;
+    cpu.CPSR = (cpu.CPSR & 0x07FFFFFF) | top.Flags;
+    skips.pop_back();
+    return true;
 }
 
 ExecResult Debugger::Execute(u8 cpu, const std::vector<u32>& ops)
@@ -572,6 +608,7 @@ ExecResult Debugger::Execute(u8 cpu, const std::vector<u32>& ops)
     u32 step = thumb ? 2 : 4;
     u32 pc = arm.R[15] - step;
     u32 cur = arm.CurInstr;
+    ReturnSkip entry {pc, 0, 0, false, {arm.R[0], arm.R[1], arm.R[2], arm.R[3]}, arm.R[12], arm.R[14], arm.CPSR & 0xF8000000};
     std::vector<u32> seq;
     for (u32 op : ops)
     {
@@ -582,6 +619,8 @@ ExecResult Debugger::Execute(u8 cpu, const std::vector<u32>& ops)
     for (u32 op : seq)
     {
         u32 lr = arm.R[14];
+        u32 sp = arm.R[13];
+        u8 mode = arm.CPSR & 0x1F;
         arm.R[15] = pc + 2 * step;
         arm.CurInstr = op;
         arm.NextInstr[0] = arm.NextInstr[1] = PipelineSentinel;
@@ -598,7 +637,7 @@ ExecResult Debugger::Execute(u8 cpu, const std::vector<u32>& ops)
         if (arm.R[15] != pc + 2 * step || arm.NextInstr[0] != PipelineSentinel || arm.NextInstr[1] != PipelineSentinel)
         {
             arm.CurInstr = cur;
-            Redirected(arm, pc, thumb, op, lr);
+            Redirected(arm, thumb, op, lr, sp, mode, entry);
             return ExecResult::Branched;
         }
     }
@@ -1200,7 +1239,7 @@ void Debugger::OnInstr(ARM& cpu, u32 pc)
         raise = true;
     }
 
-    if (!ExecPages[n].empty() && ExecPages[n][pc >> PageShift])
+    if (!ReturnedToHook(cpu, pc) && !ExecPages[n].empty() && ExecPages[n][pc >> PageShift])
     {
         ContextGuard guard(*this, HookContext::Hook, n);
         std::vector<int> hits;

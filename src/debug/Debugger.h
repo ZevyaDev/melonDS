@@ -266,10 +266,24 @@ private:
     std::thread::id ContextThread;
     std::array<int, 2> MidInstr {};
 
+    struct ReturnSkip
+    {
+        u32 PC;
+        u32 SP;
+        u8 Mode;
+        bool Left;
+        std::array<u32, 4> Args;
+        u32 R12;
+        u32 LR;
+        u32 Flags;
+    };
+    std::array<std::vector<ReturnSkip>, 2> ReturnSkips;
+
     bool OnContextThread() const;
     u32 Canonical(u8 cpu, u32 addr) const;
     bool PipelineCurrent(ARM& cpu) const;
-    void Redirected(ARM& cpu, u32 pc, bool thumb, u32 op, u32 lr);
+    void Redirected(ARM& cpu, bool thumb, u32 op, u32 lr, u32 sp, u8 callerMode, const ReturnSkip& entry);
+    bool ReturnedToHook(ARM& cpu, u32 pc);
     void Rearm();
     void RebuildPages();
     void Raise(const BreakEvent& ev);
