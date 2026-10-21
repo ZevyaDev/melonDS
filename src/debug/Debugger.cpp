@@ -73,8 +73,24 @@ constexpr u32 MainRAMWords = 0x400000 >> 2;
 constexpr u32 PipelineSentinel = 0xE7F0DEF0;
 constexpr size_t MaxReturnSkips = 16;
 
-Debugger::Debugger(melonDS::NDS& nds) noexcept : NDS(nds)
+Debugger::Debugger(melonDS::NDS& nds) noexcept : Probes(nds, *this), NDS(nds)
 {
+}
+
+int Debugger::CallDepth(u8 cpu) const
+{
+    if (!CallTracking)
+        return -1;
+    size_t depth = CallStack[cpu & 1].size();
+    for (auto& ex : Exceptions[cpu & 1])
+        depth += ex.Stack.size();
+    return (int)depth;
+}
+
+void Debugger::PokeFromHook(u8 cpu, u32 addr, u8 size, u32 value)
+{
+    ContextGuard guard(*this, HookContext::Hook, cpu);
+    Poke(cpu, addr, size, value);
 }
 
 void Debugger::Reset()
@@ -98,6 +114,7 @@ void Debugger::Reset()
     TraceWrapped = false;
     if (!LastWriter.empty())
         std::fill(LastWriter.begin(), LastWriter.end(), 0);
+    Probes.Reset();
     Rearm();
 }
 
@@ -279,6 +296,7 @@ void Debugger::OnStateLoaded()
     if (!LastWriter.empty())
         std::fill(LastWriter.begin(), LastWriter.end(), 0);
     CoverageLastBits = {};
+    Probes.OnStateLoaded();
     Rearm();
 }
 
@@ -762,8 +780,9 @@ void Debugger::Rearm()
             exec |= b.Enabled && (b.CPUMask & (1 << i));
         for (auto& w : Watchpoints)
             data |= w.Enabled && (w.CPUMask & (1 << i));
-        DataArmed[i] = data;
-        Armed[i] = exec || data || CallTracking || Coverage || (TraceMask & (1 << i))
+        // the memory log needs no instruction hook: it takes the pc from R15 (Debugger::OnData)
+        DataArmed[i] = data || Probes.DataArmed(i);
+        Armed[i] = exec || data || Probes.InstrArmed(i) || CallTracking || Coverage || (TraceMask & (1 << i))
             || StepRemaining[i] || StepModes[i] != StepMode::None || PendingValid[i] || BreakRequested[i] || ServiceRequested;
     }
 }
@@ -1126,6 +1145,8 @@ void Debugger::PushFrame(u8 n, const CallFrame& frame)
         stack.erase(stack.begin());
     stack.push_back(frame);
     CallCounts[n][frame.Entry]++;
+    if (Probes.Tagging())
+        Probes.CountCall(n, frame.Entry);
     KnownEntries[n].insert(frame.Entry);
     if (SeedPending[n] && Exceptions[n].empty() && !IsExceptionMode(frame.Mode))
     {
@@ -1160,6 +1181,8 @@ void Debugger::TrackEntry(ARM& cpu, u32 pc, u32 prev)
         {
             top.Entry = pc;
             CallCounts[n][pc]++;
+            if (Probes.Tagging())
+                Probes.CountCall(n, pc);
             return;
         }
     }
@@ -1288,6 +1311,10 @@ void Debugger::OnInstr(ARM& cpu, u32 pc, bool redirected)
         UnwindCalls(cpu, pc);
         TrackEntry(cpu, pc, prev);
     }
+    // probes and breakpoint actions; an action that moves PC (return early, skip, set PC) means the instruction
+    // at pc does not run: GdbCheckC calls the hooks again at the new PC
+    if (Probes.InstrArmed(n) && Probes.OnInstr(cpu, pc))
+        return;
     bool vector = IsExceptionMode(cpu.CPSR & 0x1F) && pc - cpu.ExceptionBase < 0x20;
     bool jumped = !vector && pc != prev + (PrevThumb[n] ? 2 : 4) && WritesPC(PrevInstr[n], PrevThumb[n]);
     Prev2Instr[n] = PrevInstr[n];
@@ -1304,6 +1331,8 @@ void Debugger::OnInstr(ARM& cpu, u32 pc, bool redirected)
         }
         u32 idx = (pc & ((1u << PageShift) - 1)) >> 1;
         (*CoverageLastBits[n])[idx >> 6] |= 1ull << (idx & 63);
+        if (Probes.Tagging())
+            Probes.Cover(n, pc);
     }
 
     if ((TraceMask & (1 << n)) && pc >= TraceStart && pc <= TraceEnd)
@@ -1326,7 +1355,7 @@ void Debugger::OnInstr(ARM& cpu, u32 pc, bool redirected)
         ev = Pending[n];
         raise = true;
     }
-    if (BreakRequested[n].exchange(false) && !raise)
+    if (BreakRequested[n].load(std::memory_order_relaxed) && BreakRequested[n].exchange(false) && !raise)
     {
         ev.Kind = BreakKind::Request;
         raise = true;
@@ -1377,8 +1406,10 @@ void Debugger::OnInstr(ARM& cpu, u32 pc, bool redirected)
     }
 }
 
-void Debugger::OnDMA(u8 n, u8 channel, u32 addr, u8 size, u32 value)
+void Debugger::OnDMA(u8 n, u8 channel, u32 src, u32 addr, u8 size, u32 value)
 {
+    if (Probes.DataArmed(n))
+        Probes.OnDMA(n, channel, src, addr, size, value);
     if (!LastWriter.empty() && (addr >> 24) == 0x02)
         LastWriter[(addr & 0x3FFFFF) >> 2] = DMAWriterTag | (channel << 1) | n;
     WatchHit(n, addr, size, value, true, channel);
@@ -1389,6 +1420,13 @@ void Debugger::OnData(ARM& cpu, u32 addr, u8 size, u32 value, bool write)
     u8 n = cpu.Num;
     if (write && !LastWriter.empty() && (addr >> 24) == 0x02)
         LastWriter[(addr & 0x3FFFFF) >> 2] = CurPC[n] | n;
+    if (Probes.DataArmed(n))
+    {
+        // during an instruction R15 is 8 (ARM) or 4 (Thumb) ahead of it, hooks armed or not
+        // (checked against CurPC over every data access of a DQ9 battle round: no difference)
+        u32 pc = cpu.R[15] - ((cpu.CPSR & 0x20) ? 4 : 8);
+        Probes.OnData(n, addr, size, value, write, pc);
+    }
     WatchHit(n, addr, size, value, write, 0xFF);
 }
 

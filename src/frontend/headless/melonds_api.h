@@ -103,9 +103,9 @@ typedef struct
 
 // Reference: docs/headless-api.md, section 1 (library-wide settings, errors, version and features).
 // API level: 1 up to the IPC merge, 2 from fix/api-quirks, 3 from feature/cheats, 4 from merge/upstream-debug,
-// 5 from merge/upstream-debug-2, 6 from fix/api-quirks-2, 7 from feature/render-control (MDS_API_VERSION). It goes
-// up whenever functions are added or behaviour changes; mds_has names the individual features.
-#define MDS_API_VERSION 7
+// 5 from merge/upstream-debug-2, 6 from fix/api-quirks-2, 7 from feature/probes, 8 from feature/render-control
+// (MDS_API_VERSION). It goes up whenever functions are added or behaviour changes; mds_has names the features.
+#define MDS_API_VERSION 8
 MDS_API int mds_version(void);
 // 1 if the library has the named feature or exported function ("serve_host", "mds_serve_host", ...; the list
 // is in docs/headless-api.md, section 1), else 0. Absent from libraries before API level 2: look the symbol up.
@@ -183,7 +183,7 @@ typedef struct
 // Reference: docs/headless-api.md, section 4 (mds_screen) and section 3 (setters and queued input).
 MDS_API int mds_screen(int id, uint32_t* out);
 
-// Render control (API level 7; features "render_skip", "threaded_3d", "render_stats"; docs/headless-api.md,
+// Render control (API level 8; features "render_skip", "threaded_3d", "render_stats"; docs/headless-api.md,
 // section 4, "Render control"). Both settings are the caller's wish: the console applies them at its next frame
 // boundary, before the next frame runs. Neither changes emulated state, and savestates do not carry them.
 // mds_set_render: skip drawing to save time. MDS_RENDER_SKIP_2D skips BG/OBJ drawing and the framebuffer (mds_screen
@@ -341,5 +341,8 @@ MDS_API int mds_save_path(int id, char* out, int max);
 #ifdef __cplusplus
 }
 #endif
+
+// Function probes, the memory access log, breakpoint actions and overlay tags (API level 7).
+#include "melonds_probes.h"
 
 #endif

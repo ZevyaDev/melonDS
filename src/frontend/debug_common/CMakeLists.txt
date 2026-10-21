@@ -23,7 +23,7 @@ else()
 endif()
 
 if (BUILD_HEADLESS)
-    add_executable(debug_common_tests tests/DebugCommonTests.cpp)
+    add_executable(debug_common_tests tests/DebugCommonTests.cpp tests/OverlayMatchTests.cpp)
     target_link_libraries(debug_common_tests PRIVATE melonds_debug)
     if (WIN32)
         target_link_options(debug_common_tests PRIVATE -static-libgcc -static-libstdc++)

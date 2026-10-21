@@ -19,7 +19,7 @@ POINT_LUA = 0x100       # mds_point.flags: a Lua memory hook (API level 6)
 DMA_TAG = 0xFFFFFFF0
 # mds_frames for an unknown console (API level 6; older libraries return 0)
 FRAMES_ERROR = 0xFFFFFFFFFFFFFFFF
-# mds_set_render flags (API level 7)
+# mds_set_render flags (API level 8)
 RENDER_SKIP_2D, RENDER_SKIP_3D = 1, 2
 RENDER_SKIP_ALL = RENDER_SKIP_2D | RENDER_SKIP_3D
 # frames to draw before a screenshot after skipping: 2D shows a frame's lines at once, 3D the frame drawn the frame
@@ -204,11 +204,88 @@ _SIGNATURES |= {
     "mds_point_count": (c_int, [c_int]),
     "mds_reset_count": (c_int, [c_int]),
 }
-# API level 7 (feature/render-control)
+# API level 8 (feature/render-control)
 _SIGNATURES |= {
     "mds_set_render": (c_int, [c_int, c_uint32]),
     "mds_set_threaded_3d": (c_int, [c_int, c_int]),
     "mds_render_stats": (c_int, [c_int, POINTER(c_uint64), c_int]),
+}
+
+
+# API level 7 (feature/probes; melonds_probes.h): probes, memory access log, breakpoint actions, overlay tags
+class MdsProbeRead(Structure):
+    _fields_ = [("reg", c_int32), ("offset", c_int32), ("len", c_uint32), ("when", c_uint32)]
+
+
+class MdsProbeSpec(Structure):
+    _fields_ = [("cpumask", c_uint32), ("addr", c_uint32), ("lr_start", c_uint32), ("lr_end", c_uint32),
+                ("flags", c_uint32), ("reads", MdsProbeRead * 4)]
+
+
+class MdsProbeRecord(Structure):
+    _fields_ = [("seq", c_uint64), ("frame", c_uint64), ("cycle", c_uint64), ("ret_frame", c_uint64),
+                ("ret_cycle", c_uint64), ("probe", c_int32), ("cpu", c_int32), ("kind", c_int32), ("overlay", c_int32),
+                ("depth", c_int32), ("addr", c_uint32), ("lr", c_uint32), ("sp", c_uint32), ("args", c_uint32 * 4),
+                ("returned", c_uint32), ("ret", c_uint32 * 2), ("flags", c_uint32), ("entry_len", c_uint16 * 4),
+                ("ret_len", c_uint16 * 4), ("data_len", c_uint32), ("pad", c_uint32)]
+
+
+class MdsMemlogSpec(Structure):
+    _fields_ = [("cpumask", c_uint32), ("start", c_uint32), ("size", c_uint32), ("flags", c_uint32),
+                ("pc_start", c_uint32), ("pc_end", c_uint32)]
+
+
+class MdsMemlogRecord(Structure):
+    _fields_ = [("seq", c_uint64), ("frame", c_uint64), ("cycle", c_uint64), ("pc", c_uint32), ("addr", c_uint32),
+                ("value", c_uint32), ("range", c_int32), ("cpu", c_uint8), ("size", c_uint8), ("flags", c_uint8),
+                ("dma", c_uint8), ("pad", c_uint32)]
+
+
+class MdsActionSpec(Structure):
+    _fields_ = [("cpumask", c_uint32), ("addr", c_uint32), ("kind", c_int32), ("reg", c_int32), ("value", c_uint32),
+                ("value2", c_uint32), ("target", c_uint32), ("size", c_uint32), ("lr", c_uint32), ("first", c_uint32),
+                ("times", c_uint32), ("flags", c_uint32)]
+
+
+class MdsActionRecord(Structure):
+    _fields_ = [("seq", c_uint64), ("frame", c_uint64), ("cycle", c_uint64), ("hit", c_uint64), ("action", c_int32),
+                ("cpu", c_int32), ("kind", c_int32), ("pc", c_uint32), ("lr", c_uint32), ("regs", c_uint32 * 4),
+                ("value", c_uint32), ("target", c_uint32), ("pad", c_uint32)]
+
+
+PROBE_READ_ENTRY, PROBE_READ_RETURN = 1, 2
+PROBE_NO_RETURN = 1
+PROBE_FORCED, PROBE_RETURN_LOST = 1, 2
+OVERLAY_STATIC, OVERLAY_AMBIGUOUS, OVERLAY_UNKNOWN = -1, -2, -3
+MEMLOG_READ, MEMLOG_WRITE, MEMLOG_DMA = 1, 2, 4
+ACTION_KINDS = {"return": 1, "set_reg": 2, "write": 3, "skip": 4}
+ACTION_SET_R1 = 1
+OVERLAY_AT_ERROR = -(2 ** 31)
+_REGS = {f"r{k}": k for k in range(16)} | {"sp": 13, "lr": 14, "pc": 15}
+
+_SIGNATURES |= {
+    "mds_probe_add": (c_int, [c_int, POINTER(MdsProbeSpec)]),
+    "mds_probe_remove": (c_int, [c_int, c_int]),
+    "mds_probe_list": (c_int, [c_int, POINTER(c_int), POINTER(MdsProbeSpec), POINTER(c_uint64), c_int]),
+    "mds_probe_capacity": (c_int, [c_int, c_int]),
+    "mds_probe_take": (c_int, [c_int, POINTER(MdsProbeRecord), POINTER(c_uint8), c_int, c_int]),
+    "mds_probe_stats": (c_int, [c_int, POINTER(c_uint64)]),
+    "mds_memlog_add": (c_int, [c_int, POINTER(MdsMemlogSpec)]),
+    "mds_memlog_remove": (c_int, [c_int, c_int]),
+    "mds_memlog_list": (c_int, [c_int, POINTER(c_int), POINTER(MdsMemlogSpec), POINTER(c_uint64), c_int]),
+    "mds_memlog_capacity": (c_int, [c_int, c_int]),
+    "mds_memlog_take": (c_int, [c_int, POINTER(MdsMemlogRecord), c_int]),
+    "mds_memlog_stats": (c_int, [c_int, POINTER(c_uint64)]),
+    "mds_action_add": (c_int, [c_int, POINTER(MdsActionSpec)]),
+    "mds_action_remove": (c_int, [c_int, c_int]),
+    "mds_action_list": (c_int, [c_int, POINTER(c_int), POINTER(MdsActionSpec), POINTER(c_uint64), POINTER(c_uint64),
+                                c_int]),
+    "mds_action_take": (c_int, [c_int, POINTER(MdsActionRecord), c_int]),
+    "mds_action_stats": (c_int, [c_int, POINTER(c_uint64)]),
+    "mds_overlay_tags": (c_int, [c_int, c_int]),
+    "mds_overlay_at": (c_int, [c_int, c_uint32]),
+    "mds_callcounts_take_ov": (c_int, [c_int, c_int, POINTER(c_uint32), POINTER(c_int32), POINTER(c_uint64), c_int]),
+    "mds_coverage_take_ov": (c_int, [c_int, c_int, POINTER(c_uint32), POINTER(c_int32), c_int]),
 }
 
 
@@ -292,8 +369,8 @@ def _mask(cpu):
 
 def api_version():
     """The library's API level (mds_version): 1 up to the IPC merge, 2 from fix/api-quirks, 3 from feature/cheats,
-    4 from merge/upstream-debug, 5 from merge/upstream-debug-2, 6 from fix/api-quirks-2, 7 from
-    feature/render-control."""
+    4 from merge/upstream-debug, 5 from merge/upstream-debug-2, 6 from fix/api-quirks-2, 7 from feature/probes,
+    8 from feature/render-control."""
     return lib().mds_version()
 
 
@@ -505,7 +582,7 @@ class Console:
         _check(lib().mds_screen(self.id, buf))
         return buf
 
-    # Render control (API level 7; docs/headless-api.md, section 4). Applied at the next frame boundary; neither
+    # Render control (API level 8; docs/headless-api.md, section 4). Applied at the next frame boundary; neither
     # setting changes emulated state.
 
     def set_render(self, skip_2d=False, skip_3d=False):
@@ -772,4 +849,198 @@ class Console:
                     p["size"] = h.total
                 out.append(p)
                 off += h.length
+        return out
+
+    # Probes, the memory access log, breakpoint actions and overlay tags (API level 7; docs/headless-api.md,
+    # section 5b). Nothing here parks the console; probes and the log change nothing in the run.
+
+    def add_probe(self, addr, cpu=9, reads=(), lr_range=None, returns=True):
+        """Log every call of the function at addr. reads: up to 4 (reg, length[, offset[, when]]) memory reads
+        behind registers ("r1" or 1), when = "entry" (default), "return" or "both". lr_range: (lo, hi) to log only
+        calls whose return address is in it. returns=False: do not wait for returns. Returns the probe id."""
+        spec = MdsProbeSpec(cpumask=_mask(cpu), addr=addr, flags=0 if returns else PROBE_NO_RETURN)
+        if lr_range:
+            spec.lr_start, spec.lr_end = lr_range
+        if len(reads) > 4:
+            raise MelonError("at most 4 reads per probe")
+        for i in range(4):
+            spec.reads[i].reg = -1
+        for i, r in enumerate(reads):
+            reg, length, offset, when = (tuple(r) + (0, "entry")[len(r) - 2:])[:4]
+            w = {"entry": PROBE_READ_ENTRY, "return": PROBE_READ_RETURN, "both": 3}.get(when, when)
+            spec.reads[i] = MdsProbeRead(_REGS.get(reg, reg), offset, length, w)
+        return _check(lib().mds_probe_add(self.id, ctypes.byref(spec)))
+
+    def remove_probe(self, probe):
+        _check(lib().mds_probe_remove(self.id, probe))
+
+    def probes(self):
+        """[{"id", "addr", "cpu", "hits", "lr_range", "returns"}]."""
+        n = _check(lib().mds_probe_list(self.id, None, None, None, 0))
+        m = max(n, 1)
+        ids, specs, hits = (c_int * m)(), (MdsProbeSpec * m)(), (c_uint64 * m)()
+        n = min(n, _check(lib().mds_probe_list(self.id, ids, specs, hits, n)))
+        return [{"id": ids[i], "addr": specs[i].addr, "cpu": {1: 9, 2: 7, 3: "both"}.get(specs[i].cpumask),
+                 "hits": hits[i], "lr_range": (specs[i].lr_start, specs[i].lr_end) if specs[i].lr_end else None,
+                 "returns": not specs[i].flags & PROBE_NO_RETURN} for i in range(n)]
+
+    def probe_capacity(self, records):
+        """Size the ring of probe records (default 65536; the oldest are dropped when full). Empties it."""
+        _check(lib().mds_probe_capacity(self.id, records))
+
+    def take_probes(self, pending=None):
+        """Every probe record, oldest first: dicts "seq", "probe", "cpu", "addr", "frame", "cycle", "lr", "sp",
+        "depth", "overlay", "args" (r0-r3), "returned", "ret" ([r0, r1] or None), "ret_frame", "forced", "lost",
+        "reads" (bytes or None per read, at entry) and "ret_reads" (at return). A call taken before it returned has
+        "returned" False and its return comes later as a late record: pass the same dict as `pending` to every
+        take and the late return is merged into the call's dict (taken earlier); without it, or when the call's
+        dict is gone, the late record is returned with "late": True."""
+        out = []
+        recs, data = (MdsProbeRecord * 4096)(), (c_uint8 * (4096 * 512))()
+        while n := _check(lib().mds_probe_take(self.id, recs, data, 4096, len(data))):
+            off = 0
+            for r in recs[:n]:
+                blob = bytes(data[off:off + r.data_len])
+                off += r.data_len
+                at, reads, ret_reads = 0, [], []
+                for lens, dest in ((r.entry_len, reads), (r.ret_len, ret_reads)):
+                    for k in range(4):
+                        dest.append(blob[at:at + lens[k]] if lens[k] else None)
+                        at += lens[k]
+                rec = {"seq": r.seq, "probe": r.probe, "cpu": r.cpu, "addr": r.addr, "frame": r.frame,
+                       "cycle": r.cycle, "lr": r.lr, "sp": r.sp, "depth": r.depth, "overlay": r.overlay,
+                       "args": list(r.args), "returned": bool(r.returned),
+                       "ret": list(r.ret) if r.returned else None, "ret_frame": r.ret_frame if r.returned else None,
+                       "forced": bool(r.flags & PROBE_FORCED), "lost": bool(r.flags & PROBE_RETURN_LOST),
+                       "reads": reads, "ret_reads": ret_reads}
+                if r.kind == 1:
+                    earlier = pending.pop(r.seq, None) if pending is not None else None
+                    if earlier is not None:
+                        earlier.update(returned=True, ret=rec["ret"], ret_frame=rec["ret_frame"], ret_reads=ret_reads)
+                        continue
+                    rec["late"] = True
+                elif pending is not None and not r.returned and not r.flags & PROBE_RETURN_LOST:
+                    pending[r.seq] = rec
+                out.append(rec)
+        return out
+
+    def probe_stats(self):
+        """{"recorded", "dropped", "pending" (calls awaiting their return), "in_ring"}."""
+        return self._stats("mds_probe_stats", ("recorded", "dropped", "pending", "in_ring"))
+
+    def _stats(self, fn, names):
+        out = (c_uint64 * 4)()
+        _check(getattr(lib(), fn)(self.id, out))
+        return dict(zip(names, out))
+
+    def memlog_add(self, start, size, read=True, write=True, dma=True, cpu=9, pc_range=None):
+        """Log every access to [start, start + size) by the CPU (and its DMA units with dma=True) without parking.
+        pc_range: (lo, hi) to keep only accesses by instructions there. Returns the range id."""
+        flags = (MEMLOG_READ if read else 0) | (MEMLOG_WRITE if write else 0) | (MEMLOG_DMA if dma else 0)
+        spec = MdsMemlogSpec(cpumask=_mask(cpu), start=start, size=size, flags=flags)
+        if pc_range:
+            spec.pc_start, spec.pc_end = pc_range
+        return _check(lib().mds_memlog_add(self.id, ctypes.byref(spec)))
+
+    def memlog_remove(self, rng):
+        _check(lib().mds_memlog_remove(self.id, rng))
+
+    def memlog_ranges(self):
+        n = _check(lib().mds_memlog_list(self.id, None, None, None, 0))
+        m = max(n, 1)
+        ids, specs, hits = (c_int * m)(), (MdsMemlogSpec * m)(), (c_uint64 * m)()
+        n = min(n, _check(lib().mds_memlog_list(self.id, ids, specs, hits, n)))
+        return [{"id": ids[i], "start": specs[i].start, "size": specs[i].size, "flags": specs[i].flags,
+                 "hits": hits[i]} for i in range(n)]
+
+    def memlog_capacity(self, records):
+        """Size the access log ring (default 1 << 20; the oldest are dropped when full). Empties it."""
+        _check(lib().mds_memlog_capacity(self.id, records))
+
+    def take_memlog(self):
+        """Every logged access, oldest first: dicts "seq", "frame", "cycle", "cpu", "pc", "addr", "size", "value",
+        "write" (else a read), "dma" (the channel, or None for an instruction; for DMA "pc" is the DMA tag),
+        "range"."""
+        out, buf = [], (MdsMemlogRecord * 16384)()
+        while n := _check(lib().mds_memlog_take(self.id, buf, 16384)):
+            out.extend({"seq": r.seq, "frame": r.frame, "cycle": r.cycle, "cpu": r.cpu, "pc": r.pc, "addr": r.addr,
+                        "size": r.size, "value": r.value, "write": bool(r.flags & MEMLOG_WRITE),
+                        "dma": r.dma if r.flags & MEMLOG_DMA else None, "range": r.range} for r in buf[:n])
+        return out
+
+    def memlog_stats(self):
+        """{"recorded", "dropped", "in_ring"}."""
+        s = self._stats("mds_memlog_stats", ("recorded", "dropped", "pending", "in_ring"))
+        s.pop("pending")
+        return s
+
+    def add_action(self, addr, kind, value=0, cpu=9, reg=-1, value2=None, target=0, size=0, lr=None, first=1,
+                   times=0):
+        """A breakpoint action at addr, applied without parking: kind "return" (r0 = value, r1 = value2 if given,
+        PC = LR), "set_reg" (register reg = value), "write" (size bytes of value at target) or "skip" (size
+        instructions). lr: only hits from that return address; first: from the first-th matching hit; times: at
+        most that many (0 = no limit). Every application is logged (take_actions). Returns the action id."""
+        spec = MdsActionSpec(cpumask=_mask(cpu), addr=addr, kind=ACTION_KINDS.get(kind, kind), reg=_REGS.get(reg, reg),
+                             value=value & 0xFFFFFFFF, value2=(value2 or 0) & 0xFFFFFFFF, target=target, size=size,
+                             lr=(lr or 0) & ~1, first=first, times=times,
+                             flags=ACTION_SET_R1 if value2 is not None else 0)
+        return _check(lib().mds_action_add(self.id, ctypes.byref(spec)))
+
+    def remove_action(self, action):
+        _check(lib().mds_action_remove(self.id, action))
+
+    def actions(self):
+        """[{"id", "addr", "kind", "value", "lr", "first", "times", "matched", "fired"}]."""
+        n = _check(lib().mds_action_list(self.id, None, None, None, None, 0))
+        m = max(n, 1)
+        ids, specs, matched, fired = (c_int * m)(), (MdsActionSpec * m)(), (c_uint64 * m)(), (c_uint64 * m)()
+        n = min(n, _check(lib().mds_action_list(self.id, ids, specs, matched, fired, n)))
+        kinds = {v: k for k, v in ACTION_KINDS.items()}
+        return [{"id": ids[i], "addr": specs[i].addr, "kind": kinds.get(specs[i].kind, specs[i].kind),
+                 "value": specs[i].value, "lr": specs[i].lr or None, "first": specs[i].first, "times": specs[i].times,
+                 "matched": matched[i], "fired": fired[i]} for i in range(n)]
+
+    def take_actions(self):
+        """The log of applied actions, oldest first: dicts "seq", "action", "kind", "cpu", "pc", "lr", "hit",
+        "frame", "cycle", "regs" (r0-r3 before), "value", "target"."""
+        out, buf = [], (MdsActionRecord * 4096)()
+        kinds = {v: k for k, v in ACTION_KINDS.items()}
+        while n := _check(lib().mds_action_take(self.id, buf, 4096)):
+            out.extend({"seq": r.seq, "action": r.action, "kind": kinds.get(r.kind, r.kind), "cpu": r.cpu,
+                        "pc": r.pc, "lr": r.lr, "hit": r.hit, "frame": r.frame, "cycle": r.cycle,
+                        "regs": list(r.regs), "value": r.value, "target": r.target} for r in buf[:n])
+        return out
+
+    def action_stats(self):
+        """{"applied" (since the console was created), "dropped", "in_ring"}."""
+        s = self._stats("mds_action_stats", ("applied", "dropped", "pending", "in_ring"))
+        s.pop("pending")
+        return s
+
+    def overlay_tags(self, enabled=True):
+        """Also keep call counts and coverage per (address, overlay): take_call_counts_ov / take_coverage_ov."""
+        _check(lib().mds_overlay_tags(self.id, int(enabled)))
+
+    def overlay_at(self, addr):
+        """The cart overlay whose code is at addr now: its id, or OVERLAY_STATIC (-1), OVERLAY_AMBIGUOUS (-2),
+        OVERLAY_UNKNOWN (-3)."""
+        r = lib().mds_overlay_at(self.id, addr)
+        if r == OVERLAY_AT_ERROR:
+            raise MelonError(lib().mds_error().decode(errors="replace"))
+        return r
+
+    def take_call_counts_ov(self, cpu=9):
+        """{(entry, overlay): count} since overlay_tags(True) (or the last take)."""
+        counts = {}
+        e, o, h = (c_uint32 * 8192)(), (c_int32 * 8192)(), (c_uint64 * 8192)()
+        while n := _check(lib().mds_callcounts_take_ov(self.id, _cpu(cpu), e, o, h, 8192)):
+            for i in range(n):
+                counts[(e[i], o[i])] = counts.get((e[i], o[i]), 0) + h[i]
+        return counts
+
+    def take_coverage_ov(self, cpu=9):
+        """[(addr, overlay)] executed since overlay_tags(True), with coverage on; sorted."""
+        out, a, o = [], (c_uint32 * 65536)(), (c_int32 * 65536)()
+        while n := _check(lib().mds_coverage_take_ov(self.id, _cpu(cpu), a, o, 65536)):
+            out.extend(zip(a[:n], o[:n]))
         return out

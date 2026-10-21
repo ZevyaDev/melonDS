@@ -1,4 +1,4 @@
-"""Render control (API level 7, feature/render-control): mds_set_render skips 2D / 3D drawing, mds_set_threaded_3d
+"""Render control (API level 8, feature/render-control): mds_set_render skips 2D / 3D drawing, mds_set_threaded_3d
 draws 3D on its own thread, mds_render_stats reports both. Neither may change emulated state (RAM, VRAM, the whole
 savestate) or, once drawing is back on long enough, the screen.
 
@@ -140,7 +140,7 @@ def run_scene(skip=0, threaded=False, capture=no_capture, draw_from=None, state=
 
 class Level7Features(unittest.TestCase):
     def test_version_and_features(self):
-        self.assertGreaterEqual(native.api_version(), 7)
+        self.assertGreaterEqual(native.api_version(), 8)
         for name in ("render_skip", "threaded_3d", "render_stats", "mds_set_render", "mds_set_threaded_3d",
                      "mds_render_stats"):
             with self.subTest(name):

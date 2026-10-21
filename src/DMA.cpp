@@ -600,7 +600,7 @@ void DMA::Run9()
             u16 val = NDS.ARM9Read16(CurSrcAddr);
             NDS.ARM9Write16(CurDstAddr, val);
             if (NDS.Debugger.DataArmed[0])
-                NDS.Debugger.OnDMA(0, Num, CurDstAddr, 2, val);
+                NDS.Debugger.OnDMA(0, Num, CurSrcAddr, CurDstAddr, 2, val);
 
             CurSrcAddr += SrcAddrInc<<1;
             CurDstAddr += DstAddrInc<<1;
@@ -620,7 +620,7 @@ void DMA::Run9()
             u32 val = NDS.ARM9Read32(CurSrcAddr);
             NDS.ARM9Write32(CurDstAddr, val);
             if (NDS.Debugger.DataArmed[0])
-                NDS.Debugger.OnDMA(0, Num, CurDstAddr, 4, val);
+                NDS.Debugger.OnDMA(0, Num, CurSrcAddr, CurDstAddr, 4, val);
 
             CurSrcAddr += SrcAddrInc<<2;
             CurDstAddr += DstAddrInc<<2;
@@ -682,7 +682,7 @@ void DMA::Run7()
             u16 val = NDS.ARM7Read16(CurSrcAddr);
             NDS.ARM7Write16(CurDstAddr, val);
             if (NDS.Debugger.DataArmed[1])
-                NDS.Debugger.OnDMA(1, Num, CurDstAddr, 2, val);
+                NDS.Debugger.OnDMA(1, Num, CurSrcAddr, CurDstAddr, 2, val);
 
             CurSrcAddr += SrcAddrInc<<1;
             CurDstAddr += DstAddrInc<<1;
@@ -702,7 +702,7 @@ void DMA::Run7()
             u32 val = NDS.ARM7Read32(CurSrcAddr);
             NDS.ARM7Write32(CurDstAddr, val);
             if (NDS.Debugger.DataArmed[1])
-                NDS.Debugger.OnDMA(1, Num, CurDstAddr, 4, val);
+                NDS.Debugger.OnDMA(1, Num, CurSrcAddr, CurDstAddr, 4, val);
 
             CurSrcAddr += SrcAddrInc<<2;
             CurDstAddr += DstAddrInc<<2;

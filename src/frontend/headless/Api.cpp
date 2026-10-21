@@ -256,7 +256,7 @@ int mds_has(const char* name)
         "point_lua_tag",        // mds_point_list flags MDS_POINT_LUA on Lua hooks; mds_point_remove refuses them
         "point_count",          // mds_point_count: the total mds_point_list has to list
         "gdb_reset_event",      // a GDB restart queues an MDS_BREAK_RESET event (socket: a break event); mds_reset_count
-        // API level 7 (feature/render-control)
+        // API level 8 (feature/render-control)
         "render_skip",          // mds_set_render: skip 2D / 3D drawing; capture-safe; applied at the next frame boundary
         "threaded_3d",          // mds_set_threaded_3d: the soft 3D renderer on its own thread
         "render_stats",         // mds_render_stats: the settings in force and the skip counters
@@ -277,6 +277,8 @@ int mds_has(const char* name)
     for (const char* f : Functions)
         if (n == f)
             return 1;
+    if (Headless::Api::ProbeFeature(n))    // probes, memlog, bp_actions, overlay_tags (ApiProbes.cpp)
+        return 1;
     // every function of API level 1 is still exported
     return n.rfind("mds_", 0) == 0 && Level1Function(n) ? 1 : 0;
 }
@@ -1518,6 +1520,11 @@ void SetConsoleHooks(std::function<void(Instance&)> created, std::function<void(
     std::lock_guard lock(HookLock);
     CreatedHook = std::move(created);
     DestroyedHook = std::move(destroyed);
+}
+
+void SetError(const std::string& error)
+{
+    LastError = error;
 }
 
 void ReadGuest(Instance& inst, int cpu, uint32_t addr, uint32_t len, uint8_t* out)

@@ -86,6 +86,8 @@ add_library(core STATIC
     blip-buf/blip_buf.c
 
     debug/Debugger.cpp
+    debug/Probes.cpp
+    debug/OverlayMatch.cpp
     debug/DwarfLines.cpp
     debug/RomOverlays.cpp
     debug/RomOverlaysNDS.cpp)
