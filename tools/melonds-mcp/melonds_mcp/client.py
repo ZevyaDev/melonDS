@@ -101,7 +101,8 @@ EVENT_NAMES = {T.frame: "frame", T.break_: "break", T.lua_output: "lua_output",
 ERROR_CODES = {1: "bad_message", 2: "unknown_type", 3: "no_console", 4: "busy", 5: "console_running",
                6: "input_queue_full", 7: "bad_payload", 8: "bad_option", 9: "jit_on", 10: "not_supported",
                11: "internal", 12: "failed"}
-BREAK_KINDS = ["exec", "read", "write", "step", "request", "fault"]
+# "reset" (API level 6) is not a park: a GDB client reset the running console or one CPU
+BREAK_KINDS = ["exec", "read", "write", "step", "request", "fault", "reset"]
 POINT_LUA = 0x100       # point flags: a Lua memory hook (server API level 6); point_remove refuses it
 
 

@@ -16,6 +16,7 @@
     with melonDS. If not, see http://www.gnu.org/licenses/.
 */
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -160,6 +161,7 @@ Instance::Instance(int id, const Config& config, std::string& error) : ID(id)
     NDS->SetInputTimeline(&TouchLine);
     NDS->SetSavestateExtra([this](Savestate* file) { return DoSavestateExtra(file); });
     NDS->Debugger.SetBreakHandler([this](const BreakEvent& ev) { Park(ev); });
+    NDS->Debugger.ResetHandler = [this](u8 cpu, bool console) { OnGdbReset(cpu, console); };
     Network().RegisterInstance(ID);
     Lua = std::make_unique<LuaHost>(*this);
 
@@ -192,6 +194,7 @@ Instance::~Instance()
     }
     Commands.Shutdown();
     NDS->Debugger.SetBreakHandler(nullptr);
+    NDS->Debugger.ResetHandler = nullptr;
     Cond.notify_all();
     if (Thread.joinable())
         Thread.join();
@@ -246,6 +249,7 @@ void Instance::Reset()
     NDS->Start();
     FramesRun = 0;
     EmuFrame = 0;
+    Resets++;
     Input.Reset();
     TouchLine.Reset();
     Mic.Clear();
@@ -271,7 +275,7 @@ void Instance::Start(u32 frames)
         if (State == RunState::Running)
             return;
         FramesLeft = frames;
-        BreakPending = false;
+        DropParkEvents();
         State = RunState::Running;
     }
     Cond.notify_all();
@@ -340,11 +344,45 @@ bool Instance::WaitingForInput()
 bool Instance::TakeBreak(BreakEvent& out)
 {
     std::lock_guard lock(Lock);
-    if (!BreakPending)
+    if (Breaks.empty())
         return false;
-    out = LastBreak;
-    BreakPending = false;
+    out = Breaks.front();
+    Breaks.pop_front();
     return true;
+}
+
+void Instance::DropParkEvents()
+{
+    Breaks.erase(std::remove_if(Breaks.begin(), Breaks.end(),
+                                [](const BreakEvent& e) { return e.Kind != BreakKind::Reset; }),
+                 Breaks.end());
+}
+
+// A GDB client reset the console (vRun, R, r) or one CPU ("monitor reset") on the emulator thread, inside a frame,
+// while the console runs. Queue a reset event for mds_take_break (the socket server forwards it as a break event)
+// and count it. A whole-console reset restarts the emulated frame count, as mds_reset does; the input queue, the
+// process frame count (mds_frames) and the cheat list are kept.
+void Instance::OnGdbReset(u8 cpu, bool console)
+{
+    BreakEvent ev {};
+    ev.Kind = BreakKind::Reset;
+    ev.CPU = cpu & 1;
+    ev.PC = NextInstruction(cpu & 1 ? (ARM&)*NDS->ARM7 : (ARM&)*NDS->ARM9);
+    ev.Value = console ? 1 : 0;
+    if (console)
+    {
+        EmuFrame = 0;
+        Lua->OnReset();
+    }
+    {
+        std::lock_guard lock(Lock);
+        auto isReset = [](const BreakEvent& e) { return e.Kind == BreakKind::Reset; };
+        if (std::count_if(Breaks.begin(), Breaks.end(), isReset) >= 64)     // keep the newest 64
+            Breaks.erase(std::find_if(Breaks.begin(), Breaks.end(), isReset));
+        Breaks.push_back(ev);
+    }
+    Resets++;
+    Cond.notify_all();
 }
 
 bool Instance::Call(const std::function<void(Instance&)>& fn)
@@ -538,8 +576,8 @@ void Instance::Park(const BreakEvent& ev)
     std::unique_lock lock(Lock);
     if (Quit)
         return;
-    LastBreak = ev;
-    BreakPending = true;
+    DropParkEvents();       // only the latest park is reported; reset events before it stay
+    Breaks.push_back(ev);
     ParkedWith = ev;
     ParkedR15 = {NDS->ARM9->R[15], NDS->ARM7->R[15]};
     State = RunState::Parked;

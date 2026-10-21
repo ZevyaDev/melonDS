@@ -39,6 +39,12 @@ enum
     MDS_PARKED = 2,
 };
 
+// mds_break.kind: 0 exec, 1 read, 2 write, 3 step, 4 request, 5 fault, MDS_BREAK_RESET.
+// MDS_BREAK_RESET (API level 6) is not a park: a GDB client reset the running console (value 1: vRun, R, r) or one
+// CPU (value 0: "monitor reset"); cpu is the stub's CPU and pc that CPU's next instruction after the reset. Reset
+// events queue (up to 64) ahead of the one park event mds_take_break keeps, and mds_start/mds_run do not drop them.
+#define MDS_BREAK_RESET 6
+
 typedef struct
 {
     int32_t kind;
@@ -134,6 +140,9 @@ MDS_API int mds_take_break(int id, mds_break* out);
 // Frames run since the last reset or ROM load, or MDS_FRAMES_ERROR for an unknown id (API level 6; it was 0).
 #define MDS_FRAMES_ERROR UINT64_MAX
 MDS_API uint64_t mds_frames(int id);
+// How many times the console has been reset (API level 6): mds_reset, mds_load_rom and GDB restarts (each of which
+// also queues an MDS_BREAK_RESET event). mds_frames does not restart at a GDB restart. -1 for an unknown id.
+MDS_API int mds_reset_count(int id);
 
 // Reference: docs/headless-api.md, section 3 (input queue, touch timeline, mic, input log).
 typedef struct

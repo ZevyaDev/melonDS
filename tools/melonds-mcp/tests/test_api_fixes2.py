@@ -3,17 +3,18 @@ is its next instruction, mds_write writes the regions the ARM9 bus refuses bytes
 packets longer than the buffer cannot block mds_packets_take, unknown consoles are errors for mds_frames and
 mds_destroy, Lua hooks are tagged and protected in the point list (with a total count), and a GDB restart is an
 event the C API sees."""
-import ctypes
 import time
 import unittest
-from ctypes import c_int, c_uint8
+from ctypes import c_uint8
 
 from melonds_mcp import native
+from melonds_mcp.client import Client
 from melonds_mcp.native import MelonError
 
 from . import armasm as A
 from .base import CODE7, CODE9, DATA, ConsoleTest
-from .test_api_fixes import adds, dma_program
+from .test_api_fixes import adds, dma_program, free_port
+from .test_gdb_overlays import Rsp, monitor
 
 
 def spin(base):
@@ -354,6 +355,111 @@ class PointList(ConsoleTest):
         self.assertEqual(lib.mds_point_list(self.c.id, buf, 4), 4)    # still the number copied
         self.assertEqual(len(self.c.points()), 11)
         self.assertEqual(lib.mds_point_count(9999), -1)
+
+
+class GdbResetEvent(ConsoleTest):
+    """A GDB restart resets the console on the emulator thread while it runs: the C API gets a "reset" event
+    (it was not told at all) and the reset counter goes up; the socket server forwards the event."""
+
+    def setUp(self):
+        super().setUp()
+        self.load_program(spin(CODE9))
+        self.p9, self.p7 = free_port(), free_port()
+        self.c.gdb(self.p9, self.p7)
+        self.c.start()
+        self.addCleanup(self.stop)
+
+    def stop(self):
+        self.c.stop_after(0)
+        self.c.wait(10000)
+        self.c.gdb(0, 0)
+
+    def connect(self):
+        deadline = time.time() + 10
+        while True:
+            try:
+                return Rsp(self.p9)
+            except OSError:
+                if time.time() > deadline:
+                    raise
+                time.sleep(0.05)
+
+    def wait_break(self, timeout=10):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            b = self.c.take_break()
+            if b:
+                return b
+            time.sleep(0.01)
+        return None
+
+    def test_vrun_queues_a_reset_event(self):
+        self.assertEqual(self.c.reset_count(), 1)            # setUp's reset()
+        rsp = self.connect()
+        try:
+            rsp.interrupt()
+            self.assertEqual(rsp.command(b"!")[0][-1], b"OK")
+            replies, _ = rsp.command(b"vRun;")
+            self.assertTrue(replies[-1].startswith((b"S", b"T")), replies)
+            self.assertEqual(rsp.command(b"D")[0][-1], b"OK")
+        finally:
+            rsp.close()
+        b = self.wait_break()
+        self.assertIsNotNone(b)
+        self.assertEqual((b.kind, b.cpu, b.value), ("reset", 9, 1))
+        self.assertEqual(self.c.reset_count(), 2)
+        self.assertEqual(self.c.state, native.RUNNING)      # not a park
+
+    def test_monitor_reset_is_a_cpu_reset(self):
+        rsp = self.connect()
+        try:
+            rsp.interrupt()
+            _, final = monitor(rsp, "reset")
+            self.assertEqual(final, b"OK")
+            self.assertEqual(rsp.command(b"D")[0][-1], b"OK")
+        finally:
+            rsp.close()
+        b = self.wait_break()
+        self.assertEqual((b.kind, b.cpu, b.value), ("reset", 9, 0))
+        self.assertEqual(b.pc, 0xFFFF0000)                   # the ARM9 reset vector
+        self.assertEqual(self.c.reset_count(), 2)
+
+    def test_reset_events_survive_a_start_and_precede_a_park(self):
+        rsp = self.connect()
+        try:
+            rsp.interrupt()
+            monitor(rsp, "reset")
+            self.assertEqual(rsp.command(b"D")[0][-1], b"OK")
+        finally:
+            rsp.close()
+        deadline = time.time() + 10
+        while self.c.reset_count() < 2:
+            self.assertLess(time.time(), deadline)
+            time.sleep(0.01)
+        self.c.interrupt()
+        self.c.wait(10000)
+        self.c.start()                                       # drops the park event, keeps the reset
+        self.c.interrupt()
+        self.assertEqual(self.c.wait(10000)[1], [native.PARKED])
+        self.assertEqual([self.c.take_break().kind, self.c.take_break().kind], ["reset", "request"])
+        self.assertIsNone(self.c.take_break())
+
+    def test_socket_server_forwards_the_event(self):
+        port = native.serve(0)
+        self.addCleanup(native.serve_stop)
+        cl = Client(port, timeout=20)
+        self.addCleanup(cl.close)
+        cl.hello()
+        rsp = self.connect()
+        try:
+            rsp.interrupt()
+            monitor(rsp, "reset")
+            self.assertEqual(rsp.command(b"D")[0][-1], b"OK")
+        finally:
+            rsp.close()
+        ev = cl.next_event("break", timeout=10)
+        self.assertIsNotNone(ev)
+        self.assertEqual((ev.what, ev.kind_id, ev.cpu, ev.value), ("reset", 6, 9, 0))
 
 
 if __name__ == "__main__":

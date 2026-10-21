@@ -10,7 +10,8 @@ from datetime import datetime
 from pathlib import Path
 
 IDLE, RUNNING, PARKED = 0, 1, 2
-BREAK_KINDS = ["exec", "read", "write", "step", "request", "fault"]
+# "reset" (API level 6) is not a park: a GDB client reset the running console or one CPU
+BREAK_KINDS = ["exec", "read", "write", "step", "request", "fault", "reset"]
 KEYS = ["A", "B", "Select", "Start", "Right", "Left", "Up", "Down", "R", "L", "X", "Y"]
 WATCH_READ, WATCH_WRITE = 1, 2
 POINT_LUA = 0x100       # mds_point.flags: a Lua memory hook (API level 6)
@@ -193,6 +194,7 @@ _SIGNATURES |= {
 _SIGNATURES |= {
     "mds_debug_packet": (c_int, [c_int, c_int, c_int, POINTER(c_uint8), c_int]),
     "mds_point_count": (c_int, [c_int]),
+    "mds_reset_count": (c_int, [c_int]),
 }
 
 
@@ -475,7 +477,13 @@ class Console:
         b = MdsBreak()
         if _check(lib().mds_take_break(self.id, ctypes.byref(b))) == 0:
             return None
-        return Break(BREAK_KINDS[b.kind], b.cpu, b.pc, b.addr, b.value, b.size, b.id, b.dma)
+        kind = BREAK_KINDS[b.kind] if 0 <= b.kind < len(BREAK_KINDS) else str(b.kind)
+        return Break(kind, b.cpu, b.pc, b.addr, b.value, b.size, b.id, b.dma)
+
+    def reset_count(self):
+        """How many times the console was reset: reset(), load_rom() and GDB restarts (API level 6). A GDB restart
+        also queues a Break of kind "reset" (value 1 for the whole console, 0 for one CPU) for take_break()."""
+        return _check(lib().mds_reset_count(self.id))
 
     def screen(self):
         buf = (c_uint32 * (256 * 384))()

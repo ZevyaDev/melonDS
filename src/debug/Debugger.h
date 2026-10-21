@@ -45,6 +45,9 @@ enum class BreakKind : u8
     Step,
     Request,
     Fault,
+    // Not a park: a GDB client reset the console or a CPU (ResetHandler). Frontends that queue break events
+    // report it; the console keeps running.
+    Reset,
 };
 
 enum class StepMode : u8
@@ -228,6 +231,9 @@ public:
 
     std::array<u32, 2> CurPC {};
     std::function<void(u32 cpu, const char* text, bool newline)> PrintHandler;
+    // Called on the emulator thread after the GDB stub of CPU cpu has reset the whole console (vRun, R, r;
+    // console = true) or only that CPU ("monitor reset"; console = false).
+    std::function<void(u8 cpu, bool console)> ResetHandler;
 
 private:
     melonDS::NDS& NDS;

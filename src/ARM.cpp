@@ -1141,6 +1141,8 @@ void ARM::ResetGdb()
 {
     NDS.Restart();
     NDS.GPU.StartFrame(); // need this to properly kick off the scheduler & frame output
+    if (NDS.Debugger.ResetHandler)
+        NDS.Debugger.ResetHandler(Num, true);
 }
 int ARM::RemoteCmd(const u8* cmd, size_t len, std::string& out)
 {
@@ -1150,6 +1152,8 @@ int ARM::RemoteCmd(const u8* cmd, size_t len, std::string& out)
     if (!strcmp((const char*)cmd, "reset") || !strcmp((const char*)cmd, "r"))
     {
         Reset();
+        if (NDS.Debugger.ResetHandler)
+            NDS.Debugger.ResetHandler(Num, false);
         return 0;
     }
     if (!strcmp((const char*)cmd, "overlays"))

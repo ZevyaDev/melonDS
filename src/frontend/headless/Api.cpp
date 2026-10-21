@@ -254,12 +254,13 @@ int mds_has(const char* name)
         "unknown_id_errors",    // mds_frames returns MDS_FRAMES_ERROR and mds_destroy -1 for an unknown id
         "point_lua_tag",        // mds_point_list flags MDS_POINT_LUA on Lua hooks; mds_point_remove refuses them
         "point_count",          // mds_point_count: the total mds_point_list has to list
+        "gdb_reset_event",      // a GDB restart queues an MDS_BREAK_RESET event (socket: a break event); mds_reset_count
     };
     static const char* const Functions[] = {
         "mds_has", "mds_serve_host", "mds_gdb_host", "mds_lastwriter_query",
         "mds_cheat_add", "mds_cheat_remove", "mds_cheat_enable", "mds_cheat_clear", "mds_cheat_list",
         "mds_cheat_get", "mds_threadstacks", "mds_overlays",
-        "mds_debug_packet", "mds_point_count",
+        "mds_debug_packet", "mds_point_count", "mds_reset_count",
     };
     if (!name)
         return 0;
@@ -569,6 +570,12 @@ uint64_t mds_frames(int id)
 {
     Slot* s = Find(id);
     return s ? s->Inst->FramesRun : MDS_FRAMES_ERROR;
+}
+
+int mds_reset_count(int id)
+{
+    Slot* s = Find(id);
+    return s ? (int)s->Inst->Resets.load() : -1;
 }
 
 int mds_screen(int id, uint32_t* out)

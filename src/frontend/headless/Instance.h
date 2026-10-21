@@ -20,6 +20,7 @@
 #define HEADLESS_INSTANCE_H
 
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -128,6 +129,10 @@ public:
     // True while the emulator thread is blocked at a frame boundary in Wait mode.
     bool WaitingForInput();
 
+    // Resets of the console: mds_reset, mds_load_rom, and GDB restarts (whole console or one CPU).
+    std::atomic<melonDS::u32> Resets {0};
+    void OnGdbReset(melonDS::u8 cpu, bool console);
+
     melonDS::u64 FramesRun = 0;
     // Frames since the last reset as the emulated console sees them: savestates carry it (FramesRun stays the
     // process's count). Seeds the level-mic noise, so a frame gets the same noise with or without a load.
@@ -149,11 +154,12 @@ private:
     RunState State = RunState::Idle;
     melonDS::u32 FramesLeft = 0;
     bool Quit = false;
-    bool BreakPending = false;
     bool Waiting = false;           // blocked for input (guarded by Lock)
     bool WaitInterrupt = false;     // Interrupt() arrived while Waiting
     bool BarrierEvent = false;      // a barrier partner arrived, dropped out or entered a wireless receive
-    melonDS::BreakEvent LastBreak {};
+    // Undelivered events for mds_take_break, oldest first: at most one park (the latest) and GDB reset events.
+    std::deque<melonDS::BreakEvent> Breaks;
+    void DropParkEvents();
     melonDS::BreakEvent ParkedWith {};
     std::array<melonDS::u32, 2> ParkedR15 {};
 

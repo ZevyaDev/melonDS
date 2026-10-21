@@ -728,6 +728,8 @@ QString DebuggerWindow::describeBreak(const BreakEvent& ev) const
         return QString("%1 break at %2").arg(cpuName).arg(where);
     case BreakKind::Fault:
         return QString("%1 fault at %2, address 0x%3").arg(cpuName).arg(where).arg(Hex(ev.Addr));
+    case BreakKind::Reset:      // headless only: the Qt frontend sets no ResetHandler
+        return QString("%1 reset by GDB").arg(cpuName);
     }
     return QString();
 }
