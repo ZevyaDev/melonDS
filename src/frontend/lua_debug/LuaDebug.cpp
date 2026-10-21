@@ -347,6 +347,50 @@ static int SetRegister(lua_State* L)
     return 0;
 }
 
+static int NamedCPU(lua_State* L, int idx)
+{
+    std::string s = lua_tostring(L, idx);
+    for (auto& c : s)
+        c = tolower(c);
+    if (s.find("arm7") != std::string::npos || s == "sub")
+        return 1;
+    if (s.find("arm9") != std::string::npos || s == "main" || s == "main ram" || s == "system bus")
+        return 0;
+    return luaL_argerror(L, idx, "cpu must be \"arm9\" or \"arm7\"");
+}
+
+static int Execute(lua_State* L)
+{
+    std::vector<u32> ops;
+    int cpu = -1;
+    for (int i = 1; i <= lua_gettop(L); i++)
+    {
+        if (lua_type(L, i) == LUA_TSTRING)
+            cpu = NamedCPU(L, i);
+        else if (lua_istable(L, i))
+            for (lua_Integer k = 1, len = luaL_len(L, i); k <= len; k++)
+            {
+                lua_geti(L, i, k);
+                ops.push_back((u32)luaL_checkinteger(L, -1));
+                lua_pop(L, 1);
+            }
+        else
+            ops.push_back((u32)luaL_checkinteger(L, i));
+    }
+    if (ops.empty())
+        return luaL_argerror(L, 1, "no instructions");
+    ExecResult result = ExecResult::Refused;
+    Exec(L, [&](melonDS::NDS& nds) {
+        int hooked = nds.Debugger.HookedCPU();
+        if (hooked >= 0 && (cpu < 0 || cpu == hooked))
+            result = nds.Debugger.Execute(hooked, ops);
+    });
+    if (result == ExecResult::Refused)
+        return luaL_error(L, "memory.execute runs only inside an exec hook or at a break, on that CPU, with JIT off");
+    lua_pushboolean(L, result == ExecResult::Branched);
+    return 1;
+}
+
 static void PushFrames(lua_State* L, const std::vector<CallFrame>& stack)
 {
     lua_createtable(L, stack.size(), 0);
@@ -816,6 +860,10 @@ void Register(lua_State* L, Host host)
         {"setregister", SetRegister},
         {nullptr, nullptr},
     };
+    static const luaL_Reg memoryFuncs[] = {
+        {"execute", Execute},
+        {nullptr, nullptr},
+    };
     static const luaL_Reg debugFuncs[] = {
         {"callstack", CallStack},
         {"threadstacks", ThreadStacks},
@@ -841,6 +889,7 @@ void Register(lua_State* L, Host host)
     };
     SetFuncs(L, "event", eventFuncs);
     SetFuncs(L, "emu", emuFuncs);
+    SetFuncs(L, "memory", memoryFuncs);
     SetFuncs(L, "debugger", debugFuncs);
     SetFuncs(L, "wifi", wifiFuncs);
 }

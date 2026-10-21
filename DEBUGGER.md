@@ -120,6 +120,15 @@ Memory hooks run on the emulator thread at the instruction that hit them, so `em
 there is exact. `gui`, `forms`, `input`, `client`, `savestate` and `console` are refused inside a
 hook: set a variable there and act on it in `_Update`.
 
+In an exec hook, `memory.execute(op, ...)` (opcodes as numbers or one table, ARM or Thumb by the
+current state, a Thumb BL as one 32-bit value) runs those instructions as if they sat in front of
+the hooked one, with PC reading as it would there. It returns `true` when one of them branched: the
+hooked instruction is skipped and execution continues at the target, so `memory.execute(0xE12FFF1E)`
+(`bx lr`, `0x4770` in Thumb) at a function's entry makes it return at once. A call (`bl`, `blx`,
+`swi`) returns to the hooked instruction. Otherwise the hooked instruction runs next. Code written
+from a hook with `memory.write*` takes effect on the instruction about to run, and setting `pc` or
+the T bit with `emu.setregister` or DeSmuME's `memory.setregister` jumps there. It needs JIT off.
+
 DeSmuME scripts run unchanged: `emu` (`frameadvance`, `registerbefore`, `registerafter`,
 `emulateframe`, `framecount`, `lagcount`, `lagged`, ...), `memory` (`readbyte` to `readdwordsigned`,
 `readbyterange`, `write*`, `getregister`, `setregister`, `registerwrite`, `registerread`,
