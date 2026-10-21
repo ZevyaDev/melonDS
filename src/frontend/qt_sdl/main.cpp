@@ -287,7 +287,8 @@ int main(int argc, char** argv)
 #if defined(_WIN32)
 #if QT_VERSION_MAJOR == 6
     // Allow using the system dark theme palette on Windows
-    qputenv("QT_QPA_PLATFORM", "windows:darkmode=2");
+    if (!qEnvironmentVariableIsSet("QT_QPA_PLATFORM"))
+        qputenv("QT_QPA_PLATFORM", "windows:darkmode=2");
 #endif
 
     // argc and argv are passed as UTF8 by SDL's WinMain function
@@ -335,6 +336,11 @@ int main(int argc, char** argv)
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
 
     SDL_SetHint(SDL_HINT_APP_NAME, "melonDS");
+
+#ifdef MELONDS_AUTOMATION
+    if (qEnvironmentVariableIsSet("MELONDS_AUTOMATION"))
+        qputenv("SDL_AUDIODRIVER", "dummy");
+#endif
 
     if (SDL_Init(SDL_INIT_HAPTIC) < 0)
     {
