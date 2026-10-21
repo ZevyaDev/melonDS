@@ -359,21 +359,88 @@ static int SetRegister(lua_State* L)
     return 0;
 }
 
+static int NamedCPU(lua_State* L, int idx)
+{
+    std::string s = lua_tostring(L, idx);
+    for (auto& c : s)
+        c = tolower(c);
+    if (s.find("arm7") != std::string::npos || s == "sub")
+        return 1;
+    if (s.find("arm9") != std::string::npos || s == "main" || s == "main ram" || s == "system bus")
+        return 0;
+    return luaL_argerror(L, idx, "cpu must be \"arm9\" or \"arm7\"");
+}
+
+static int Execute(lua_State* L)
+{
+    std::vector<u32> ops;
+    int cpu = -1;
+    for (int i = 1; i <= lua_gettop(L); i++)
+    {
+        if (lua_type(L, i) == LUA_TSTRING)
+            cpu = NamedCPU(L, i);
+        else if (lua_istable(L, i))
+            for (lua_Integer k = 1, len = luaL_len(L, i); k <= len; k++)
+            {
+                lua_geti(L, i, k);
+                ops.push_back((u32)luaL_checkinteger(L, -1));
+                lua_pop(L, 1);
+            }
+        else
+            ops.push_back((u32)luaL_checkinteger(L, i));
+    }
+    if (ops.empty())
+        return luaL_argerror(L, 1, "no instructions");
+    ExecResult result = ExecResult::Refused;
+    Exec(L, [&](melonDS::NDS& nds) {
+        int hooked = nds.Debugger.HookedCPU();
+        if (hooked >= 0 && (cpu < 0 || cpu == hooked))
+            result = nds.Debugger.Execute(hooked, ops);
+    });
+    if (result == ExecResult::Refused)
+        return luaL_error(L, "memory.execute runs only inside an exec hook or at a break, on that CPU, with JIT off");
+    lua_pushboolean(L, result == ExecResult::Branched);
+    return 1;
+}
+
+static void PushFrames(lua_State* L, const std::vector<CallFrame>& stack)
+{
+    lua_createtable(L, stack.size(), 0);
+    for (size_t i = 0; i < stack.size(); i++)
+    {
+        const CallFrame& f = stack[stack.size() - 1 - i];
+        lua_createtable(L, 0, 6);
+        lua_pushinteger(L, f.Entry); lua_setfield(L, -2, "entry");
+        lua_pushinteger(L, f.Site); lua_setfield(L, -2, "site");
+        lua_pushinteger(L, f.Return); lua_setfield(L, -2, "ret");
+        lua_pushinteger(L, f.SP); lua_setfield(L, -2, "sp");
+        lua_pushinteger(L, f.Mode); lua_setfield(L, -2, "mode");
+        lua_pushboolean(L, f.Exception); lua_setfield(L, -2, "exception");
+        lua_rawseti(L, -2, i + 1);
+    }
+}
+
 static int CallStack(lua_State* L)
 {
     NeedDebugger(L);
     int cpu = CPUArg(L, 1, 0);
     std::vector<CallFrame> stack;
     Exec(L, [&](melonDS::NDS& nds) { stack = nds.Debugger.GetCallStack(cpu); });
-    lua_createtable(L, stack.size(), 0);
-    for (size_t i = 0; i < stack.size(); i++)
+    PushFrames(L, stack);
+    return 1;
+}
+
+static int ThreadStacks(lua_State* L)
+{
+    int cpu = CPUArg(L, 1, 0);
+    std::vector<std::pair<u32, std::vector<CallFrame>>> threads;
+    Exec(L, [&](melonDS::NDS& nds) { threads = nds.Debugger.GetThreadStacks(cpu); });
+    lua_createtable(L, threads.size(), 0);
+    for (size_t i = 0; i < threads.size(); i++)
     {
-        const CallFrame& f = stack[stack.size() - 1 - i];
-        lua_createtable(L, 0, 4);
-        lua_pushinteger(L, f.Entry); lua_setfield(L, -2, "entry");
-        lua_pushinteger(L, f.Site); lua_setfield(L, -2, "site");
-        lua_pushinteger(L, f.Return); lua_setfield(L, -2, "ret");
-        lua_pushboolean(L, f.Exception); lua_setfield(L, -2, "exception");
+        lua_createtable(L, 0, 2);
+        lua_pushinteger(L, threads[i].first); lua_setfield(L, -2, "sp");
+        PushFrames(L, threads[i].second); lua_setfield(L, -2, "frames");
         lua_rawseti(L, -2, i + 1);
     }
     return 1;
@@ -525,6 +592,270 @@ static int Peek(lua_State* L)
     return 1;
 }
 
+static bool CallWifiHook(Context* ctx, int ref, WifiFrame& frame)
+{
+    Acquire(ctx);
+    std::lock_guard lock(ctx->Lock, std::adopt_lock);
+    lua_State* L = ctx->L;
+    if (!L)
+        return true;
+    lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+    lua_createtable(L, 0, 5);
+    lua_pushboolean(L, frame.TX); lua_setfield(L, -2, "tx");
+    lua_pushlstring(L, (const char*)frame.Data.data(), frame.Data.size()); lua_setfield(L, -2, "data");
+    lua_pushinteger(L, frame.Rate == 0x14 ? 2 : 1); lua_setfield(L, -2, "rate");
+    lua_pushinteger(L, frame.Channel); lua_setfield(L, -2, "channel");
+    lua_pushinteger(L, frame.Timestamp); lua_setfield(L, -2, "time");
+    if (lua_pcall(L, 1, 1, 0) != LUA_OK)
+    {
+        ctx->H.Print(std::string("lua: ") + lua_tostring(L, -1));
+        lua_pop(L, 1);
+        return true;
+    }
+    bool keep = true;
+    if (lua_type(L, -1) == LUA_TBOOLEAN)
+        keep = lua_toboolean(L, -1);
+    else if (lua_type(L, -1) == LUA_TSTRING)
+    {
+        size_t n;
+        const char* s = lua_tolstring(L, -1, &n);
+        frame.Data.assign(s, s + n);
+    }
+    lua_pop(L, 1);
+    return keep;
+}
+
+static int WifiHook(lua_State* L)
+{
+    luaL_checktype(L, 1, LUA_TFUNCTION);
+    std::string name = luaL_optstring(L, 2, "");
+    ContextPtr ctx = *Owner(L);
+    lua_pushvalue(L, 1);
+    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    WifiCallback cb = [ctx, ref](WifiFrame& frame) { return CallWifiHook(ctx.get(), ref, frame); };
+    int id = -1;
+    Exec(L, [&](melonDS::NDS& nds) { id = nds.Debugger.AddWifiHook(cb); });
+    ctx->Hooks.push_back({id, ref, name, false, &Console(L)});
+    lua_pushinteger(L, id);
+    return 1;
+}
+
+static int WifiInject(lua_State* L)
+{
+    size_t n;
+    const char* s = luaL_checklstring(L, 1, &n);
+    u8 rate = luaL_optinteger(L, 2, 2) == 1 ? 0x0A : 0x14;
+    std::vector<u8> data(s, s + n);
+    Exec(L, [&](melonDS::NDS& nds) { nds.Debugger.InjectWifi(std::move(data), rate); });
+    return 0;
+}
+
+static std::string MACString(const u8* p)
+{
+    char buf[18];
+    snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x", p[0], p[1], p[2], p[3], p[4], p[5]);
+    return buf;
+}
+
+static void SetBytes(lua_State* L, const char* field, const u8* p, size_t n)
+{
+    lua_pushlstring(L, (const char*)p, n);
+    lua_setfield(L, -2, field);
+}
+
+static void SetInt(lua_State* L, const char* field, lua_Integer v)
+{
+    lua_pushinteger(L, v);
+    lua_setfield(L, -2, field);
+}
+
+static void SetStr(lua_State* L, const char* field, const std::string& v)
+{
+    lua_pushstring(L, v.c_str());
+    lua_setfield(L, -2, field);
+}
+
+static void SetBool(lua_State* L, const char* field, bool v)
+{
+    lua_pushboolean(L, v);
+    lua_setfield(L, -2, field);
+}
+
+static void DecodeElements(lua_State* L, const u8* p, size_t n)
+{
+    lua_newtable(L);
+    int count = 0;
+    size_t at = 0;
+    while (at + 2 <= n && at + 2 + p[at + 1] <= n)
+    {
+        u8 id = p[at], len = p[at + 1];
+        const u8* d = p + at + 2;
+        lua_createtable(L, 0, 3);
+        SetInt(L, "id", id);
+        SetBytes(L, "data", d, len);
+        if (id == 221 && len >= 3)
+            SetStr(L, "oui", MACString(d).substr(0, 8));
+        lua_rawseti(L, -2, ++count);
+        if (id == 0)
+        {
+            lua_pushlstring(L, (const char*)d, len);
+            lua_setfield(L, -3, "ssid");
+        }
+        else if (id == 3 && len >= 1)
+        {
+            lua_pushinteger(L, d[0]);
+            lua_setfield(L, -3, "channel");
+        }
+        else if (id == 221 && len >= 3 && d[0] == 0x00 && d[1] == 0x09 && d[2] == 0xBF)
+        {
+            lua_pushlstring(L, (const char*)d + 3, len - 3);
+            lua_setfield(L, -3, "nintendo");
+        }
+        at += 2 + len;
+    }
+    lua_setfield(L, -2, "elements");
+}
+
+static int WifiDecode(lua_State* L)
+{
+    size_t n;
+    const u8* p = (const u8*)luaL_checklstring(L, 1, &n);
+    bool fcs = lua_isnoneornil(L, 2) || lua_toboolean(L, 2);
+    lua_newtable(L);
+    if (n < 10)
+        return 1;
+    u16 fc = p[0] | (p[1] << 8);
+    int type = (fc >> 2) & 3, subtype = (fc >> 4) & 0xF;
+    static const char* const types[] = {"mgmt", "ctrl", "data", "reserved"};
+    SetInt(L, "fc", fc);
+    SetStr(L, "type", types[type]);
+    SetInt(L, "subtype", subtype);
+    SetBool(L, "tods", fc & (1 << 8));
+    SetBool(L, "fromds", fc & (1 << 9));
+    SetBool(L, "morefrag", fc & (1 << 10));
+    SetBool(L, "retry", fc & (1 << 11));
+    SetBool(L, "pwrmgmt", fc & (1 << 12));
+    SetBool(L, "moredata", fc & (1 << 13));
+    SetBool(L, "protected", fc & (1 << 14));
+    SetBool(L, "order", fc & (1 << 15));
+    SetInt(L, "duration", p[2] | (p[3] << 8));
+    SetStr(L, "addr1", MACString(p + 4));
+    size_t end = fcs && n >= 4 ? n - 4 : n;
+    if (fcs && n >= 4)
+        SetInt(L, "fcs", p[n - 4] | (p[n - 3] << 8) | (p[n - 2] << 16) | ((u32)p[n - 1] << 24));
+    if (type == 1)
+    {
+        if ((subtype == 10 || subtype == 11 || subtype >= 14) && n >= 16)
+            SetStr(L, "addr2", MACString(p + 10));
+        SetStr(L, "kind", "ctrl");
+        return 1;
+    }
+    if (n < 24)
+        return 1;
+    SetStr(L, "addr2", MACString(p + 10));
+    SetStr(L, "addr3", MACString(p + 16));
+    u16 sc = p[22] | (p[23] << 8);
+    SetInt(L, "seq", sc >> 4);
+    SetInt(L, "frag", sc & 0xF);
+    size_t hdr = 24;
+    if ((fc & 0x300) == 0x300 && n >= 30)
+    {
+        SetStr(L, "addr4", MACString(p + 24));
+        hdr = 30;
+    }
+    const u8* b = p + hdr;
+    size_t blen = end > hdr ? end - hdr : 0;
+    auto u16at = [b](size_t o) { return (u16)(b[o] | (b[o + 1] << 8)); };
+    static const u8 mpcmd[6] = {0x03, 0x09, 0xBF, 0x00, 0x00, 0x00};
+    static const u8 mpreply[6] = {0x03, 0x09, 0xBF, 0x00, 0x00, 0x10};
+    static const u8 mpack[6] = {0x03, 0x09, 0xBF, 0x00, 0x00, 0x03};
+    if (type == 2 && !memcmp(p + 4, mpcmd, 6) && blen >= 4)
+    {
+        SetStr(L, "kind", "mpcmd");
+        SetInt(L, "clienttime", u16at(0));
+        SetInt(L, "clientmask", u16at(2));
+        SetBytes(L, "payload", b + 4, blen - 4);
+        return 1;
+    }
+    if (type == 2 && !memcmp(p + 4, mpack, 6) && blen >= 4)
+    {
+        SetStr(L, "kind", "mpack");
+        SetInt(L, "cmdcount", u16at(0));
+        SetInt(L, "clientfail", u16at(2));
+        return 1;
+    }
+    if (type == 2 && !memcmp(p + 16, mpreply, 6))
+    {
+        SetStr(L, "kind", "mpreply");
+        SetBytes(L, "payload", b, blen);
+        return 1;
+    }
+    if (type == 2)
+    {
+        SetStr(L, "kind", "data");
+        if ((fc & (1 << 14)) && blen >= 8)
+        {
+            SetInt(L, "iv", b[0] | (b[1] << 8) | (b[2] << 16));
+            SetInt(L, "keyid", b[3] >> 6);
+            SetBytes(L, "payload", b + 4, blen - 8);
+            SetInt(L, "icv", b[blen - 4] | (b[blen - 3] << 8) | (b[blen - 2] << 16) | ((u32)b[blen - 1] << 24));
+        }
+        else if (blen >= 8 && b[0] == 0xAA && b[1] == 0xAA && b[2] == 0x03)
+        {
+            SetStr(L, "oui", MACString(b + 3).substr(0, 8));
+            SetInt(L, "ethertype", (b[6] << 8) | b[7]);
+            SetBytes(L, "payload", b + 8, blen - 8);
+        }
+        else
+            SetBytes(L, "payload", b, blen);
+        return 1;
+    }
+    static const char* const mgmt[] = {"assocreq", "assocresp", "reassocreq", "reassocresp", "probereq", "proberesp",
+                                       "mgmt", "mgmt", "beacon", "atim", "disassoc", "auth", "deauth", "action", "mgmt", "mgmt"};
+    SetStr(L, "kind", mgmt[subtype]);
+    size_t ies = blen;
+    if ((subtype == 5 || subtype == 8) && blen >= 12)
+    {
+        u64 ts = 0;
+        for (int i = 7; i >= 0; i--)
+            ts = (ts << 8) | b[i];
+        SetInt(L, "timestamp", (lua_Integer)ts);
+        SetInt(L, "interval", u16at(8));
+        SetInt(L, "capability", u16at(10));
+        ies = 12;
+    }
+    else if ((subtype == 0 || subtype == 2) && blen >= 4)
+    {
+        SetInt(L, "capability", u16at(0));
+        SetInt(L, "listeninterval", u16at(2));
+        ies = subtype == 2 ? 10 : 4;
+    }
+    else if ((subtype == 1 || subtype == 3) && blen >= 6)
+    {
+        SetInt(L, "capability", u16at(0));
+        SetInt(L, "status", u16at(2));
+        SetInt(L, "aid", u16at(4) & 0x3FFF);
+        ies = 6;
+    }
+    else if (subtype == 4)
+        ies = 0;
+    else if (subtype == 11 && blen >= 6)
+    {
+        SetInt(L, "algorithm", u16at(0));
+        SetInt(L, "authseq", u16at(2));
+        SetInt(L, "status", u16at(4));
+        ies = 6;
+    }
+    else if ((subtype == 10 || subtype == 12) && blen >= 2)
+    {
+        SetInt(L, "reason", u16at(0));
+        ies = 2;
+    }
+    if (ies < blen)
+        DecodeElements(L, b + ies, blen - ies);
+    return 1;
+}
+
 static void SetFuncs(lua_State* L, const char* table, const luaL_Reg* funcs)
 {
     lua_getglobal(L, table);
@@ -560,8 +891,13 @@ void Register(lua_State* L, Host host)
         {"setregister", SetRegister},
         {nullptr, nullptr},
     };
+    static const luaL_Reg memoryFuncs[] = {
+        {"execute", Execute},
+        {nullptr, nullptr},
+    };
     static const luaL_Reg debugFuncs[] = {
         {"callstack", CallStack},
+        {"threadstacks", ThreadStacks},
         {"trackcalls", TrackCalls},
         {"callcounts", CallCounts},
         {"coverage", Coverage},
@@ -576,9 +912,17 @@ void Register(lua_State* L, Host host)
         {"peek", Peek},
         {nullptr, nullptr},
     };
+    static const luaL_Reg wifiFuncs[] = {
+        {"hook", WifiHook},
+        {"inject", WifiInject},
+        {"decode", WifiDecode},
+        {nullptr, nullptr},
+    };
     SetFuncs(L, "event", eventFuncs);
     SetFuncs(L, "emu", emuFuncs);
+    SetFuncs(L, "memory", memoryFuncs);
     SetFuncs(L, "debugger", debugFuncs);
+    SetFuncs(L, "wifi", wifiFuncs);
 }
 
 void Unregister(lua_State* L)

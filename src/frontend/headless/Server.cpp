@@ -1692,7 +1692,10 @@ void Server::DoSymbolsLoad(const P::Message& m)
     else
     {
         std::string error;
-        if (!inst->Symbols.load(s.Text, error))
+        // overlay images come from the running ROM, read on the emulator thread (no extract needed)
+        DebugSymbols::RomOverlays rom;
+        inst->Call([&](Instance& i) { rom = DebugSymbols::readRomOverlays(i.NDS.get()); });
+        if (!inst->Symbols.load(s.Text, error, &rom))
             return Error(uint16_t(id), s.Seq, P::ErrorCode::failed, error);
         if (auto set = inst->Symbols.set())
         {

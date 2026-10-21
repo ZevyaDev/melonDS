@@ -335,41 +335,25 @@ void DebugBridge::step(int cpu, u32 count)
     });
 }
 
-static u32 CallReturn(NDS& nds, int cpu, u32 pc, bool thumb)
-{
-    if (thumb)
-    {
-        u16 a = nds.Debugger.Peek(cpu, pc, 2);
-        if ((a & 0xF800) == 0xF000)
-        {
-            u16 b = nds.Debugger.Peek(cpu, pc + 2, 2);
-            if ((b & 0xE800) == 0xE800)
-                return pc + 4;
-        }
-        if ((a & 0xFF87) == 0x4780 || (a & 0xFF00) == 0xDF00)
-            return pc + 2;
-        return 0;
-    }
-    u32 i = nds.Debugger.Peek(cpu, pc, 4);
-    if ((i & 0xFE000000) == 0xFA000000)
-        return pc + 4;
-    if ((i >> 28) == 0xF)
-        return 0;
-    if ((i & 0x0F000000) == 0x0B000000 || (i & 0x0F000000) == 0x0F000000 || (i & 0x0FFFFFF0) == 0x012FFF30)
-        return pc + 4;
-    return 0;
-}
-
 void DebugBridge::stepOver(int cpu)
 {
     post([this, cpu](NDS& nds) {
         ARM& arm = cpu ? (ARM&)*nds.ARM7 : (ARM&)*nds.ARM9;
         u32 pc = currentPC(nds, cpu);
-        u32 ret = CallReturn(nds, cpu, pc, arm.CPSR & 0x20);
+        u32 ret = nds.Debugger.CallReturn(cpu, pc, arm.CPSR & 0x20, arm.R[14]);
         if (ret)
             addTemp(nds, cpu, ret, arm.R[13], arm.CPSR & 0x1F);
         else
             nds.Debugger.Step(cpu, 1);
+        ResumeRequested = true;
+        unpauseEmu();
+    });
+}
+
+void DebugBridge::stepTo(int cpu, StepMode mode)
+{
+    post([this, cpu, mode](NDS& nds) {
+        nds.Debugger.StepTo(cpu, mode);
         ResumeRequested = true;
         unpauseEmu();
     });

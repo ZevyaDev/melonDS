@@ -270,6 +270,7 @@ private:
     void ReportMPReplyErrors(u16 clientfail);
 
     void TXSendFrame(const TXSlot* slot, int num);
+    bool HookFrame(bool tx, u8* buf, int& len, int capacity);
     void StartTX_LocN(int nslot, int loc);
     void StartTX_Cmd();
     void StartTX_Beacon();

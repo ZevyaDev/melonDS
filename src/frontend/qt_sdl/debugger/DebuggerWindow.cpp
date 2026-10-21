@@ -17,6 +17,7 @@
 */
 
 #include <QActionGroup>
+#include <QApplication>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -48,6 +49,8 @@
 #include "DebugTool.h"
 #include "DebugTools.h"
 #include "DisasmView.h"
+#include "DebugSource.h"
+#include "SourceView.h"
 #include "EmuInstance.h"
 #include "Config.h"
 #include "ARM.h"
@@ -240,10 +243,18 @@ void DebuggerWindow::buildToolbar()
     ActOver->setShortcut(Qt::Key_F10);
     ActOut = bar->addAction("Step out", this, [this] { Bridge->stepOut(cpu()); });
     ActOut->setShortcut(Qt::SHIFT | Qt::Key_F11);
+    ActBranch = bar->addAction("Step to branch", this, [this] { Bridge->stepTo(cpu(), StepMode::Branch); });
+    ActBranch->setShortcut(Qt::CTRL | Qt::Key_F10);
+    ActTaken = bar->addAction("Run to taken branch", this, [this] { Bridge->stepTo(cpu(), StepMode::TakenBranch); });
+    ActTaken->setShortcut(Qt::CTRL | Qt::Key_F11);
     QAction* runTo = bar->addAction("Run to cursor", this, [this] { Bridge->runTo(cpu(), Disasm->selected()); });
     runTo->setShortcut(Qt::Key_F4);
-    for (QAction* a : {ActBreak, ActContinue, ActStep, ActOver, ActOut, runTo})
+    for (QAction* a : {ActBreak, ActContinue, ActStep, ActOver, ActOut, ActBranch, ActTaken, runTo})
         a->setToolTip(a->text() + " (" + a->shortcut().toString() + ")");
+    ActBranch->setToolTip("Run to the next branch or return in this function, stepping over calls ("
+        + ActBranch->shortcut().toString() + ")");
+    ActTaken->setToolTip("Run until a branch, call or return actually jumps, and stop at its target ("
+        + ActTaken->shortcut().toString() + ")");
     bar->addWidget(new QLabel(" Steps ", this));
     StepCount = new QSpinBox(this);
     StepCount->setObjectName("StepCount");
@@ -283,8 +294,17 @@ void DebuggerWindow::buildToolbar()
     bar->addAction("PC", this, [this] { Disasm->goToPC(); })->setToolTip("Show the current instruction");
     bar->addAction("Back", Disasm, &DisasmView::back)->setToolTip("Back (Backspace)");
     bar->addSeparator();
-    bar->addAction("Symbols...", this, &DebuggerWindow::loadSymbols)
-        ->setToolTip("Load a dsd config.yaml (or a folder holding one), or a text file of 'address name [size]' lines");
+    QToolButton* symbols = new QToolButton(this);
+    symbols->setText("Symbols...");
+    symbols->setPopupMode(QToolButton::MenuButtonPopup);
+    symbols->setToolTip("Load a dsd config.yaml (or a folder holding one), or a text file of 'address name [size]' lines; "
+        "the arrow also takes a URL");
+    connect(symbols, &QToolButton::clicked, this, &DebuggerWindow::loadSymbols);
+    QMenu* symbolMenu = new QMenu(symbols);
+    symbolMenu->addAction("From a file...", this, &DebuggerWindow::loadSymbols);
+    symbolMenu->addAction("From a URL...", this, &DebuggerWindow::loadSymbolsUrl);
+    symbols->setMenu(symbolMenu);
+    bar->addWidget(symbols);
     bar->addAction("Labels...", this, &DebuggerWindow::loadLabels)
         ->setToolTip("Layer a text file of 'address name [module]' lines over the symbols; cancel the dialog to remove them");
     QAction* demangle = bar->addAction("Demangle");
@@ -461,10 +481,11 @@ void DebuggerWindow::buildDocks()
 
     Stack = new QTreeWidget(this);
     Stack->setHeaderLabels({"#", "Function", "Called from", "Returns to", "SP", "Mode"});
-    Stack->setRootIsDecorated(false);
     Stack->setFont(MonoFont());
     connect(Stack, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int col) {
-        Disasm->goTo(item->data(col == 1 ? 1 : 2, Qt::UserRole).toUInt());
+        QVariant addr = item->data(col == 1 ? 1 : 2, Qt::UserRole);
+        if (addr.isValid())
+            Disasm->goTo(addr.toUInt());
     });
     QDockWidget* sdock = new QDockWidget("Call stack", this);
     sdock->setObjectName("CallStack");
@@ -472,6 +493,14 @@ void DebuggerWindow::buildDocks()
     addDockWidget(Qt::BottomDockWidgetArea, sdock);
     tabifyDockWidget(pdock, sdock);
     pdock->raise();
+
+    Source = new SourceView(Bridge, this);
+    QDockWidget* srcDock = new QDockWidget("Source", this);
+    srcDock->setObjectName("Source");
+    srcDock->setWidget(Source);
+    addDockWidget(Qt::RightDockWidgetArea, srcDock, Qt::Vertical);
+    connect(Disasm, &DisasmView::selectionChanged, Source, &SourceView::showAddress);
+    connect(Bridge, &DebugBridge::symbolsChanged, Source, [this] { Source->showAddress(Disasm->selected()); });
 }
 
 void DebuggerWindow::refresh()
@@ -504,6 +533,7 @@ void DebuggerWindow::refresh()
             o.IF = nds.IF[c];
             o.Halted = arm.Halted;
             s.Stack[c] = nds.Debugger.GetCallStack(c);
+            s.Threads[c] = nds.Debugger.GetThreadStacks(c);
         }
         for (auto& b : nds.Debugger.GetBreakpoints())
             s.Points.push_back({b.ID, true, b.CPUMask, 0, b.Enabled, b.Addr, b.Addr, b.Hits, (bool)b.Callback, bridge->isTemp(b.ID)});
@@ -555,6 +585,7 @@ void DebuggerWindow::applySnapshot(const DebugSnapshot& s)
     updateStack();
     updateActions();
     updateStatus();
+    Source->showAddress(Disasm->selected());
     if (stopped)
         Prev = s.CPU;
 }
@@ -624,21 +655,26 @@ void DebuggerWindow::updateStack()
     int c = cpu();
     const auto& frames = Snap.Stack[c];
     DebugSymbols& syms = Bridge->symbols();
-    for (int i = (int)frames.size() - 1, n = 0; i >= 0; i--, n++)
-    {
-        const CallFrame& f = frames[i];
-        auto* item = new QTreeWidgetItem(Stack);
-        item->setText(0, QString::number(n));
-        QString fn = SymStr(syms.describe(f.Entry));
-        item->setText(1, (f.Exception ? "[exception] " : "") + (fn.isEmpty() ? Hex(f.Entry) : fn));
-        item->setData(1, Qt::UserRole, f.Entry);
-        QString site = SymStr(syms.describe(f.Site));
-        item->setText(2, Hex(f.Site) + (site.isEmpty() ? "" : "  " + site));
-        item->setData(2, Qt::UserRole, f.Site);
-        item->setText(3, Hex(f.Return));
-        item->setText(4, Hex(f.SP));
-        item->setText(5, ModeName(f.Mode));
-    }
+    auto addFrames = [&](const std::vector<CallFrame>& list, QTreeWidgetItem* parent) {
+        for (int i = (int)list.size() - 1, n = 0; i >= 0; i--, n++)
+        {
+            const CallFrame& f = list[i];
+            auto* item = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(Stack);
+            item->setText(0, QString::number(n));
+            QString fn = SymStr(syms.describe(f.Entry));
+            item->setText(1, (f.Exception ? "[exception] " : "") + (fn.isEmpty() ? Hex(f.Entry) : fn));
+            item->setData(1, Qt::UserRole, f.Entry);
+            QString site = SymStr(syms.describe(f.Site));
+            item->setText(2, Hex(f.Site) + (site.isEmpty() ? "" : "  " + site));
+            item->setData(2, Qt::UserRole, f.Site);
+            item->setText(3, Hex(f.Return));
+            item->setText(4, Hex(f.SP));
+            item->setText(5, ModeName(f.Mode));
+        }
+    };
+    addFrames(frames, nullptr);
+    for (const auto& [sp, list] : Snap.Threads[c])
+        addFrames(list, new QTreeWidgetItem(Stack, QStringList{"", QString("thread, SP %1").arg(Hex(sp))}));
     if (frames.empty() && !Bridge->callTracking())
         new QTreeWidgetItem(Stack, QStringList{"", "call tracking is off"});
     for (int i = 0; i < Stack->columnCount(); i++)
@@ -653,7 +689,7 @@ void DebuggerWindow::updateActions()
     bool debug = console && Snap.Debug;
     ActBreak->setEnabled(debug && !broken);
     ActContinue->setEnabled(console && (broken || !running));
-    for (QAction* a : {ActStep, ActOver, ActOut})
+    for (QAction* a : {ActStep, ActOver, ActOut, ActBranch, ActTaken})
         a->setEnabled(debug && (broken || !running));
 }
 
@@ -837,15 +873,35 @@ void DebuggerWindow::loadSymbols()
 {
     QString path = QFileDialog::getOpenFileName(this, "Load symbols", QString(),
         "dsd config or symbol list (*.yaml *.yml *.txt *.sym);;All files (*)");
-    if (path.isEmpty())
-        return;
-    std::string error;
-    if (!Bridge->symbols().load(SymStr(path), error))
+    if (!path.isEmpty())
+        applySymbols(path);
+}
+
+void DebuggerWindow::loadSymbolsUrl()
+{
+    QString current = SymStr(Bridge->symbols().source());
+    bool ok;
+    QString url = QInputDialog::getText(this, "Load symbols from a URL",
+        "URL of a dsd config.yaml or the folder holding it (github.com links work):", QLineEdit::Normal,
+        DebugSource::IsRemote(current) ? current : QString(), &ok);
+    if (ok && !url.trimmed().isEmpty())
+        applySymbols(url);
+}
+
+void DebuggerWindow::applySymbols(const QString& location)
+{
+    QString error;
+    Status->setText("Loading symbols from " + location);
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    bool ok = LoadSymbols(Bridge->symbols(), location, error, Bridge->instance()->getNDS());
+    QApplication::restoreOverrideCursor();
+    if (!ok)
     {
-        QMessageBox::warning(this, "melonDS", SymStr(error));
+        updateStatus();
+        QMessageBox::warning(this, "melonDS", error);
         return;
     }
-    DebugTools::rememberSymbols(Bridge, path);
+    DebugTools::rememberSymbols(Bridge, SymStr(Bridge->symbols().source()));
     emit Bridge->symbolsChanged();
     refresh();
     Disasm->reload();

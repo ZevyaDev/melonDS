@@ -39,6 +39,8 @@
 #include "SPU.h"
 #include "DebugSymbolsQt.h"
 #include "DebugTools.h"
+#include "DebuggerWindow.h"
+#include "SourceView.h"
 #include "EmuInstance.h"
 #include "EmuThread.h"
 #include "Window.h"
@@ -316,12 +318,31 @@ QString Automation::run(const QStringList& args)
     }
     if (c == "symbols")
     {
-        std::string error;
-        if (!bridge->symbols().load(SymStr(rest), error))
-            return "error: " + SymStr(error);
-        DebugTools::rememberSymbols(bridge, rest);
+        QString error;
+        if (!LoadSymbols(bridge->symbols(), rest, error, bridge->instance()->getNDS()))
+            return "error: " + error;
+        DebugTools::rememberSymbols(bridge, SymStr(bridge->symbols().source()));
         emit bridge->symbolsChanged();
-        return QString("ok %1").arg(bridge->symbols().set()->SymbolCount);
+        auto set = bridge->symbols().set();
+        int images = 0;
+        for (const auto& mod : set->Modules)
+            images += !mod.Image.empty();
+        return QString("ok %1 symbols, %2 source files, %3 overlay images").arg(set->SymbolCount).arg(set->SourceFiles.size()).arg(images);
+    }
+    if (c == "source")
+    {
+        auto* debugger = qobject_cast<DebuggerWindow*>(FindWindow("Debugger"));
+        SourceView* view = debugger ? debugger->findChild<SourceView*>() : nullptr;
+        if (!view)
+            return "error: open the debugger first";
+        if (args.size() > 1)
+        {
+            u32 addr;
+            if (!bridge->symbols().parseAddress(SymStr(rest), addr))
+                return "error: cannot read the address";
+            debugger->goTo(addr);
+        }
+        return view->describe();
     }
     if (c == "newinstance")
         return createEmuInstance() ? "ok" : "error";
@@ -395,6 +416,11 @@ QString Automation::run(const QStringList& args)
     if (c == "stepout")
     {
         bridge->stepOut(args.size() > 1 ? args[1].toInt() : 0);
+        return "ok";
+    }
+    if (c == "stepbranch" || c == "steptaken")
+    {
+        bridge->stepTo(args.size() > 1 ? args[1].toInt() : 0, c == "stepbranch" ? StepMode::Branch : StepMode::TakenBranch);
         return "ok";
     }
     if (c == "runto" && args.size() > 1)

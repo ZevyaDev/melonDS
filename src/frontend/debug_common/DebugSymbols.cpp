@@ -327,10 +327,9 @@ YNode ParseBlock(std::vector<YLine>& lines, size_t& i, int indent)
     return ParseMap(lines, i, indent);
 }
 
-bool ParseYAML(const std::string& path, YNode& out)
+bool ParseYAML(const std::string& data, YNode& out)
 {
-    std::string data;
-    if (!ReadFile(path, data))
+    if (data.empty())
         return false;
     std::vector<YLine> lines;
     for (const std::string& s : SplitLines(data))
@@ -362,11 +361,8 @@ u32 ParseNumber(const std::string& s, bool& ok)
     }
 }
 
-void ParseDsdSymbols(const std::string& path, int module, std::vector<DebugSymbols::Symbol>& out)
+void ParseDsdSymbols(const std::string& data, int module, std::vector<DebugSymbols::Symbol>& out)
 {
-    std::string data;
-    if (!ReadFile(path, data))
-        return;
     for (const std::string& raw : SplitLines(data))
     {
         std::string line = Trim(raw);
@@ -418,6 +414,59 @@ void ParseDsdSymbols(const std::string& path, int module, std::vector<DebugSymbo
         if (ok)
             out.push_back(std::move(sym));
     }
+}
+
+std::string Field(const std::string& line, const std::string& key)
+{
+    size_t at = line.find(key);
+    if (at == std::string::npos)
+        return std::string();
+    at += key.size();
+    size_t end = line.find_first_of(" \t", at);
+    return line.substr(at, end == std::string::npos ? std::string::npos : end - at);
+}
+
+// dsd delinks.txt: an unindented "path:" line starts a file, the indented lines below it give its sections'
+// "start:0x... end:0x..." ranges.
+void ParseDelinks(const std::string& data, DebugSymbols::Set& set, std::unordered_map<std::string, int>& index,
+                  std::vector<DebugSymbols::FileRange>& out)
+{
+    int file = -1;
+    for (const std::string& line : SplitLines(data))
+    {
+        std::string t = Trim(line);
+        if (t.empty() || t.rfind("//", 0) == 0)
+            continue;
+        if (line[0] != ' ' && line[0] != '\t')
+        {
+            file = -1;
+            if (t.back() != ':')
+                continue;
+            std::string path = t.substr(0, t.size() - 1);
+            auto it = index.find(path);
+            if (it == index.end())
+            {
+                it = index.emplace(path, (int)set.SourceFiles.size()).first;
+                set.SourceFiles.push_back(path);
+            }
+            file = it->second;
+            continue;
+        }
+        if (file < 0)
+            continue;
+        bool okStart, okEnd;
+        u32 start = ParseNumber(Field(t, "start:"), okStart);
+        u32 end = ParseNumber(Field(t, "end:"), okEnd);
+        if (okStart && okEnd && end > start)
+            out.push_back({start, end, file});
+    }
+    std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.Start < b.Start; });
+}
+
+bool IsRemoteLocation(const std::string& location)
+{
+    std::string l = Lower(location.substr(0, 8));
+    return l.rfind("http://", 0) == 0 || l.rfind("https://", 0) == 0;
 }
 
 void Index(DebugSymbols::Module& mod)
@@ -473,89 +522,220 @@ const DebugSymbols::Symbol* DebugSymbols::Module::find(u32 addr) const
     return nullptr;
 }
 
-bool DebugSymbols::load(const std::string& rawPath, std::string& error)
+bool DebugSymbols::Files::isRemote(const std::string& location) const
 {
-    std::string path = rawPath;
+    return IsRemoteLocation(location);
+}
+
+std::string DebugSymbols::Files::normalize(const std::string& raw) const
+{
+    std::string location = Trim(raw);
     std::error_code ec;
-    if (fs::is_directory(fs::u8path(path), ec))
-        path = JoinPath(path, "config.yaml");
-    if (!fs::exists(fs::u8path(path), ec))
+    if (!isRemote(location) && fs::is_directory(fs::u8path(location), ec))
+        return JoinPath(location, "config.yaml");
+    return location;
+}
+
+std::string DebugSymbols::Files::dirOf(const std::string& file) const
+{
+    return DirName(file);
+}
+
+std::string DebugSymbols::Files::join(const std::string& dir, const std::string& relative) const
+{
+    return JoinPath(dir, relative);
+}
+
+void DebugSymbols::Files::readAll(const std::vector<std::string>& locations, std::unordered_map<std::string, std::string>& out) const
+{
+    for (const std::string& loc : locations)
     {
-        error = "not found: " + path;
+        if (loc.empty() || out.count(loc) || isRemote(loc))
+            continue;
+        std::string data;
+        if (ReadFile(loc, data))
+            out.emplace(loc, std::move(data));
+    }
+}
+
+const DebugSymbols::Files& DebugSymbols::localFiles()
+{
+    static const Files local;
+    return local;
+}
+
+bool DebugSymbols::blzDecompress(std::vector<u8>& data)
+{
+    u32 len = (u32)data.size();
+    if (len < 8)
+        return false;
+    const u8* src = data.data();
+    u32 footer, extra;
+    memcpy(&footer, src + len - 8, 4);
+    memcpy(&extra, src + len - 4, 4);
+    if (!extra)
+        return true;
+    u32 packed = footer & 0xFFFFFF;
+    u32 header = footer >> 24;
+    if (packed > len || header > packed || header < 8)
+        return false;
+    std::vector<u8> out(len + extra);
+    memcpy(out.data(), src, len);
+    u32 in = len - header;
+    u32 stop = len - packed;
+    u32 pos = len + extra;
+    while (in > stop)
+    {
+        u8 flags = src[--in];
+        for (int bit = 0; bit < 8 && in > stop; bit++, flags <<= 1)
+        {
+            if (!(flags & 0x80))
+            {
+                if (pos == 0)
+                    return false;
+                out[--pos] = src[--in];
+                continue;
+            }
+            if (in < stop + 2)
+                return false;
+            u32 hi = src[--in];
+            u32 lo = src[--in];
+            u32 count = (hi >> 4) + 3;
+            u32 disp = (((hi & 0xF) << 8) | lo) + 3;
+            for (u32 n = 0; n < count; n++)
+            {
+                if (pos == 0 || pos - 1 + disp >= out.size())
+                    return false;
+                out[pos - 1] = out[pos - 1 + disp];
+                pos--;
+            }
+        }
+    }
+    data = std::move(out);
+    return true;
+}
+
+bool DebugSymbols::load(const std::string& rawPath, std::string& error, const RomOverlays* rom, const Files* reader)
+{
+    if (Loading)
+    {
+        error = "symbols are already loading";
+        return false;
+    }
+    Loading = true;
+    struct Release
+    {
+        bool& Flag;
+        ~Release() { Flag = false; }
+    } release {Loading};
+
+    const Files& io = reader ? *reader : localFiles();
+    std::string path = io.normalize(rawPath);
+    bool remote = io.isRemote(path);
+    std::string plain = remote ? path.substr(0, path.find_first_of("?#")) : path;
+    std::unordered_map<std::string, std::string> files;
+    io.readAll({path}, files);
+    auto data = [&files](const std::string& loc) -> std::string {
+        auto it = files.find(loc);
+        return it == files.end() ? std::string() : it->second;
+    };
+    if (!files.count(path))
+    {
+        error = (remote ? "cannot download " : "not found: ") + path;
         return false;
     }
 
     auto set = std::make_shared<Set>();
     set->Source = path;
+    set->Base = io.dirOf(path);
 
-    std::string suffix = Suffix(path);
+    std::string suffix = Lower(Suffix(plain));
     if (suffix == "yaml" || suffix == "yml")
     {
         YNode cfg;
-        if (!ParseYAML(path, cfg))
+        if (!ParseYAML(data(path), cfg))
         {
             error = "cannot read " + path;
             return false;
         }
-        std::string root = DirName(path);
-        auto add = [&](const std::string& name, int overlay, const std::string& symbols) {
-            Module mod;
-            mod.Name = name;
-            mod.Overlay = overlay;
-            ParseDsdSymbols(JoinPath(root, symbols), (int)set->Modules.size(), mod.Symbols);
-            set->Modules.push_back(std::move(mod));
-        };
         const YNode* main = cfg.get("main_module");
         if (!main)
         {
             error = "no main_module in " + path;
             return false;
         }
-        add("main", -1, main->str("symbols"));
+        struct Entry
+        {
+            std::string Name;
+            int Overlay;
+            std::string Symbols;
+            std::string Delinks;
+        };
+        std::vector<Entry> entries;
+        auto entry = [&](const std::string& name, int overlay, const YNode& node) {
+            std::string symbols = node.str("symbols"), delinks = node.str("delinks");
+            entries.push_back({name, overlay,
+                symbols.empty() ? std::string() : io.join(set->Base, symbols),
+                delinks.empty() ? std::string() : io.join(set->Base, delinks)});
+        };
+        entry("main", -1, *main);
         if (const YNode* autoloads = cfg.get("autoloads"))
             for (const YNode& a : autoloads->List)
-                add(a.str("name"), -1, a.str("symbols"));
-
-        std::unordered_map<int, std::pair<YNode, std::string>> table;
-        std::string romCfg = cfg.str("rom_config");
-        if (!romCfg.empty())
-        {
-            std::string romDir = DirName(JoinPath(root, romCfg));
-            std::string tablePath = JoinPath(romDir, "arm9_overlays/overlays.yaml");
-            YNode ovTable;
-            if (ParseYAML(tablePath, ovTable))
-                if (const YNode* list = ovTable.get("overlays"))
-                    for (const YNode& ov : list->List)
-                        table.insert_or_assign((int)ov.num("id"), std::make_pair(ov, JoinPath(romDir, "arm9_overlays/" + ov.str("file_name"))));
-        }
+                entry(a.str("name"), -1, a);
         if (const YNode* overlays = cfg.get("overlays"))
             for (const YNode& ov : overlays->List)
+                entry(ov.str("name"), (int)ov.num("id"), ov);
+        std::vector<std::string> wanted;
+        for (const Entry& e : entries)
+        {
+            wanted.push_back(e.Symbols);
+            wanted.push_back(e.Delinks);
+        }
+        io.readAll(wanted, files);
+
+        // overlay images: the running ROM's, else the extract named by rom_config (local configs only)
+        RomOverlays table = rom ? *rom : RomOverlays();
+        std::string romCfg = cfg.str("rom_config");
+        if (table.empty() && !remote && !romCfg.empty())
+        {
+            std::string romDir = DirName(JoinPath(set->Base, romCfg));
+            std::string tableData;
+            YNode ovTable;
+            if (ReadFile(JoinPath(romDir, "arm9_overlays/overlays.yaml"), tableData) && ParseYAML(tableData, ovTable))
+                if (const YNode* list = ovTable.get("overlays"))
+                    for (const YNode& ov : list->List)
+                    {
+                        std::string image;
+                        ReadFile(JoinPath(romDir, "arm9_overlays/" + ov.str("file_name")), image);
+                        table[(int)ov.num("id")] = {ov.num("base_address"), ov.num("code_size") + ov.num("bss_size"),
+                            std::vector<u8>(image.begin(), image.end())};
+                    }
+        }
+
+        std::unordered_map<std::string, int> fileIndex;
+        for (const Entry& e : entries)
+        {
+            Module mod;
+            mod.Name = e.Name;
+            mod.Overlay = e.Overlay;
+            ParseDsdSymbols(data(e.Symbols), (int)set->Modules.size(), mod.Symbols);
+            ParseDelinks(data(e.Delinks), *set, fileIndex, mod.Files);
+            auto it = table.find(e.Overlay);
+            if (e.Overlay >= 0 && it != table.end())
             {
-                int id = (int)ov.num("id");
-                add(ov.str("name"), id, ov.str("symbols"));
-                Module& mod = set->Modules.back();
-                auto it = table.find(id);
-                if (it != table.end())
-                {
-                    mod.Base = it->second.first.num("base_address");
-                    mod.Size = it->second.first.num("code_size") + it->second.first.num("bss_size");
-                    std::string image;
-                    if (ReadFile(it->second.second, image))
-                        mod.Image.assign(image.begin(), image.end());
-                }
+                mod.Base = it->second.Base;
+                mod.Size = it->second.Size;
+                mod.Image = it->second.Image;
             }
+            set->Modules.push_back(std::move(mod));
+        }
     }
     else
     {
-        std::string data;
-        if (!ReadFile(path, data))
-        {
-            error = "cannot read " + path;
-            return false;
-        }
+        std::string text = data(path);
         Module mod;
-        mod.Name = BaseName(path);
-        for (const std::string& raw : SplitLines(data))
+        mod.Name = BaseName(plain);
+        for (const std::string& raw : SplitLines(text))
         {
             std::string line = Simplify(raw);
             size_t sp1 = line.find(' ');
@@ -741,11 +921,6 @@ std::vector<int> DebugSymbols::detect(const Set& set, const std::function<u32(u3
     return out;
 }
 
-std::vector<int> DebugSymbols::detect(const Set& set, NDS& nds)
-{
-    return detect(set, [&nds](u32 addr) -> u32 { return nds.Debugger.Peek(0, addr, 4); });
-}
-
 const DebugSymbols::Symbol* DebugSymbols::lookup(u32 addr) const
 {
     if (!Cur)
@@ -767,6 +942,38 @@ const DebugSymbols::Module* DebugSymbols::moduleOf(const Symbol* sym) const
     if (!Cur || !sym || sym->Module < 0 || sym->Module >= (int)Cur->Modules.size())
         return nullptr;
     return &Cur->Modules[sym->Module];
+}
+
+bool DebugSymbols::needsRom() const
+{
+    if (!Cur)
+        return false;
+    for (const Module& mod : Cur->Modules)
+        if (mod.Overlay >= 0 && mod.Image.empty())
+            return true;
+    return false;
+}
+
+bool DebugSymbols::sourceFile(u32 addr, std::string& file) const
+{
+    if (!Cur)
+        return false;
+    addr &= ~1u;
+    auto search = [&](const Module& mod) {
+        auto it = std::upper_bound(mod.Files.begin(), mod.Files.end(), addr, [](u32 a, const FileRange& r) { return a < r.Start; });
+        if (it == mod.Files.begin() || addr >= (--it)->End)
+            return false;
+        file = Cur->SourceFiles[it->File];
+        return true;
+    };
+    if (const Module* mod = moduleOf(lookup(addr)))
+        if (search(*mod))
+            return true;
+    for (const Module& mod : Cur->Modules)
+        if (mod.Overlay < 0 || std::find(Loaded.begin(), Loaded.end(), mod.Overlay) != Loaded.end())
+            if (search(mod))
+                return true;
+    return false;
 }
 
 std::string DebugSymbols::describe(u32 addr, bool withModule) const

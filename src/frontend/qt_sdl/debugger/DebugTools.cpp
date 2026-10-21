@@ -271,17 +271,18 @@ void autoLoadSymbols(DebugBridge* bridge)
     QString labels = QString::fromStdString(cfg.GetString("Debugger.Labels." + code.toStdString()));
     DebugSymbols& symbols = bridge->symbols();
     bool changed = false;
-    std::string error;
-    if (!path.isEmpty() && path != SymStr(symbols.source()))
-        changed |= symbols.load(SymStr(path), error);
+    QString error;
+    if (!path.isEmpty() && (SymStr(DebugSource::Normalize(path)) != symbols.source() || symbols.needsRom()))
+        changed |= LoadSymbols(symbols, path, error, bridge->instance()->getNDS());
     if (labels != SymStr(symbols.labelsSource()))
     {
+        std::string labelError;
         if (labels.isEmpty())
         {
             symbols.clearLabels();
             changed = true;
         }
-        else if (symbols.loadLabels(SymStr(labels), error))
+        else if (symbols.loadLabels(SymStr(labels), labelError))
             changed = true;
     }
     if (changed)

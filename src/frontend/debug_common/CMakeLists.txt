@@ -2,6 +2,7 @@ find_package(PkgConfig REQUIRED)
 
 add_library(melonds_debug STATIC
     DebugSymbols.cpp
+    DebugSymbolsRom.cpp
     Disassembler.cpp
 )
 

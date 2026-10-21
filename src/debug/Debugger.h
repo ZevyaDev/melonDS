@@ -21,9 +21,12 @@
 
 #include <array>
 #include <atomic>
+#include <deque>
 #include <functional>
 #include <map>
+#include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "../types.h"
@@ -41,6 +44,20 @@ enum class BreakKind : u8
     Step,
     Request,
     Fault,
+};
+
+enum class StepMode : u8
+{
+    None,
+    Branch,
+    TakenBranch,
+};
+
+enum class ExecResult : u8
+{
+    Refused,
+    Continued,
+    Branched,
 };
 
 enum WatchFlags : u8
@@ -65,6 +82,17 @@ struct BreakEvent
 };
 
 using BreakCallback = std::function<bool(const BreakEvent&)>;
+
+struct WifiFrame
+{
+    bool TX;
+    u8 Rate;
+    u8 Channel;
+    u64 Timestamp;
+    std::vector<u8> Data;
+};
+
+using WifiCallback = std::function<bool(WifiFrame&)>;
 
 struct Breakpoint
 {
@@ -116,6 +144,11 @@ public:
 
     int AddBreakpoint(u8 cpuMask, u32 addr, BreakCallback callback = nullptr);
     int AddWatchpoint(u8 cpuMask, u32 start, u32 size, u8 flags, BreakCallback callback = nullptr);
+    int AddWifiHook(WifiCallback callback);
+    bool WifiHooked() const { return !WifiHooks.empty(); }
+    bool RunWifiHooks(WifiFrame& frame);
+    void InjectWifi(std::vector<u8> frame, u8 rate);
+    bool TakeWifiInjection(WifiFrame& frame);
     bool Remove(int id);
     bool SetEnabled(int id, bool enabled);
     void ClearAll();
@@ -131,6 +164,11 @@ public:
     // instruction the CPU is parked at when called during a break of that CPU's instruction hook, else from
     // its next instruction, so count = n always executes n instructions.
     void Step(u8 cpu, u32 count);
+    // Smart stepping (the Qt debugger's "step to branch"/"run to taken branch"): park before the next
+    // instruction that may write PC at the current call depth, or after the next taken branch. Separate
+    // from the Step countdown; a break of any kind cancels it.
+    void StepTo(u8 cpu, StepMode mode);
+    u32 CallReturn(u8 cpu, u32 pc, bool thumb, u32 lr) const;
 
     // After a savestate load: drop what described the execution before it (call stacks, a pending
     // watchpoint hit, the last-writer records). Points, the trace, call counts, coverage and armed
@@ -142,6 +180,7 @@ public:
 
     void SetCallTracking(bool enabled);
     std::vector<CallFrame> GetCallStack(u8 cpu) const;
+    std::vector<std::pair<u32, std::vector<CallFrame>>> GetThreadStacks(u8 cpu) const;
     std::unordered_map<u32, u64> DrainCallCounts(u8 cpu);
 
     void SetCoverage(bool enabled);
@@ -153,6 +192,9 @@ public:
 
     u32 Peek(u8 cpu, u32 addr, u8 size) const;
     bool Poke(u8 cpu, u32 addr, u8 size, u32 value);
+    void SyncPipelines(u32 addr, u32 size);
+    int HookedCPU() const;
+    ExecResult Execute(u8 cpu, const std::vector<u32>& ops);
 
     bool IsBreaking() const { return InBreak; }
 
@@ -160,7 +202,9 @@ public:
     std::array<bool, 2> DataArmed {};
     bool CallsArmed = false;
 
-    void OnInstr(ARM& cpu, u32 pc);
+    // redirected: a repeat call for the same instruction slot because a hook or a break changed PC (see
+    // ARM::GdbCheckC); the instruction of the first call never ran, so the step countdown does not advance.
+    void OnInstr(ARM& cpu, u32 pc, bool redirected = false);
     void OnData(ARM& cpu, u32 addr, u8 size, u32 value, bool write);
     // A DMA unit was written (called after the write, so a break sees the new memory).
     void OnDMA(u8 cpu, u8 channel, u32 addr, u8 size, u32 value);
@@ -176,6 +220,8 @@ private:
     int NextID = 1;
     std::vector<Breakpoint> Breakpoints;
     std::vector<Watchpoint> Watchpoints;
+    std::vector<std::pair<int, WifiCallback>> WifiHooks;
+    std::deque<WifiFrame> WifiInjected;
     std::array<std::vector<u8>, 2> ExecPages;
     std::array<std::vector<u8>, 2> WatchPages;
     std::function<void(const BreakEvent&)> Handler;
@@ -200,6 +246,14 @@ private:
     std::array<std::array<u32, 16>, 2> LastSP {};
     std::array<u8, 2> LastMode {};
     std::array<u32, 2> PrevInstr {};
+    std::array<u32, 2> JumpTarget {};
+    std::array<u32, 2> Prev2Instr {};
+    std::array<StepMode, 2> StepModes {};
+    std::array<size_t, 2> StepDepth {};
+    std::array<CallFrame, 2> StepFrame {};
+    std::array<size_t, 2> StepExceptions {};
+    std::array<bool, 2> SeedPending {};
+    std::array<std::unordered_set<u32>, 2> KnownEntries;
     std::array<bool, 2> PrevThumb {};
 
     struct Interrupted
@@ -218,12 +272,53 @@ private:
 
     std::vector<u32> LastWriter;
 
+    enum class HookContext : u8
+    {
+        None,
+        Service,
+        Hook,
+    };
+    struct ContextGuard;
+    HookContext Context = HookContext::None;
+    u8 ContextCPU = 0;
+    std::thread::id ContextThread;
+    std::array<int, 2> MidInstr {};
+
+    struct ReturnSkip
+    {
+        u32 PC;
+        u32 SP;
+        u8 Mode;
+        bool Left;
+        std::array<u32, 4> Args;
+        u32 R12;
+        u32 LR;
+        u32 Flags;
+    };
+    std::array<std::vector<ReturnSkip>, 2> ReturnSkips;
+
+    bool OnContextThread() const;
+    u32 Canonical(u8 cpu, u32 addr) const;
+    bool PipelineCurrent(ARM& cpu) const;
+    void Redirected(ARM& cpu, bool thumb, u32 op, u32 lr, u32 sp, u8 callerMode, const ReturnSkip& entry);
+    bool ReturnedToHook(ARM& cpu, u32 pc);
     void Rearm();
     void RebuildPages();
     void Raise(const BreakEvent& ev);
     void UnwindCalls(ARM& cpu, u32 pc);
     void WatchHit(u8 n, u32 addr, u8 size, u32 value, bool write, u8 dma);
     void SwitchStacks(u8 n, u32 oldSP, u32 newSP);
+    void PushFrame(u8 n, const CallFrame& frame);
+    void ResumeContext(ARM& cpu, u32 pc, bool loaded);
+    void UnwindCallers(u8 n, u32 pc, bool thumb, u32 sp, u8 mode, std::vector<CallFrame>& found) const;
+    bool ResumeFrame(u8 n, u32 pc, u32 sp, u32 lr, u8 mode, CallFrame& frame) const;
+    std::vector<CallFrame> UnwindThread(u8 n, u32 pc, u32 sp, u32 lr, u32 cpsr) const;
+    bool StepDone(ARM& cpu, u32 pc, bool jumped) const;
+    void TrackEntry(ARM& cpu, u32 pc, u32 prev);
+    void SeedBelow(u8 n);
+    bool ScanPrologue(u8 n, u32 pc, bool thumb, u32& start, u32& depth, u32& lrBelow) const;
+    int CallBefore(u8 n, u32 ret, u32& site, u32& target) const;
+    bool UnwindFrame(u8 n, u32 pc, bool thumb, u32 sp, u8 mode, CallFrame& frame, u32& ret) const;
 };
 
 }

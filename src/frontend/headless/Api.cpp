@@ -232,11 +232,19 @@ int mds_has(const char* name)
         "lastwriter_query",     // mds_lastwriter_query
         // API level 3 (feature/cheats)
         "cheats",               // mds_cheat_*: Action Replay codes run by the core's engine every frame
+        // API level 4 (merge/upstream-debug: ZevyaDev's debug branch)
+        "thread_stacks",        // mds_threadstacks, Lua debugger.threadstacks: the stacks of threads not running
+        "callstack_unwind",     // call stacks seed frames from stack memory, follow non-BL calls and NitroSDK switches
+        "step_redirect",        // a PC change at a break or by a hook re-runs the hooks there; mds_step counts from it
+        "pipeline_refetch",     // writes at a break or from a hook to the instructions being fetched take effect
+        "lua_execute",          // Lua memory.execute in exec hooks and at breaks
+        "lua_wifi",             // Lua wifi.hook, wifi.inject, wifi.decode
+        "symbols_rom",          // the server's symbols_load takes overlay images from the running ROM; delinks
     };
     static const char* const Functions[] = {
         "mds_has", "mds_serve_host", "mds_gdb_host", "mds_lastwriter_query",
         "mds_cheat_add", "mds_cheat_remove", "mds_cheat_enable", "mds_cheat_clear", "mds_cheat_list",
-        "mds_cheat_get",
+        "mds_cheat_get", "mds_threadstacks",
     };
     if (!name)
         return 0;
@@ -927,6 +935,32 @@ int mds_callstack(int id, int cpu, mds_frame* out, int max)
             out[i] = {f.Site, f.Entry, f.Return, f.SP, f.Mode, f.Exception};
         }
         return n;
+    });
+}
+
+int mds_threadstacks(int id, int cpu, uint32_t* sps, uint32_t* depths, int max_stacks, mds_frame* out, int max_frames)
+{
+    Slot* s = StoppedDebug(id);
+    if (!s || !CountOk(max_stacks, "max_stacks") || !CountOk(max_frames, "max_frames"))
+        return -1;
+    return OnEmu(s, [&](Instance& inst, std::string&) {
+        auto threads = inst.NDS->Debugger.GetThreadStacks(cpu == 7 || cpu == 1);
+        int count = std::min<int>(max_stacks, threads.size());
+        int used = 0;
+        for (int t = 0; t < count; t++)
+        {
+            const auto& stack = threads[t].second;
+            int n = std::min<int>(max_frames - used, stack.size());
+            for (int i = 0; i < n; i++)
+            {
+                const CallFrame& f = stack[stack.size() - 1 - i];
+                out[used + i] = {f.Site, f.Entry, f.Return, f.SP, f.Mode, f.Exception};
+            }
+            sps[t] = threads[t].first;
+            depths[t] = n;
+            used += n;
+        }
+        return count;
     });
 }
 

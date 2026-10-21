@@ -57,11 +57,19 @@ void ARM::GdbCheckB()
 }
 void ARM::GdbCheckC()
 {
-    u32 pc_real = R[15] - ((CPSR & 0x20) ? 2 : 4);
-    if (NDS.Debugger.Armed[Num])
-        NDS.Debugger.OnInstr(*this, pc_real);
+    // a hook or a break that changes PC (memory.execute branching, a register write while parked) runs the
+    // hook again for the new instruction before anything executes
+    for (bool redirected = false; NDS.Debugger.Armed[Num]; redirected = true)
+    {
+        u32 pc = R[15];
+        u32 thumb = CPSR & 0x20;
+        NDS.Debugger.OnInstr(*this, pc - (thumb ? 2 : 4), redirected);
+        if (R[15] == pc && (CPSR & 0x20) == thumb)
+            break;
+    }
     if (!GdbActive)
         return;
+    u32 pc_real = R[15] - ((CPSR & 0x20) ? 2 : 4);
     Gdb::StubState st = GdbStub.CheckBkpt(pc_real, true, true);
     if (st != Gdb::StubState::CheckNoHit)
     {
@@ -100,8 +108,16 @@ void ARM::GdbCheckA() {}
 void ARM::GdbCheckB() {}
 void ARM::GdbCheckC()
 {
-    if (NDS.Debugger.Armed[Num])
-        NDS.Debugger.OnInstr(*this, R[15] - ((CPSR & 0x20) ? 2 : 4));
+    // a hook or a break that changes PC (memory.execute branching, a register write while parked) runs the
+    // hook again for the new instruction before anything executes
+    for (bool redirected = false; NDS.Debugger.Armed[Num]; redirected = true)
+    {
+        u32 pc = R[15];
+        u32 thumb = CPSR & 0x20;
+        NDS.Debugger.OnInstr(*this, pc - (thumb ? 2 : 4), redirected);
+        if (R[15] == pc && (CPSR & 0x20) == thumb)
+            break;
+    }
 }
 void ARM::DebugData(u32 addr, u8 size, u32 val, bool write)
 {
@@ -736,11 +752,11 @@ void ARMv5Impl<mode>::Execute()
         else
 #endif
         {
+            if constexpr (mode == CPUExecuteMode::InterpreterGDB)
+                GdbCheckC();
+
             if (CPSR & 0x20) // THUMB
             {
-                if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-                    GdbCheckC();
-
                 // prefetch
                 R[15] += 2;
                 CurInstr = NextInstr[0];
@@ -754,9 +770,6 @@ void ARMv5Impl<mode>::Execute()
             }
             else
             {
-                if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-                    GdbCheckC();
-
                 // prefetch
                 R[15] += 4;
                 CurInstr = NextInstr[0];
@@ -870,11 +883,11 @@ void ARMv4Impl<mode>::Execute()
         else
 #endif
         {
+            if constexpr (mode == CPUExecuteMode::InterpreterGDB)
+                GdbCheckC();
+
             if (CPSR & 0x20) // THUMB
             {
-                if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-                    GdbCheckC();
-
                 // prefetch
                 R[15] += 2;
                 CurInstr = NextInstr[0];
@@ -887,9 +900,6 @@ void ARMv4Impl<mode>::Execute()
             }
             else
             {
-                if constexpr (mode == CPUExecuteMode::InterpreterGDB)
-                    GdbCheckC();
-
                 // prefetch
                 R[15] += 4;
                 CurInstr = NextInstr[0];

@@ -89,7 +89,7 @@ void DisasmView::goTo(u32 addr, bool record)
         History.push_back(Top);
     if (History.size() > 256)
         History.erase(History.begin());
-    Selected = addr & ~1u;
+    select(addr & ~1u);
     if (ViewMode == mode_Auto)
     {
         const DebugSymbols::Symbol* sym = Bridge->symbols().lookup(addr);
@@ -114,7 +114,7 @@ void DisasmView::goToPC()
     u32 span = lines * step();
     if (PC >= Top + step() * 2 && PC < Top + span - step() * 3)
     {
-        Selected = PC;
+        select(PC);
         fetch();
         return;
     }
@@ -216,6 +216,7 @@ DisasmLine DisasmView::decodeAt(u32 a, const QSet<u32>& pool)
         line.Addr = a;
         line.Size = 4;
         line.Mnemonic = ".word";
+        line.Kind = InstrKind::Data;
         if (avail >= 4)
         {
             memcpy(&line.Opcode, ptr, 4);
@@ -370,7 +371,7 @@ void DisasmView::paintEvent(QPaintEvent*)
         p.setPen(dim);
         p.drawText(xAddr, y + fm.ascent(), Hex(row.Addr));
         p.drawText(xOp, y + fm.ascent(), l.Size == 2 ? Hex(l.Opcode, 4) : Hex(l.Opcode));
-        p.setPen(pal.text().color());
+        p.setPen(InstrColor(l.Kind, pal));
         p.drawText(xMn, y + fm.ascent(), SymStr(l.Mnemonic));
         QString args = operands(l);
         p.drawText(xArgs, y + fm.ascent(), args);
@@ -406,7 +407,7 @@ void DisasmView::mousePressEvent(QMouseEvent* event)
     u32 addr = Rows[i].Addr;
     if (event->button() == Qt::LeftButton && event->pos().x() < fontMetrics().horizontalAdvance('0') * 2)
         emit toggleBreakpoint(addr);
-    Selected = addr;
+    select(addr);
     viewport()->update();
 }
 
@@ -427,6 +428,14 @@ void DisasmView::mouseDoubleClickEvent(QMouseEvent* event)
         if (ok)
             goTo(v);
     }
+}
+
+void DisasmView::select(u32 addr)
+{
+    if (addr == Selected)
+        return;
+    Selected = addr;
+    emit selectionChanged(addr);
 }
 
 void DisasmView::scrollLines(int lines)
@@ -451,12 +460,12 @@ void DisasmView::keyPressEvent(QKeyEvent* event)
     switch (event->key())
     {
     case Qt::Key_Up:
-        Selected -= step();
+        select(Selected - step());
         if (sel <= 1)
             scrollLines(-1);
         break;
     case Qt::Key_Down:
-        Selected += sel >= 0 ? Rows[sel].Line.Size : step();
+        select(Selected + (sel >= 0 ? Rows[sel].Line.Size : step()));
         if (sel >= visibleLines() - 2)
             scrollLines(1);
         break;
@@ -492,7 +501,7 @@ void DisasmView::contextMenuEvent(QContextMenuEvent* event)
 {
     int i = rowAt(event->pos().y());
     if (i >= 0 && !Rows[i].Label)
-        Selected = Rows[i].Addr;
+        select(Rows[i].Addr);
     viewport()->update();
     u32 addr = Selected;
     const DisasmLine* line = i >= 0 && !Rows[i].Label ? &Rows[i].Line : nullptr;

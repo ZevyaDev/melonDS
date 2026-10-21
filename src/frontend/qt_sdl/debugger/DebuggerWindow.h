@@ -35,6 +35,7 @@ class QTreeWidget;
 class QTableWidget;
 class QTimer;
 class DisasmView;
+class SourceView;
 
 struct CPUSnapshot
 {
@@ -65,6 +66,7 @@ struct DebugSnapshot
     std::array<CPUSnapshot, 2> CPU;
     std::vector<PointInfo> Points;
     std::array<std::vector<melonDS::CallFrame>, 2> Stack;
+    std::array<std::vector<std::pair<melonDS::u32, std::vector<melonDS::CallFrame>>>, 2> Threads;
     std::vector<int> Overlays;
     melonDS::u64 Frame;
     bool Debug;
@@ -88,6 +90,7 @@ protected:
 private:
     DebugBridge* Bridge;
     DisasmView* Disasm;
+    SourceView* Source;
     QComboBox* CPUBox;
     QLineEdit* GotoEdit;
     QLabel* Status;
@@ -115,6 +118,8 @@ private:
     QAction* ActStep;
     QAction* ActOver;
     QAction* ActOut;
+    QAction* ActBranch;
+    QAction* ActTaken;
 
     void buildToolbar();
     void buildViewToolbar();
@@ -136,6 +141,8 @@ private:
     void setPC(melonDS::u32 addr);
     void loadSymbols();
     void loadLabels();
+    void loadSymbolsUrl();
+    void applySymbols(const QString& location);
     void autoLoadSymbols();
     QString describeBreak(const melonDS::BreakEvent& ev) const;
 };

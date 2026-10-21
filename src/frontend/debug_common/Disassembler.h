@@ -23,6 +23,19 @@
 
 #include "types.h"
 
+enum class InstrKind : melonDS::u8
+{
+    Other,
+    Call,
+    Return,
+    Branch,
+    Load,
+    Store,
+    Compare,
+    System,
+    Data,
+};
+
 struct DisasmLine
 {
     melonDS::u32 Addr;
@@ -34,6 +47,7 @@ struct DisasmLine
     bool HasTarget;
     bool IsCall;
     bool IsLiteral;
+    InstrKind Kind;
 };
 
 class Disassembler

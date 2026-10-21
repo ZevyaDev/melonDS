@@ -13,11 +13,13 @@ raw opcodes.
 ## Symbols
 
 Symbols... in the debugger window's toolbar loads a dsd `config.yaml` (or the folder holding it),
-or a text file of `address name [size]` lines. The choice is remembered per game code and shared
-by every tool.
+or a text file of `address name [size]` lines. Its arrow also takes a URL: a raw or github.com
+link to a `config.yaml` or its folder, such as
+`https://github.com/OWNER/REPO/blob/BRANCH/config/usa/arm9/config.yaml`; nothing needs to be
+checked out. The choice is remembered per game code and shared by every tool.
 
-- Overlays are detected by comparing RAM with `arm9_overlays/*.bin` from the extract that the
-  config's `rom_config` points to; only loaded overlays' names are shown.
+- Overlays are detected by comparing RAM with the overlays in the running ROM, decompressed, so no
+  extract is needed; only loaded overlays' names are shown.
 - Labels... layers a text file of `address name [module]` lines (`#` starts a comment) over the
   loaded symbols, also remembered per game code. A label renames the symbol that starts at that
   address in that module (`main`, an autoload or `ovNNN`; default: the static module covering
@@ -26,6 +28,15 @@ by every tool.
 - C++ names are demangled (Demangle toggles it). Go to, breakpoint and watch fields accept an
   address, a symbol in either form, or `symbol+0x10`.
 
+## Source
+
+The Source dock shows the source of the function at the selected line of the listing, with the
+function highlighted: C, C++ or assembly, from the file that the config's `delinks.txt` assigns
+to that address. It follows the selection, so a click in the listing or a double-click in the call
+stack shows that function. Files come from beside the config, or from the same repository when the
+symbols came from a URL; downloads are cached. Open opens a local file in its editor, or a GitHub
+file in the browser at those lines. A function that is not in any delinked file has no source yet.
+
 ## Debugger window
 
 | key | does |
@@ -33,15 +44,27 @@ by every tool.
 | F6 | break on the selected CPU |
 | F5 | continue (also unpauses) |
 | F11, F10, Shift+F11 | step into, step over, step out |
+| Ctrl+F10 | run to the next branch or return in this function, stepping over calls |
+| Ctrl+F11 | run until a branch, call or return actually jumps; stop at its target |
 | F4 | run to the selected line |
 | F9, click in the margin | toggle a breakpoint |
 | Ctrl+G | go to address or symbol |
 | Enter, double-click | follow a branch or literal |
 | Backspace | back |
 
+Step over (F10) steps over BL, BLX, SWI and calls made through `mov lr, pc` with `bx` or `ldr pc`,
+and steps through every other branch. Instructions are coloured by kind, in the disassembly and the
+trace: calls orange, returns red, branches purple, loads cyan, stores green, compares yellow,
+system and coprocessor blue, literal data dimmed, everything else plain.
+
 Double-click a register to change it while stopped. The docks hold both CPUs' registers,
 breakpoints and watchpoints (CPU and DMA writes, enable, hits, owner) and the call stack. A Lua
 hook that returns true opens the window at the stop.
+
+The call stack is tracked in the core, per thread: BL/BLX, calls through `mov lr, pc`, tail calls,
+interrupts and SWIs, and thread switches (by stack pointer, including NitroSDK's context loads).
+Threads that are not running are listed under the current one. Frames that were already on the
+stack when tracking started or a savestate loaded are read back from stack memory at the next call.
 
 ## Tools
 
@@ -84,12 +107,35 @@ with JIT off when you rerecord.
 
 The Qt console has #1671's API plus the debugger tables from the headless build: `event.onmemoryexecute`,
 `onmemoryread`, `onmemorywrite`, `onframeend`, `emu.getregister`, `setregister`, `getregisters` and
-`debugger.*` (`callstack`, `trackcalls`, `callcounts`, `coverage`, `trace`, `trackwriters`,
+`debugger.*` (`callstack`, `threadstacks`, `trackcalls`, `callcounts`, `coverage`, `trace`, `trackwriters`,
 `lastwriter`, `pause`, `step`, `resume`, `peek`).
+
+`wifi.hook(fn, name)` installs a local wireless driver: `fn` sees every frame the console sends or
+receives (MP commands, replies and acks, beacons, management and data frames, local play and
+Nintendo WFC alike) as `{tx, data, rate, channel, time}`, where `data` is the 802.11 frame with its
+FCS. Return `false` to drop the frame or a string to replace it. `wifi.inject(data, rate)` delivers a
+frame as if it had been received. `wifi.decode(data)` returns the 802.11 header (type, subtype,
+flags, addresses, sequence), the Nintendo MP fields (`kind` `mpcmd`/`mpreply`/`mpack`, client
+mask and time, command count, failed clients, payload), WEP IV and ICV, LLC/SNAP and ethertype for
+data frames, and fixed fields and elements (SSID, channel, the Nintendo vendor element) for
+management frames. Wifi hooks also run with JIT on; remove them with `event.unregisterbyid` or
+`unregisterbyname`.
 
 Memory hooks run on the emulator thread at the instruction that hit them, so `emu.getregister`
 there is exact. `gui`, `forms`, `input`, `client`, `savestate` and `console` are refused inside a
 hook: set a variable there and act on it in `_Update`.
+
+In an exec hook, `memory.execute(op, ...)` (opcodes as numbers or one table, ARM or Thumb by the
+current state, a Thumb BL as one 32-bit value) runs those instructions as if they sat in front of
+the hooked one, with PC reading as it would there. It returns `true` when one of them branched: the
+hooked instruction is skipped and execution continues at the target, so `memory.execute(0xE12FFF1E)`
+(`bx lr`, `0x4770` in Thumb) at a function's entry makes it return at once. A call (`bl`, `blx`,
+`swi`) returns to the hooked instruction with r0-r3, r12, lr and the flags as they were before
+`memory.execute`, and that return does not fire the instruction's hooks again, so a hook can call a
+function on every hit without a guard; the callee's return value is not kept. Otherwise the hooked
+instruction runs next. Code written
+from a hook with `memory.write*` takes effect on the instruction about to run, and setting `pc` or
+the T bit with `emu.setregister` or DeSmuME's `memory.setregister` jumps there. It needs JIT off.
 
 DeSmuME scripts run unchanged: `emu` (`frameadvance`, `registerbefore`, `registerafter`,
 `emulateframe`, `framecount`, `lagcount`, `lagged`, ...), `memory` (`readbyte` to `readdwordsigned`,

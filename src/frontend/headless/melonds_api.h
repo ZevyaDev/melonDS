@@ -91,9 +91,10 @@ typedef struct
 } mds_packet;
 
 // Reference: docs/headless-api.md, section 1 (library-wide settings, errors, version and features).
-// API level: 1 up to the IPC merge, 2 from fix/api-quirks, 3 from feature/cheats (MDS_API_VERSION). It goes up
-// whenever functions are added or behaviour changes; mds_has names the individual features.
-#define MDS_API_VERSION 3
+// API level: 1 up to the IPC merge, 2 from fix/api-quirks, 3 from feature/cheats, 4 from merge/upstream-debug
+// (MDS_API_VERSION). It goes up whenever functions are added or behaviour changes; mds_has names the individual
+// features.
+#define MDS_API_VERSION 4
 MDS_API int mds_version(void);
 // 1 if the library has the named feature or exported function ("serve_host", "mds_serve_host", ...; the list
 // is in docs/headless-api.md, section 1), else 0. Absent from libraries before API level 2: look the symbol up.
@@ -206,6 +207,10 @@ MDS_API int mds_trace(int id, uint32_t cpumask, uint32_t start, uint32_t end, ui
 MDS_API int mds_trace_take(int id, mds_trace_entry* out, int max);
 MDS_API int mds_calls(int id, int enabled);
 MDS_API int mds_callstack(int id, int cpu, mds_frame* out, int max);
+// The stacks of the threads that are not running (API level 4, "thread_stacks"): up to max_stacks stacks, their
+// SPs in sps and frame counts in depths, the frames of all of them packed into out (innermost first per stack, at
+// most max_frames in total). Returns the number of stacks.
+MDS_API int mds_threadstacks(int id, int cpu, uint32_t* sps, uint32_t* depths, int max_stacks, mds_frame* out, int max_frames);
 MDS_API int mds_callcounts_take(int id, int cpu, uint32_t* entries, uint64_t* counts, int max);
 MDS_API int mds_coverage(int id, int enabled);
 MDS_API int mds_coverage_take(int id, int cpu, uint32_t* out, int max);

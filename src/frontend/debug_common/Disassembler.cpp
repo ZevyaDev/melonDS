@@ -36,6 +36,86 @@ static s32 SignExtend(u32 value, int bits)
     return (s32)((value ^ m) - m);
 }
 
+static InstrKind ClassifyArm(u32 op)
+{
+    u32 rd = (op >> 12) & 0xF;
+    bool load = op & (1 << 20);
+    if ((op >> 28) == 0xF)
+        return (op & 0x0E000000) == 0x0A000000 ? InstrKind::Call : InstrKind::System;
+    if ((op & 0x0E000000) == 0x0A000000)
+        return (op & (1 << 24)) ? InstrKind::Call : InstrKind::Branch;
+    if ((op & 0x0FFFFFF0) == 0x012FFF30)
+        return InstrKind::Call;
+    if ((op & 0x0FFFFFF0) == 0x012FFF10)
+        return (op & 0xF) == 14 ? InstrKind::Return : InstrKind::Branch;
+    if ((op & 0x0C000000) == 0x0C000000)
+        return InstrKind::System;
+    if ((op & 0x0E000000) == 0x08000000)
+    {
+        if (load && (op & (1 << 15)))
+            return InstrKind::Return;
+        return load ? InstrKind::Load : InstrKind::Store;
+    }
+    if ((op & 0x0C000000) == 0x04000000)
+    {
+        if (load && rd == 15)
+            return ((op >> 16) & 0xF) == 13 ? InstrKind::Return : InstrKind::Branch;
+        return load ? InstrKind::Load : InstrKind::Store;
+    }
+    if ((op & 0x0E000090) == 0x00000090)
+    {
+        if ((op & 0x60) == 0)
+            return (op & 0x0FB00FF0) == 0x01000090 ? InstrKind::Load : InstrKind::Other;
+        return (load || (op & 0x60) == 0x40) ? InstrKind::Load : InstrKind::Store;
+    }
+    if ((op & 0x0F900000) == 0x01000000 && !load)
+        return (op & 0x0FFF0FF0) == 0x016F0F10 || (op & 0x0F900090) == 0x01000080 || (op & 0x0F9000F0) == 0x01000050
+            ? InstrKind::Other : InstrKind::System;
+    if ((op & 0x0FB00000) == 0x03200000)
+        return InstrKind::System;
+    u32 opcode = (op >> 21) & 0xF;
+    if (opcode >= 0x8 && opcode <= 0xB)
+        return InstrKind::Compare;
+    if (rd == 15)
+    {
+        bool lr = !(op & (1 << 25)) && (op & 0xFFF) == 14;
+        if ((opcode == 0xD && lr) || (load && opcode == 0x2 && ((op >> 16) & 0xF) == 14))
+            return InstrKind::Return;
+        return InstrKind::Branch;
+    }
+    return InstrKind::Other;
+}
+
+static InstrKind ClassifyThumb(u32 op, u8 size)
+{
+    u16 h = op & 0xFFFF;
+    if (size == 4 || (h & 0xE000) == 0xE000)
+        return (h & 0xF800) == 0xE000 ? InstrKind::Branch : InstrKind::Call;
+    if ((h & 0xFF87) == 0x4780)
+        return InstrKind::Call;
+    if ((h & 0xFF87) == 0x4700 || (h & 0xFF87) == 0x4687)
+        return ((h >> 3) & 0xF) == 14 ? InstrKind::Return : InstrKind::Branch;
+    if ((h & 0xFF87) == 0x4487)
+        return InstrKind::Branch;
+    if ((h & 0xF000) == 0xD000)
+        return (h & 0x0F00) >= 0x0E00 ? InstrKind::System : InstrKind::Branch;
+    if ((h & 0xFF00) == 0xBD00)
+        return InstrKind::Return;
+    if ((h & 0xF600) == 0xB400)
+        return (h & 0x0800) ? InstrKind::Load : InstrKind::Store;
+    if ((h & 0xF800) == 0x4800)
+        return InstrKind::Load;
+    if ((h & 0xF000) == 0x5000)
+        return (h & 0x0E00) <= 0x0400 ? InstrKind::Store : InstrKind::Load;
+    if ((h & 0xE000) == 0x6000 || (h & 0xE000) == 0x8000 || (h & 0xF000) == 0xC000)
+        return (h & 0x0800) ? InstrKind::Load : InstrKind::Store;
+    if ((h & 0xF800) == 0x2800 || (h & 0xFF00) == 0x4500 || (h & 0xFFC0) == 0x4200 || (h & 0xFF80) == 0x4280)
+        return InstrKind::Compare;
+    if ((h & 0xFF00) == 0xBE00)
+        return InstrKind::System;
+    return InstrKind::Other;
+}
+
 Disassembler::Disassembler()
 {
 #ifdef MELONDS_HAVE_CAPSTONE
@@ -196,6 +276,7 @@ DisasmLine Disassembler::decode(u32 addr, const u8* bytes, int avail, bool thumb
     line.Size = size;
 
     Analyze(line, thumb);
+    line.Kind = thumb ? ClassifyThumb(line.Opcode, size) : ClassifyArm(line.Opcode);
 
     if (thumb && size == 2 && (line.Opcode & 0xE000) == 0xE000 && (line.Opcode & 0x1800))
     {
@@ -227,5 +308,6 @@ DisasmLine Disassembler::decode(u32 addr, const u8* bytes, int avail, bool thumb
 #endif
     line.Mnemonic = thumb ? ".hword" : ".word";
     line.Operands = Format(thumb ? "0x%04x" : "0x%08x", line.Opcode);
+    line.Kind = InstrKind::Data;
     return line;
 }

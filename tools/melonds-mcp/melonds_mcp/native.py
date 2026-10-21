@@ -142,6 +142,7 @@ _SIGNATURES = {
     "mds_trace_take": (c_int, [c_int, POINTER(MdsTrace), c_int]),
     "mds_calls": (c_int, [c_int, c_int]),
     "mds_callstack": (c_int, [c_int, c_int, POINTER(MdsFrame), c_int]),
+    "mds_threadstacks": (c_int, [c_int, c_int, POINTER(c_uint32), POINTER(c_uint32), c_int, POINTER(MdsFrame), c_int]),
     "mds_callcounts_take": (c_int, [c_int, c_int, POINTER(c_uint32), POINTER(c_uint64), c_int]),
     "mds_coverage": (c_int, [c_int, c_int]),
     "mds_coverage_take": (c_int, [c_int, c_int, POINTER(c_uint32), c_int]),
@@ -263,7 +264,8 @@ def _mask(cpu):
 
 
 def api_version():
-    """The library's API level (mds_version): 1 up to the IPC merge, 2 from fix/api-quirks, 3 from feature/cheats."""
+    """The library's API level (mds_version): 1 up to the IPC merge, 2 from fix/api-quirks, 3 from feature/cheats,
+    4 from merge/upstream-debug."""
     return lib().mds_version()
 
 
@@ -274,6 +276,11 @@ def has(name):
     if lib().has_symbol("mds_has"):
         return bool(lib().mds_has(name.encode()))
     return name.startswith("mds_") and lib().has_symbol(name)
+
+
+def _frame(f):
+    return {"entry": f.entry, "site": f.site, "ret": f.ret, "sp": f.sp, "mode": f.mode,
+            "exception": bool(f.exception)}
 
 
 def mp_timeout(ms=-1):
@@ -556,8 +563,16 @@ class Console:
     def callstack(self, cpu=9):
         out = (MdsFrame * 4096)()
         n = _check(lib().mds_callstack(self.id, _cpu(cpu), out, 4096))
-        return [{"entry": f.entry, "site": f.site, "ret": f.ret, "sp": f.sp, "mode": f.mode,
-                 "exception": bool(f.exception)} for f in out[:n]]
+        return [_frame(f) for f in out[:n]]
+
+    def thread_stacks(self, cpu=9):
+        sps, depths, out = (c_uint32 * 64)(), (c_uint32 * 64)(), (MdsFrame * 8192)()
+        n = _check(lib().mds_threadstacks(self.id, _cpu(cpu), sps, depths, 64, out, 8192))
+        stacks, at = [], 0
+        for i in range(n):
+            stacks.append({"sp": sps[i], "frames": [_frame(f) for f in out[at:at + depths[i]]]})
+            at += depths[i]
+        return stacks
 
     def take_call_counts(self, cpu=9):
         counts = {}

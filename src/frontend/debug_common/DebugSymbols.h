@@ -50,6 +50,14 @@ public:
         std::string Original; // name before a label replaced it; still resolves
     };
 
+    // A delinked source file's address range in a module (dsd delinks.txt): [Start, End).
+    struct FileRange
+    {
+        melonDS::u32 Start;
+        melonDS::u32 End;
+        int File; // index into Set::SourceFiles
+    };
+
     struct Module
     {
         std::string Name;
@@ -58,6 +66,7 @@ public:
         melonDS::u32 Size = 0;
         std::vector<melonDS::u8> Image;
         std::vector<Symbol> Symbols;
+        std::vector<FileRange> Files; // sorted by Start
 
         const Symbol* find(melonDS::u32 addr) const;
         bool covers(melonDS::u32 addr) const { return addr >= Base && addr - Base < Size; }
@@ -66,13 +75,49 @@ public:
     struct Set
     {
         std::string Source;
+        std::string Base;                     // the folder or URL the config's paths are relative to
         std::vector<Module> Modules;
+        std::vector<std::string> SourceFiles; // delinked source paths, relative to Base
         // name -> (module, symbol index), in insertion order
         std::unordered_map<std::string, std::vector<std::pair<int, int>>> ByName;
         int SymbolCount = 0;
     };
 
-    bool load(const std::string& path, std::string& error);
+    // Where symbol files are read from. The default reads local files only; the Qt frontend supplies one that
+    // also downloads http(s) locations (a raw or github.com link to a config.yaml or its folder).
+    class Files
+    {
+    public:
+        virtual ~Files() = default;
+        virtual bool isRemote(const std::string& location) const;
+        // a folder becomes its config.yaml
+        virtual std::string normalize(const std::string& location) const;
+        virtual std::string dirOf(const std::string& file) const;
+        virtual std::string join(const std::string& dir, const std::string& relative) const;
+        // reads every location it can into out (keyed by location); missing ones are left out
+        virtual void readAll(const std::vector<std::string>& locations, std::unordered_map<std::string, std::string>& out) const;
+    };
+    static const Files& localFiles();
+
+    // An ARM9 overlay as stored in a ROM, decompressed.
+    struct RomOverlay
+    {
+        melonDS::u32 Base;
+        melonDS::u32 Size; // code + bss
+        std::vector<melonDS::u8> Image;
+    };
+    using RomOverlays = std::unordered_map<int, RomOverlay>;
+    // The overlays of the cart in nds (empty without a ROM). Reads the ROM: call it where the console is not
+    // changing its cart (its emulator thread in headless).
+    static RomOverlays readRomOverlays(melonDS::NDS* nds);
+    // Decompresses a BLZ (backwards LZ) overlay image in place; false if it is malformed.
+    static bool blzDecompress(std::vector<melonDS::u8>& data);
+
+    // Loads a dsd config.yaml (or its folder) or an "address name [size]" text file. Overlay images come from
+    // rom (the running ROM's overlays) when given and not empty, else from the extract the config's rom_config
+    // names. The overload with nds reads the overlays from its cart.
+    bool load(const std::string& path, std::string& error, const RomOverlays* rom = nullptr, const Files* files = nullptr);
+    bool load(const std::string& path, std::string& error, melonDS::NDS* nds, const Files* files = nullptr);
     void clear();
     bool empty() const { return !Cur || Cur->Modules.empty(); }
     std::string source() const { return Base ? Base->Source : std::string(); }
@@ -99,6 +144,10 @@ public:
 
     const Symbol* lookup(melonDS::u32 addr) const;
     const Module* moduleOf(const Symbol* sym) const;
+    // The delinked source file (relative to set()->Base) that holds addr, from the config's delinks.txt.
+    bool sourceFile(melonDS::u32 addr, std::string& file) const;
+    // An overlay of the set has no image to detect it by (the ROM was not available at load).
+    bool needsRom() const;
     std::string describe(melonDS::u32 addr, bool withModule = true) const;
     std::string exact(melonDS::u32 addr) const;
     bool resolve(const std::string& name, melonDS::u32& out) const;
@@ -121,6 +170,7 @@ private:
     std::string LabelSource;
     int Unmatched = 0;
     std::vector<int> Loaded;
+    bool Loading = false; // a Files reader may run an event loop; refuse to re-enter load
     bool Demangle = true;
 };
 
