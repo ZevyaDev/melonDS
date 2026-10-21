@@ -1,6 +1,7 @@
 """MCP tools that match the melonds CLI and native.py (tool functions called directly, as in test_mcp_server).
 
 Consoles boot FreeBIOS without a cart (see base.py); programs are written to main RAM where needed."""
+import asyncio
 import datetime
 import io
 import json
@@ -264,6 +265,19 @@ class McpToolsTest(unittest.TestCase):
         self.addCleanup(server.wireless_timeout, old)
         self.assertEqual(server.wireless_timeout(40), {"ms": 40})
         self.assertEqual(server.wireless_timeout(), {"ms": 40})
+
+    # through the real MCP server object (skipped with the test stubs)
+
+    @unittest.skipUnless(hasattr(server.server, "list_tools"), "mcp package not installed")
+    def test_registered_tools_and_error_messages(self):
+        names = {t.name for t in asyncio.run(server.server.list_tools())}
+        for name in ("cheat_add", "input_queue", "memory_sample", "server_info", "point_enable", "rtc_set"):
+            self.assertIn(name, names)
+        for helper in ("lua_frames", "key_names", "parse_range", "con", "tool"):
+            self.assertNotIn(helper, names)
+        with self.assertRaises(server.ToolError) as cm:
+            asyncio.run(server.server.call_tool("cheat_add", {"code": "nonsense", "console": self.c}))
+        self.assertIn("cheat: line 1", str(cm.exception))
 
     # watches and symbols
 

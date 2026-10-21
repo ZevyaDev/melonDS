@@ -1,3 +1,4 @@
+import functools
 import io
 import json
 import os
@@ -9,8 +10,14 @@ from PIL import Image as PILImage
 
 try:
     from mcp.server.mcpserver import Image, MCPServer as Server
+    from mcp.server.mcpserver.exceptions import ToolError
 except ImportError:
     from mcp.server.fastmcp import FastMCP as Server, Image
+    try:
+        from mcp.server.fastmcp.exceptions import ToolError
+    except ImportError:  # the test stubs
+        class ToolError(Exception):
+            pass
 
 from . import native
 from .cli.sequence import expand
@@ -42,6 +49,22 @@ FEATURES = ("api_version", "debug_off_errors", "count_checks", "load_rom_idle", 
             "gdb_host", "cheats")
 INPUT_CHUNK = 500  # payloads queued per run by input_queue; the queue holds 600
 SCREEN_ROWS = {"both": (0, 384), "top": (0, 192), "bottom": (192, 384)}
+
+
+def tool():
+    """Register a tool. The registered copy reports expected failures (MelonError, bad arguments, files) as a
+    ToolError, whose message reaches the client: mcp 2 shows any other exception only as "Error executing tool X".
+    The module keeps the plain function, so direct callers (the tests) still see the original exception."""
+    def register(fn):
+        @functools.wraps(fn)
+        def reported(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except (MelonError, ValueError, KeyError, OSError) as e:
+                raise ToolError(str(e) or type(e).__name__) from e
+        server.tool()(reported)
+        return fn
+    return register
 
 
 def con(console):
@@ -146,7 +169,7 @@ def group_result(group, timed_out, states):
     return out
 
 
-@server.tool()
+@tool()
 def console_create(nickname: str = "", bios9: str = "", bios7: str = "", firmware: str = "", rom: str = "", save: str = "", symbols: str = "") -> dict:
     """Create a console (debug interpreter). Empty BIOS/firmware use FreeBIOS and generated firmware. Optional rom loads it.
     Optional symbols is loaded into this console's symbol table (as symbols_load); new consoles otherwise start without symbols."""
@@ -160,7 +183,7 @@ def console_create(nickname: str = "", bios9: str = "", bios7: str = "", firmwar
     return {"console": c.id, "rom": c.rom}
 
 
-@server.tool()
+@tool()
 def console_destroy(console: int) -> str:
     """Destroy a console, dropping its symbol table (and its game's watches when no other console runs that game)."""
     con(console).close()
@@ -170,7 +193,7 @@ def console_destroy(console: int) -> str:
     return "destroyed"
 
 
-@server.tool()
+@tool()
 def console_list() -> dict:
     """List consoles with state, frame count, ROM and both CPUs' PCs."""
     out = {}
@@ -183,7 +206,7 @@ def console_list() -> dict:
     return out
 
 
-@server.tool()
+@tool()
 def rom_load(path: str, console: int = 0, save: str = "") -> str:
     """Load a ROM into a console and boot it (direct boot). save defaults to <rom>.sav (.sav.N for console N>0).
     The console then uses the watch list of that ROM's game. Loading a ROM clears the console's cheat codes."""
@@ -192,14 +215,14 @@ def rom_load(path: str, console: int = 0, save: str = "") -> str:
     return f"loaded {path}"
 
 
-@server.tool()
+@tool()
 def console_reset(console: int = 0) -> str:
     """Reset and reboot the loaded ROM."""
     con(console).reset()
     return "reset"
 
 
-@server.tool()
+@tool()
 def run(frames: int = 1, consoles: list[int] | None = None, timeout_s: float = 60) -> dict:
     """Run consoles together for N frames (all of them run concurrently, needed for local multiplayer).
     Stops early when any console hits a breakpoint/watchpoint/step; the others stop at their next instruction.
@@ -209,7 +232,7 @@ def run(frames: int = 1, consoles: list[int] | None = None, timeout_s: float = 6
     return group_result(group, timed_out, states)
 
 
-@server.tool()
+@tool()
 def pacing(fps: int = 0) -> str:
     """Run every console at most `fps` frames per wall-clock second (0 = as fast as possible). Local wireless between
     consoles needs real-time pacing (60) like the Qt frontend; everything else runs fastest unpaced."""
@@ -217,7 +240,7 @@ def pacing(fps: int = 0) -> str:
     return f"pacing {fps or 'off'}"
 
 
-@server.tool()
+@tool()
 def live_start(consoles: list[int] | None = None, fps: int = 60) -> str:
     """Run consoles continuously at `fps` (local wireless sessions need this: a console that stops stalls the others).
     Input, screenshots and memory reads work while live; stop with live_stop."""
@@ -227,7 +250,7 @@ def live_start(consoles: list[int] | None = None, fps: int = 60) -> str:
     return "live"
 
 
-@server.tool()
+@tool()
 def live_stop(consoles: list[int] | None = None, timeout_s: float = 30) -> dict:
     """Stop live consoles at their next frame boundary and turn pacing off."""
     group = [con(i) for i in (consoles or [0])]
@@ -238,7 +261,7 @@ def live_stop(consoles: list[int] | None = None, timeout_s: float = 30) -> dict:
     return group_result(group, timed_out, states)
 
 
-@server.tool()
+@tool()
 def wait(consoles: list[int] | None = None, timeout_s: float = 60) -> dict:
     """Wait for running consoles to finish or stop."""
     group = [con(i) for i in (consoles or [0])]
@@ -246,14 +269,14 @@ def wait(consoles: list[int] | None = None, timeout_s: float = 60) -> dict:
     return group_result(group, timed_out, states)
 
 
-@server.tool()
+@tool()
 def pause(console: int = 0) -> str:
     """Stop a running console at its next instruction."""
     con(console).interrupt()
     return "interrupt requested"
 
 
-@server.tool()
+@tool()
 def step(count: int = 1, cpu: int = 9, console: int = 0) -> dict:
     """Execute `count` instructions on one CPU (the other keeps time), then stop. Returns the code at the new PC."""
     c = con(console)
@@ -262,7 +285,7 @@ def step(count: int = 1, cpu: int = 9, console: int = 0) -> dict:
     return group_result([c], timed_out, states)
 
 
-@server.tool()
+@tool()
 def registers(cpu: int = 9, console: int = 0) -> dict:
     """Read registers. pc is the address of the next instruction to execute."""
     c = con(console)
@@ -274,7 +297,7 @@ def registers(cpu: int = 9, console: int = 0) -> dict:
     return out
 
 
-@server.tool()
+@tool()
 def set_register(name: str, value: str, cpu: int = 9, console: int = 0) -> str:
     """Write r0-r15/sp/lr/pc. Writing pc flushes the pipeline."""
     c = con(console)
@@ -282,7 +305,7 @@ def set_register(name: str, value: str, cpu: int = 9, console: int = 0) -> str:
     return "ok"
 
 
-@server.tool()
+@tool()
 def memory_read(address: str, length: int = 64, cpu: int = 9, console: int = 0, width: int = 1, path: str = "") -> str:
     """Hexdump memory (no side effects; IO registers read as 0). width 1/2/4 groups little-endian values.
     path: write the raw bytes to this file instead (e.g. a RAM dump) and return a short summary."""
@@ -305,7 +328,7 @@ def memory_read(address: str, length: int = 64, cpu: int = 9, console: int = 0, 
     return "\n".join(rows)
 
 
-@server.tool()
+@tool()
 def memory_write(address: str, hex_bytes: str = "", cpu: int = 9, console: int = 0, value: str = "", size: int = 4,
                  path: str = "") -> str:
     """Write to memory: raw bytes (hex_bytes), or one little-endian `value` of `size` bytes (1/2/4; a number, which
@@ -328,7 +351,7 @@ def memory_write(address: str, hex_bytes: str = "", cpu: int = 9, console: int =
     return f"wrote {len(data)} bytes"
 
 
-@server.tool()
+@tool()
 def memory_values(address: str, type: str = "u32", count: int = 1, cpu: int = 9, console: int = 0) -> dict:
     """Read `count` values of one type: u8 s8 u16 s16 u32 s32 fx32 fx16 (DS fixed point, /4096). ascii / utf16 read
     one string of up to `count` characters (to the first NUL)."""
@@ -344,7 +367,7 @@ def memory_values(address: str, type: str = "u32", count: int = 1, cpu: int = 9,
             "values": decode_values(type, c.read(addr, length, cpu))}
 
 
-@server.tool()
+@tool()
 def memory_search(value: str, size: int = 4, start: str = "0x02000000", length: int = 0x400000, console: int = 0, limit: int = 64,
                   cpu: int = 9) -> list[str]:
     """Find a little-endian value (size 1/2/4) or a hex byte string (size 0) in memory (cpu 9 or 7's bus)."""
@@ -360,7 +383,7 @@ def memory_search(value: str, size: int = 4, start: str = "0x02000000", length: 
     return hits
 
 
-@server.tool()
+@tool()
 def disassemble_at(address: str = "pc", count: int = 16, cpu: int = 9, mode: str = "auto", console: int = 0) -> str:
     """Disassemble with symbolized branch targets. mode: auto (symbol/CPSR), arm, thumb. address 'pc' = current PC."""
     c = con(console)
@@ -369,7 +392,7 @@ def disassemble_at(address: str = "pc", count: int = 16, cpu: int = 9, mode: str
     return disasm_text(c, addr, count, cpu, mode, mark=pc)
 
 
-@server.tool()
+@tool()
 def callstack(cpu: int = 9, console: int = 0) -> list[str]:
     """Shadow call stack (innermost first). Needs calls_track(true) before the calls happened."""
     c = con(console)
@@ -380,7 +403,7 @@ def callstack(cpu: int = 9, console: int = 0) -> list[str]:
     return out
 
 
-@server.tool()
+@tool()
 def screenshot(console: int = 0, screen: str = "both", path: str = "") -> Image:
     """The screens of the last completed frame as a PNG: screen both (256x384, top above bottom), top or bottom
     (256x192). path: also save the PNG to this file."""
@@ -396,7 +419,7 @@ def screenshot(console: int = 0, screen: str = "both", path: str = "") -> Image:
     return Image(data=buf.getvalue(), format="png")
 
 
-@server.tool()
+@tool()
 def press(buttons: list[str], frames: int = 6, release_frames: int = 6, console: int = 0) -> dict:
     """Hold buttons (A B X Y L R Start Select Up Down Left Right) for N frames, then release for M frames."""
     c = con(console)
@@ -408,7 +431,7 @@ def press(buttons: list[str], frames: int = 6, release_frames: int = 6, console:
     return group_result([c], timed_out, states)
 
 
-@server.tool()
+@tool()
 def input_sequence(steps: str, consoles: list[int] | None = None) -> dict:
     """Play inputs in one call: tokens like "A*4 w20 Down*30 A+B*2 w10" (buttons*frames held, wN waits N frames).
     Runs all listed consoles together, so it also drives multiplayer. Stops early on a break."""
@@ -429,7 +452,7 @@ def key_names(mask):
     return [k for i, k in enumerate(KEYS) if mask >> i & 1]
 
 
-@server.tool()
+@tool()
 def input_queue(sequence: str, frames: int = 0, run: bool = True, mode: str = "", release: bool = True,
                 console: int = 0, timeout_s: float = 120) -> dict:
     """Queue one input payload per frame and run them, frame-exact (the CLI's `input`). Tokens as input_sequence
@@ -469,7 +492,7 @@ def input_queue(sequence: str, frames: int = 0, run: bool = True, mode: str = ""
                                                    "queue_depth": c.input_depth()}
 
 
-@server.tool()
+@tool()
 def input_mode(mode: str = "", stall_frames: int = -1, console: int = 0) -> str:
     """What a frame gets when the console's input queue is empty: repeat (default: hold the last input), neutral
     (release keys and pen) or wait (block until input arrives: run then times out). Empty = unchanged.
@@ -481,7 +504,7 @@ def input_mode(mode: str = "", stall_frames: int = -1, console: int = 0) -> str:
     return f"mode {mode or 'unchanged'}, stall {'unchanged' if stall_frames < 0 else stall_frames}"
 
 
-@server.tool()
+@tool()
 def input_status(console: int = 0) -> dict:
     """Payloads queued, and whether the console is blocked at a frame boundary waiting for input (wait mode or
     a multiplayer barrier)."""
@@ -489,7 +512,7 @@ def input_status(console: int = 0) -> dict:
     return {"queue_depth": c.input_depth(), "waiting": c.input_waiting()}
 
 
-@server.tool()
+@tool()
 def input_clear(console: int = 0) -> dict:
     """Drop the queued input payloads (the held keys and the input log stay)."""
     c = con(console)
@@ -497,7 +520,7 @@ def input_clear(console: int = 0) -> dict:
     return {"queue_depth": c.input_depth()}
 
 
-@server.tool()
+@tool()
 def input_log(from_frame: int = 0, limit: int = 4096, path: str = "", console: int = 0) -> dict:
     """Applied-input log, oldest first: one entry per consumed payload (frames that ran on the empty-queue rule
     have none). Reading does not clear it; reset and rom_load do. path: save the log as JSON there instead."""
@@ -510,7 +533,7 @@ def input_log(from_frame: int = 0, limit: int = 4096, path: str = "", console: i
     return doc
 
 
-@server.tool()
+@tool()
 def lid_set(closed: bool = True, console: int = 0) -> str:
     """Close or open the lid (applies at the next frame; the game sees it as a sleep request)."""
     con(console).set_lid(closed)
@@ -524,7 +547,7 @@ def parse_range(text, c):
     return addr_of(parts[0], c), int(parts[1], 0), int(parts[2], 0) if len(parts) == 3 else 9
 
 
-@server.tool()
+@tool()
 def memory_sample(ranges: list[str], frames: int = 1, every: int = 1, console: int = 0, timeout_s: float = 120) -> dict:
     """Sample memory while running (the CLI's `subscribe`): run `every` frames, read each range, `frames` times.
     ranges: "ADDR:LEN[:CPU]" (ADDR may be a symbol). Returns one {frame, data: [hex per range]} per sample;
@@ -542,7 +565,7 @@ def memory_sample(ranges: list[str], frames: int = 1, every: int = 1, console: i
     return group_result([c], timed_out, states) | {"samples": samples}
 
 
-@server.tool()
+@tool()
 def ramsearch_start(start: str = "0x02000000", length: int = 0x400000, size: int = 4, signed: bool = True, cpu: int = 9, console: int = 0) -> dict:
     """Begin a RAM search: snapshot every aligned value in the range. Then change the game state and narrow
     with ramsearch_filter, like DeSmuME's RAM Search."""
@@ -551,7 +574,7 @@ def ramsearch_start(start: str = "0x02000000", length: int = 0x400000, size: int
     return {"candidates": len(SEARCHES[console].cand)}
 
 
-@server.tool()
+@tool()
 def ramsearch_filter(compare: str, value: int | None = None, console: int = 0, show: int = 20) -> dict:
     """Keep candidates whose value, compared with the previous snapshot (or with `value`), matches:
     changed, unchanged, increased, decreased, eq, ne, gt, lt, ge, le, delta (current - previous == value)."""
@@ -562,7 +585,7 @@ def ramsearch_filter(compare: str, value: int | None = None, console: int = 0, s
     return {"candidates": n, "first": [f"{a:08x} {cur} (was {prev}) {describe(a, s.console)}" for a, cur, prev in s.rows(show)]}
 
 
-@server.tool()
+@tool()
 def ramsearch_list(limit: int = 100, console: int = 0) -> list[str]:
     """Current RAM search candidates with current and previous values."""
     s = SEARCHES.get(console)
@@ -571,7 +594,7 @@ def ramsearch_list(limit: int = 100, console: int = 0) -> list[str]:
     return [f"{a:08x} {cur} (was {prev}) {describe(a, s.console)}" for a, cur, prev in s.rows(limit)]
 
 
-@server.tool()
+@tool()
 def watch_add(name: str, address: str, type: str = "u32", cpu: int = 9, length: int = 0, note: str = "", console: int = 0) -> dict:
     """Name an address in the watch list of the console's game (consoles running the same ROM share it). Types: u8 s8 u16 s16 u32 s32 fx32 fx16 (DS fixed point /4096), bytes, ascii, utf16 (with length)."""
     c = con(console)
@@ -579,14 +602,14 @@ def watch_add(name: str, address: str, type: str = "u32", cpu: int = 9, length: 
     return watch_read(console)
 
 
-@server.tool()
+@tool()
 def watch_remove(name: str, console: int = 0) -> dict:
     """Remove a named watch."""
     watches_of(con(console)).remove(name)
     return watch_read(console)
 
 
-@server.tool()
+@tool()
 def watch_read(console: int = 0, names: list[str] | None = None) -> dict:
     """Current values of all watches, or of the named ones."""
     c = con(console)
@@ -599,14 +622,14 @@ def watch_read(console: int = 0, names: list[str] | None = None) -> dict:
     return {n: w.value(c, w.items[n]) for n in names}
 
 
-@server.tool()
+@tool()
 def watch_list(console: int = 0) -> dict:
     """The watch definitions of the console's game (address, type, cpu, length, note), without reading memory."""
     c = con(console)
     return {n: v | {"addr": f"{v['addr']:08x}", "at": describe(v["addr"], c)} for n, v in watches_of(c).items.items()}
 
 
-@server.tool()
+@tool()
 def watch_save(path: str, console: int = 0) -> str:
     """Save the console's game watch list as JSON, to share findings."""
     w = watches_of(con(console))
@@ -614,13 +637,13 @@ def watch_save(path: str, console: int = 0) -> str:
     return f"saved {len(w.items)} watches"
 
 
-@server.tool()
+@tool()
 def watch_load(path: str, console: int = 0) -> list[str]:
     """Load (merge) a watch list saved by watch_save into the console's game list."""
     return watches_of(con(console), True).load(path)
 
 
-@server.tool()
+@tool()
 def text_find(text: str, start: str = "0x02000000", length: int = 0x400000, console: int = 0,
               encodings: list[str] | None = None, limit: int = 32, cpu: int = 9) -> list[str]:
     """Find a string in memory as ASCII, UTF-16LE or UTF-8 (e.g. on-screen dialogue to locate the text buffer).
@@ -633,7 +656,7 @@ def text_find(text: str, start: str = "0x02000000", length: int = 0x400000, cons
     return [f"{a:08x} {enc} {describe(a, c)}" for a, enc in hits]
 
 
-@server.tool()
+@tool()
 def touch(x: int, y: int, frames: int = 6, console: int = 0) -> dict:
     """Touch the bottom screen at (x, y) for N frames, then release."""
     c = con(console)
@@ -643,7 +666,7 @@ def touch(x: int, y: int, frames: int = 6, console: int = 0) -> dict:
     return group_result([c], timed_out, states)
 
 
-@server.tool()
+@tool()
 def breakpoint_add(address: str, cpu: int | str = 9, condition: str = "", console: int = 0) -> dict:
     """Execution breakpoint. cpu: 9, 7 or both. condition: optional Lua expression (e.g. "emu.getregister('r0') == 3");
     the console stops only when it is true. Conditional breakpoints live in the console's Lua state (one CPU only)."""
@@ -661,7 +684,7 @@ def breakpoint_add(address: str, cpu: int | str = 9, condition: str = "", consol
     return {"id": point, "at": describe(addr, c)}
 
 
-@server.tool()
+@tool()
 def watchpoint_add(address: str, size: int = 4, read: bool = False, write: bool = True, cpu: str = "9", condition: str = "", console: int = 0) -> dict:
     """Data watchpoint on [address, address+size). cpu: 9, 7 or both. The stop reports pc, value and size.
     condition: optional Lua expression over addr, val, pc."""
@@ -679,7 +702,7 @@ def watchpoint_add(address: str, size: int = 4, read: bool = False, write: bool 
     return {"id": point, "data": describe(addr, c)}
 
 
-@server.tool()
+@tool()
 def point_remove(point: int, console: int = 0) -> str:
     """Remove a breakpoint or watchpoint by id."""
     c = con(console)
@@ -690,7 +713,7 @@ def point_remove(point: int, console: int = 0) -> str:
     return "removed"
 
 
-@server.tool()
+@tool()
 def point_enable(point: int, enabled: bool = True, console: int = 0) -> str:
     """Enable or disable a breakpoint or watchpoint by id (it keeps its hit count). Conditional (Lua) points
     cannot be disabled; remove them with point_remove."""
@@ -698,7 +721,7 @@ def point_enable(point: int, enabled: bool = True, console: int = 0) -> str:
     return "enabled" if enabled else "disabled"
 
 
-@server.tool()
+@tool()
 def point_list(console: int = 0) -> list[dict]:
     """List breakpoints and watchpoints with hit counts."""
     c = con(console)
@@ -710,7 +733,7 @@ def point_list(console: int = 0) -> list[dict]:
     return out
 
 
-@server.tool()
+@tool()
 def trace_start(capacity: int = 100000, cpu: str = "9", start: str = "0", end: str = "0xffffffff", console: int = 0) -> str:
     """Record executed instructions into a ring buffer (last `capacity` kept), optionally only PCs in [start, end].
     capacity 0 turns tracing off."""
@@ -719,7 +742,7 @@ def trace_start(capacity: int = 100000, cpu: str = "9", start: str = "0", end: s
     return "tracing"
 
 
-@server.tool()
+@tool()
 def trace_read(limit: int = 200, functions_only: bool = False, console: int = 0) -> list[str]:
     """Read and clear the trace (oldest first). functions_only collapses it to symbol transitions."""
     c = con(console)
@@ -736,14 +759,14 @@ def trace_read(limit: int = 200, functions_only: bool = False, console: int = 0)
     return out[-limit:]
 
 
-@server.tool()
+@tool()
 def calls_track(enabled: bool = True, console: int = 0) -> str:
     """Track calls (BL/BLX) and exceptions: shadow call stack plus per-function call counts."""
     con(console).track_calls(enabled)
     return "on" if enabled else "off"
 
 
-@server.tool()
+@tool()
 def calls_read(cpu: int = 9, top: int = 100, console: int = 0) -> list[str]:
     """Function call counts since the last read (clears them). Use around an action to see which functions it runs."""
     c = con(console)
@@ -752,14 +775,14 @@ def calls_read(cpu: int = 9, top: int = 100, console: int = 0) -> list[str]:
     return [f"{n:8d}  {addr:08x}  {describe(addr, c)}" for addr, n in rows]
 
 
-@server.tool()
+@tool()
 def coverage_track(enabled: bool = True, console: int = 0) -> str:
     """Record every executed instruction address (cheap bitmap)."""
     con(console).coverage(enabled)
     return "on" if enabled else "off"
 
 
-@server.tool()
+@tool()
 def coverage_read(cpu: int = 9, console: int = 0, addresses: int = 0) -> dict:
     """Executed code since the last read, grouped by symbol (clears it). addresses: also list up to this many
     executed instruction addresses (lowest first)."""
@@ -776,14 +799,14 @@ def coverage_read(cpu: int = 9, console: int = 0, addresses: int = 0) -> dict:
     return out
 
 
-@server.tool()
+@tool()
 def writers_track(enabled: bool = True, console: int = 0) -> str:
     """Remember the PC of the last write to every main-RAM word."""
     con(console).track_writers(enabled)
     return "on" if enabled else "off"
 
 
-@server.tool()
+@tool()
 def last_writer(address: str, console: int = 0) -> str:
     """Which instruction last wrote this main-RAM word (needs writers_track)."""
     c = con(console)
@@ -796,14 +819,14 @@ def last_writer(address: str, console: int = 0) -> str:
     return f"arm{cpu} {pc:08x} {describe(pc, c)}"
 
 
-@server.tool()
+@tool()
 def savestate_save(path: str, console: int = 0) -> str:
     """Save state at a frame boundary."""
     con(console).save_state(path)
     return f"saved {path}"
 
 
-@server.tool()
+@tool()
 def savestate_load(path: str, console: int = 0) -> str:
     """Load state at a frame boundary. A rejected file leaves the console unchanged. A successful load clears the
     console's cheat codes (they are not part of a state): re-add them with cheat_add after loading."""
@@ -817,7 +840,7 @@ def lua_frames(c, output, frames, timeout_s):
     return group_result([c], timed_out, states) | {"output": output + c.lua_output()}
 
 
-@server.tool()
+@tool()
 def lua_run(source: str, is_file: bool = False, console: int = 0, frames: int = 0, timeout_s: float = 60) -> str | dict:
     """Start a Lua script (BizHawk-style API: memory, emu, joypad, event, savestate, debugger).
     The main body runs as a coroutine: emu.frameadvance() yields one frame. Replaces the previous script and its hooks.
@@ -829,7 +852,7 @@ def lua_run(source: str, is_file: bool = False, console: int = 0, frames: int = 
     return c.lua_output() or "started"
 
 
-@server.tool()
+@tool()
 def lua_exec(code: str, console: int = 0, frames: int = 0, timeout_s: float = 60) -> str | dict:
     """Run a Lua chunk in the console's persistent Lua state (keeps hooks); returns printed output.
     frames: then run this many frames (hooks fire) and return the console state with all the output."""
@@ -840,27 +863,27 @@ def lua_exec(code: str, console: int = 0, frames: int = 0, timeout_s: float = 60
     return out
 
 
-@server.tool()
+@tool()
 def lua_output(console: int = 0) -> str:
     """Printed output and errors from Lua since the last read."""
     return con(console).lua_output()
 
 
-@server.tool()
+@tool()
 def lua_stop(console: int = 0) -> str:
     """Stop Lua and remove all Lua hooks (including conditional breakpoints)."""
     con(console).lua_stop()
     return "stopped"
 
 
-@server.tool()
+@tool()
 def packets_track(enabled: bool = True, capacity: int = 4096, console: int = 0) -> str:
     """Log local-wireless packets this console sends and receives."""
     con(console).packet_log(enabled, capacity)
     return "on" if enabled else "off"
 
 
-@server.tool()
+@tool()
 def packets_read(limit: int = 100, console: int = 0) -> list[str]:
     """Read and clear logged wireless packets."""
     kinds = {0: "data", 1: "cmd", 2: "reply", 3: "ack"}
@@ -871,7 +894,7 @@ def packets_read(limit: int = 100, console: int = 0) -> list[str]:
     return out
 
 
-@server.tool()
+@tool()
 def symbols_load(path: str, console: int = 0) -> dict:
     """Load symbols into one console's table: a dsd config.yaml (or its directory, e.g. config/usa/arm9) or an
     'addr name [size]' file. Overlay symbols resolve only while that overlay's code is in RAM.
@@ -879,13 +902,13 @@ def symbols_load(path: str, console: int = 0) -> dict:
     return SYMBOLS.setdefault(console, SymbolTable()).load(path)
 
 
-@server.tool()
+@tool()
 def symbols_clear(console: int = 0) -> str:
     """Drop one console's symbol table (addresses print as plain hex again)."""
     return "cleared" if SYMBOLS.pop(console, None) else "no symbols"
 
 
-@server.tool()
+@tool()
 def symbol_lookup(query: str, console: int = 0) -> dict:
     """Address to symbol, or symbol to address."""
     c = CONSOLES.get(console)
@@ -901,7 +924,7 @@ def symbol_lookup(query: str, console: int = 0) -> dict:
         return {"symbol": s.name, "addr": f"{s.addr:08x}", "size": s.size, "module": s.module, "thumb": s.thumb}
 
 
-@server.tool()
+@tool()
 def overlays_loaded(console: int = 0) -> list[str]:
     """Overlays whose code is currently in RAM (needs symbols_load of a dsd config)."""
     c = con(console)
@@ -909,7 +932,7 @@ def overlays_loaded(console: int = 0) -> list[str]:
     return [t.overlays[i].name for i in t.loaded_overlays(c)]
 
 
-@server.tool()
+@tool()
 def cheat_add(code: str, name: str = "", enabled: bool = True, console: int = 0) -> dict:
     """Add an Action Replay (AR DS) code: "XXXXXXXX YYYYYYYY" lines. melonDS's AR engine runs the enabled codes once
     per frame, when the ARM7 takes the VBlank IRQ. A malformed code fails naming the line and adds nothing.
@@ -919,13 +942,13 @@ def cheat_add(code: str, name: str = "", enabled: bool = True, console: int = 0)
     return c.cheat(c.add_cheat(code, name, enabled))
 
 
-@server.tool()
+@tool()
 def cheat_list(console: int = 0) -> list[dict]:
     """The console's cheat codes in list (= run) order: id, name, enabled, words, code text (normalised)."""
     return con(console).cheats()
 
 
-@server.tool()
+@tool()
 def cheat_enable(cheat: int, enabled: bool = True, console: int = 0) -> dict:
     """Enable or disable a code by id. Disabling does not undo what the code already wrote."""
     c = con(console)
@@ -933,26 +956,26 @@ def cheat_enable(cheat: int, enabled: bool = True, console: int = 0) -> dict:
     return c.cheat(cheat)
 
 
-@server.tool()
+@tool()
 def cheat_remove(cheat: int, console: int = 0) -> str:
     """Remove a code by id (ids are never reused). Its earlier writes stay in memory."""
     con(console).remove_cheat(cheat)
     return "removed"
 
 
-@server.tool()
+@tool()
 def cheat_clear(console: int = 0) -> dict:
     """Remove every code of the console."""
     return {"removed": con(console).clear_cheats()}
 
 
-@server.tool()
+@tool()
 def rtc_get(console: int = 0) -> str:
     """The console's real-time clock as ISO 8601 (console stopped)."""
     return con(console).rtc().isoformat()
 
 
-@server.tool()
+@tool()
 def rtc_set(when: str, console: int = 0) -> str:
     """Set the real-time clock: ISO 8601 date and time ("2009-07-11T12:00:00", year 2000-2099) or "now"
     (the host's local time). The console must be stopped; reset keeps the clock."""
@@ -965,7 +988,7 @@ def rtc_set(when: str, console: int = 0) -> str:
     return c.rtc().isoformat()
 
 
-@server.tool()
+@tool()
 def gdb_start(port9: int = 3333, port7: int = 3334, break_on_start: bool = False, console: int = 0) -> str:
     """Start the GDB stubs of a stopped console on 127.0.0.1 (ARM9 on port9, ARM7 on port7) for gdb's
     `target remote`. break_on_start: both CPUs wait for GDB at their next instruction. While GDB holds a CPU
@@ -974,21 +997,21 @@ def gdb_start(port9: int = 3333, port7: int = 3334, break_on_start: bool = False
     return f"gdb on 127.0.0.1:{port9} (arm9), 127.0.0.1:{port7} (arm7)"
 
 
-@server.tool()
+@tool()
 def gdb_stop(console: int = 0) -> str:
     """Stop the console's GDB stubs."""
     con(console).gdb(0, 0)
     return "stopped"
 
 
-@server.tool()
+@tool()
 def wireless_timeout(ms: int = -1) -> dict:
     """Receive timeout of the in-process local-wireless link in ms (default 25); ms >= 0 sets it, -1 reads it.
     Needs a console to exist."""
     return {"ms": native.mp_timeout(ms)}
 
 
-@server.tool()
+@tool()
 def server_info() -> dict:
     """The library's API level and features (mds_has), the process id, instance base and console ids:
     what the CLI's `attach` reports for a socket server."""
@@ -996,7 +1019,7 @@ def server_info() -> dict:
             "pid": os.getpid(), "instance_base": native.instance_base(), "consoles": sorted(CONSOLES)}
 
 
-@server.tool()
+@tool()
 def console_info(console: int = 0) -> dict:
     """One console in detail: state, frames, ROM, save file, MAC, input queue, cheat count, symbol source, and
     the RTC (when stopped)."""
