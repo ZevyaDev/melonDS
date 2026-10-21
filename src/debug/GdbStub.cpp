@@ -345,8 +345,7 @@ StubState GdbStub::Poll(bool wait)
 		Handle_Question(this, NULL, 0); // ugly hack but it should work
 	}
 
-	// gdb sends its next command right behind a ^C, so a whole packet can already be
-	// buffered from the last recv(). poll()/select() won't report it, so check first.
+	// gdb pipelines its next packet behind a ^C; poll()/select() cannot see it once buffered
 	ReadResult res = RecvBufferFilled > 0 ? ParseAndSetupPacket() : ReadResult::NoPacket;
 	if (res == ReadResult::NoPacket)
 	{
@@ -523,9 +522,7 @@ StubState GdbStub::Enter(bool stay, TgtStatus stat, u32 arg, bool wait_for_conn)
 		case StubState::Break:
 			if (Stat != TgtStatus::None && Stat != TgtStatus::Running)
 			{
-				// Already stopped, and gdb has had (or is reading) our stop reply: a ^C
-				// that crossed it is stale. Ignore it like gdbserver does; answering it
-				// with a second stop reply lands mid-exchange and desyncs the link.
+				// a ^C that crossed our stop reply; a second reply would desync gdb, so drop it
 				Log(LogLevel::Info, "[GDB] ignoring break, target already stopped\n");
 				st = StubState::None;
 				break;
