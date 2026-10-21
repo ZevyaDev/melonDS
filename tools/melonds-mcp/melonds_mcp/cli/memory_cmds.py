@@ -1,28 +1,16 @@
 """Commands about memory, registers, symbols and per-game watch lists."""
 import os
 import re
-import struct
 from pathlib import Path
 
 from ..client import ENC_ASCII, ENC_UTF8, ENC_UTF16LE
-from ..ramtools import WATCH_TYPES, Watches
+from ..ramtools import WATCH_TYPES, Watches, decode_values
 from .common import CliError, Session, home_dir, int_arg
 
 ENC_NAMES = {ENC_ASCII: "ascii", ENC_UTF16LE: "utf16le", ENC_UTF8: "utf8"}
 ENC_BITS = {"ascii": ENC_ASCII, "utf16": ENC_UTF16LE, "utf16le": ENC_UTF16LE, "utf8": ENC_UTF8}
 VIEW_TYPES = sorted(WATCH_TYPES) + ["ascii", "utf16"]
 HEADER_GAME_CODE = 0x027FFE0C        # cart header copy in main RAM (header offset 0x0C)
-
-
-def decode_values(kind, raw):
-    if kind in WATCH_TYPES:
-        size, fmt = WATCH_TYPES[kind]
-        count = len(raw) // size
-        vals = list(struct.unpack("<" + fmt[1] * count, raw[:count * size]))
-        return [round(v / 4096, 4) for v in vals] if kind.startswith("fx") else vals
-    if kind == "ascii":
-        return [raw.split(b"\0")[0].decode("latin-1")]
-    return [raw.decode("utf-16-le", errors="replace").split("\0")[0]]
 
 
 # ----------------------------------------------------------------------------- read / write

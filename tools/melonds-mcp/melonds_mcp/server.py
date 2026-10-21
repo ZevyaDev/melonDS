@@ -1,6 +1,8 @@
 import io
+import json
 import os
 import struct
+from datetime import datetime
 from pathlib import Path
 
 from PIL import Image as PILImage
@@ -11,9 +13,10 @@ except ImportError:
     from mcp.server.fastmcp import FastMCP as Server, Image
 
 from . import native
+from .cli.sequence import expand
 from .disasm import disassemble, format_lines
-from .native import Console, MelonError, PARKED, RUNNING
-from .ramtools import COMPARES, RamSearch, Watches, parse_sequence, text_search
+from .native import KEYS, Console, MelonError, PARKED, RUNNING
+from .ramtools import COMPARES, WATCH_TYPES, RamSearch, Watches, decode_values, parse_sequence, text_search
 from .symbols import SymbolTable
 
 server = Server(
@@ -33,6 +36,12 @@ WATCH_LISTS: dict[tuple, Watches] = {}  # per game, see watch_key
 NO_SYMBOLS = SymbolTable()  # stays empty
 STATE_NAMES = {0: "idle", 1: "running", 2: "stopped"}
 HEX_DIGITS = set("0123456789abcdefABCDEF")
+# mds_has feature names (docs/headless-api.md, "Version and features"); server_info reports the ones the library has
+FEATURES = ("api_version", "debug_off_errors", "count_checks", "load_rom_idle", "lua_queue", "step_exact", "dma_break",
+            "lastwriter_query", "savestate_input", "savestate_debug_reset", "mic_noise_emulated", "serve_host",
+            "gdb_host", "cheats")
+INPUT_CHUNK = 500  # payloads queued per run by input_queue; the queue holds 600
+SCREEN_ROWS = {"both": (0, 384), "top": (0, 192), "bottom": (192, 384)}
 
 
 def con(console):
@@ -177,7 +186,7 @@ def console_list() -> dict:
 @server.tool()
 def rom_load(path: str, console: int = 0, save: str = "") -> str:
     """Load a ROM into a console and boot it (direct boot). save defaults to <rom>.sav (.sav.N for console N>0).
-    The console then uses the watch list of that ROM's game."""
+    The console then uses the watch list of that ROM's game. Loading a ROM clears the console's cheat codes."""
     con(console).load_rom(path, save or None)
     prune_watches()
     return f"loaded {path}"
@@ -274,11 +283,15 @@ def set_register(name: str, value: str, cpu: int = 9, console: int = 0) -> str:
 
 
 @server.tool()
-def memory_read(address: str, length: int = 64, cpu: int = 9, console: int = 0, width: int = 1) -> str:
-    """Hexdump memory (no side effects; IO registers read as 0). width 1/2/4 groups little-endian values."""
+def memory_read(address: str, length: int = 64, cpu: int = 9, console: int = 0, width: int = 1, path: str = "") -> str:
+    """Hexdump memory (no side effects; IO registers read as 0). width 1/2/4 groups little-endian values.
+    path: write the raw bytes to this file instead (e.g. a RAM dump) and return a short summary."""
     c = con(console)
     addr = addr_of(address, c)
     data = c.read(addr, length, cpu)
+    if path:
+        Path(path).write_bytes(data)
+        return f"wrote {len(data)} bytes from {describe(addr, c)} to {path}"
     rows = []
     for off in range(0, len(data), 16):
         chunk = data[off:off + 16]
@@ -293,21 +306,52 @@ def memory_read(address: str, length: int = 64, cpu: int = 9, console: int = 0, 
 
 
 @server.tool()
-def memory_write(address: str, hex_bytes: str, cpu: int = 9, console: int = 0) -> str:
-    """Write raw bytes (hex string) to memory. Refuses IO registers."""
+def memory_write(address: str, hex_bytes: str = "", cpu: int = 9, console: int = 0, value: str = "", size: int = 4,
+                 path: str = "") -> str:
+    """Write to memory: raw bytes (hex_bytes), or one little-endian `value` of `size` bytes (1/2/4; a number, which
+    may be negative, or a symbol, e.g. a pointer), or the contents of the file at `path`. Give exactly one.
+    Refuses IO registers."""
     c = con(console)
-    data = bytes.fromhex(hex_bytes.replace(" ", ""))
+    if sum(map(bool, (hex_bytes, value, path))) != 1:
+        raise MelonError("memory_write needs exactly one of hex_bytes, value or path")
+    if hex_bytes:
+        data = bytes.fromhex(hex_bytes.replace(" ", ""))
+    elif value:
+        if size not in (1, 2, 4):
+            raise MelonError("size must be 1, 2 or 4")
+        text = value.strip()
+        number = -addr_of(text[1:], c) if text.startswith("-") else addr_of(text, c)
+        data = (number & ((1 << (8 * size)) - 1)).to_bytes(size, "little")
+    else:
+        data = Path(path).read_bytes()
     c.write(addr_of(address, c), data, cpu)
     return f"wrote {len(data)} bytes"
 
 
 @server.tool()
-def memory_search(value: str, size: int = 4, start: str = "0x02000000", length: int = 0x400000, console: int = 0, limit: int = 64) -> list[str]:
-    """Find a little-endian value (size 1/2/4) or a hex byte string (size 0) in memory."""
+def memory_values(address: str, type: str = "u32", count: int = 1, cpu: int = 9, console: int = 0) -> dict:
+    """Read `count` values of one type: u8 s8 u16 s16 u32 s32 fx32 fx16 (DS fixed point, /4096). ascii / utf16 read
+    one string of up to `count` characters (to the first NUL)."""
+    c = con(console)
+    addr = addr_of(address, c)
+    if type in WATCH_TYPES:
+        length = WATCH_TYPES[type][0] * count
+    elif type in ("ascii", "utf16"):
+        length = count * (2 if type == "utf16" else 1)
+    else:
+        raise MelonError(f"unknown type {type!r} ({', '.join(sorted(WATCH_TYPES))}, ascii, utf16)")
+    return {"addr": f"{addr:08x}", "at": describe(addr, c), "type": type,
+            "values": decode_values(type, c.read(addr, length, cpu))}
+
+
+@server.tool()
+def memory_search(value: str, size: int = 4, start: str = "0x02000000", length: int = 0x400000, console: int = 0, limit: int = 64,
+                  cpu: int = 9) -> list[str]:
+    """Find a little-endian value (size 1/2/4) or a hex byte string (size 0) in memory (cpu 9 or 7's bus)."""
     c = con(console)
     base = addr_of(start, c)
     needle = bytes.fromhex(value.replace(" ", "")) if size == 0 else addr_of(value, c).to_bytes(size, "little")
-    data = c.read(base, length)
+    data = c.read(base, length, cpu)
     hits, pos = [], data.find(needle)
     while pos >= 0 and len(hits) < limit:
         if size == 0 or pos % size == 0:
@@ -337,12 +381,18 @@ def callstack(cpu: int = 9, console: int = 0) -> list[str]:
 
 
 @server.tool()
-def screenshot(console: int = 0) -> Image:
-    """Both screens as one 256x384 PNG (top above bottom) from the last completed frame."""
-    px = bytes(con(console).screen())
-    img = PILImage.frombuffer("RGBA", (256, 384), px, "raw", "BGRA", 0, 1).convert("RGB")
+def screenshot(console: int = 0, screen: str = "both", path: str = "") -> Image:
+    """The screens of the last completed frame as a PNG: screen both (256x384, top above bottom), top or bottom
+    (256x192). path: also save the PNG to this file."""
+    if screen not in SCREEN_ROWS:
+        raise MelonError("screen must be both, top or bottom")
+    first, last = SCREEN_ROWS[screen]
+    px = bytes(con(console).screen())[first * 256 * 4:last * 256 * 4]
+    img = PILImage.frombuffer("RGBA", (256, last - first), px, "raw", "BGRA", 0, 1).convert("RGB")
     buf = io.BytesIO()
     img.save(buf, "PNG")
+    if path:
+        Path(path).write_bytes(buf.getvalue())
     return Image(data=buf.getvalue(), format="png")
 
 
@@ -420,10 +470,23 @@ def watch_remove(name: str, console: int = 0) -> dict:
 
 
 @server.tool()
-def watch_read(console: int = 0) -> dict:
-    """Current values of all watches."""
+def watch_read(console: int = 0, names: list[str] | None = None) -> dict:
+    """Current values of all watches, or of the named ones."""
     c = con(console)
-    return watches_of(c).read(c)
+    w = watches_of(c)
+    if not names:
+        return w.read(c)
+    for n in names:
+        if n not in w.items:
+            raise MelonError(f"no watch named {n!r}")
+    return {n: w.value(c, w.items[n]) for n in names}
+
+
+@server.tool()
+def watch_list(console: int = 0) -> dict:
+    """The watch definitions of the console's game (address, type, cpu, length, note), without reading memory."""
+    c = con(console)
+    return {n: v | {"addr": f"{v['addr']:08x}", "at": describe(v["addr"], c)} for n, v in watches_of(c).items.items()}
 
 
 @server.tool()
@@ -441,10 +504,16 @@ def watch_load(path: str, console: int = 0) -> list[str]:
 
 
 @server.tool()
-def text_find(text: str, start: str = "0x02000000", length: int = 0x400000, console: int = 0) -> list[str]:
-    """Find a string in memory as ASCII, UTF-16LE or UTF-8 (e.g. on-screen dialogue to locate the text buffer)."""
+def text_find(text: str, start: str = "0x02000000", length: int = 0x400000, console: int = 0,
+              encodings: list[str] | None = None, limit: int = 32, cpu: int = 9) -> list[str]:
+    """Find a string in memory as ASCII, UTF-16LE or UTF-8 (e.g. on-screen dialogue to locate the text buffer).
+    encodings: only these (ascii, utf16, utf8); limit: at most this many hits."""
     c = con(console)
-    return [f"{a:08x} {enc} {describe(a, c)}" for a, enc in text_search(c, text, addr_of(start, c), length)]
+    try:
+        hits = text_search(c, text, addr_of(start, c), length, limit, encodings, cpu)
+    except ValueError as e:
+        raise MelonError(str(e)) from None
+    return [f"{a:08x} {enc} {describe(a, c)}" for a, enc in hits]
 
 
 @server.tool()
@@ -458,17 +527,20 @@ def touch(x: int, y: int, frames: int = 6, console: int = 0) -> dict:
 
 
 @server.tool()
-def breakpoint_add(address: str, cpu: int = 9, condition: str = "", console: int = 0) -> dict:
-    """Execution breakpoint. condition: optional Lua expression (e.g. "emu.getregister('r0') == 3");
-    the console stops only when it is true. Conditional breakpoints live in the console's Lua state."""
+def breakpoint_add(address: str, cpu: int | str = 9, condition: str = "", console: int = 0) -> dict:
+    """Execution breakpoint. cpu: 9, 7 or both. condition: optional Lua expression (e.g. "emu.getregister('r0') == 3");
+    the console stops only when it is true. Conditional breakpoints live in the console's Lua state (one CPU only)."""
     c = con(console)
     addr = addr_of(address, c)
+    cpu_arg = "both" if str(cpu) == "both" else int(cpu)
     if condition:
-        dom = "ARM7" if cpu == 7 else "ARM9"
+        if cpu_arg == "both":
+            raise MelonError("a conditional breakpoint takes cpu 9 or 7")
+        dom = "ARM7" if cpu_arg == 7 else "ARM9"
         out = c.lua_exec(f"print(event.onmemoryexecute(function(addr, val, pc) return ({condition}) end, {addr}, 'mcp', '{dom}'))")
         point = int(out.split()[-1])
     else:
-        point = c.add_breakpoint(addr, cpu)
+        point = c.add_breakpoint(addr, cpu_arg)
     return {"id": point, "at": describe(addr, c)}
 
 
@@ -502,6 +574,14 @@ def point_remove(point: int, console: int = 0) -> str:
 
 
 @server.tool()
+def point_enable(point: int, enabled: bool = True, console: int = 0) -> str:
+    """Enable or disable a breakpoint or watchpoint by id (it keeps its hit count). Conditional (Lua) points
+    cannot be disabled; remove them with point_remove."""
+    con(console).enable_point(point, enabled)
+    return "enabled" if enabled else "disabled"
+
+
+@server.tool()
 def point_list(console: int = 0) -> list[dict]:
     """List breakpoints and watchpoints with hit counts."""
     c = con(console)
@@ -515,7 +595,8 @@ def point_list(console: int = 0) -> list[dict]:
 
 @server.tool()
 def trace_start(capacity: int = 100000, cpu: str = "9", start: str = "0", end: str = "0xffffffff", console: int = 0) -> str:
-    """Record executed instructions into a ring buffer (last `capacity` kept), optionally only PCs in [start, end]."""
+    """Record executed instructions into a ring buffer (last `capacity` kept), optionally only PCs in [start, end].
+    capacity 0 turns tracing off."""
     c = con(console)
     c.trace(capacity, "both" if cpu == "both" else int(cpu), addr_of(start, c), addr_of(end, c))
     return "tracing"
@@ -562,16 +643,20 @@ def coverage_track(enabled: bool = True, console: int = 0) -> str:
 
 
 @server.tool()
-def coverage_read(cpu: int = 9, console: int = 0) -> dict:
-    """Executed code since the last read, grouped by symbol (clears it)."""
+def coverage_read(cpu: int = 9, console: int = 0, addresses: int = 0) -> dict:
+    """Executed code since the last read, grouped by symbol (clears it). addresses: also list up to this many
+    executed instruction addresses (lowest first)."""
     c = con(console)
     addrs = c.take_coverage(cpu)
     funcs = {}
     for a in addrs:
         name = describe(a, c).split("+")[0]
         funcs[name] = funcs.get(name, 0) + 1
-    return {"instructions": len(addrs), "functions": len(funcs),
-            "by_function": dict(sorted(funcs.items(), key=lambda kv: -kv[1])[:500])}
+    out = {"instructions": len(addrs), "functions": len(funcs),
+           "by_function": dict(sorted(funcs.items(), key=lambda kv: -kv[1])[:500])}
+    if addresses:
+        out["addresses"] = [f"{a:08x}" for a in sorted(addrs)[:addresses]]
+    return out
 
 
 @server.tool()
@@ -603,24 +688,39 @@ def savestate_save(path: str, console: int = 0) -> str:
 
 @server.tool()
 def savestate_load(path: str, console: int = 0) -> str:
-    """Load state at a frame boundary. A rejected file leaves the console unchanged."""
+    """Load state at a frame boundary. A rejected file leaves the console unchanged. A successful load clears the
+    console's cheat codes (they are not part of a state): re-add them with cheat_add after loading."""
     con(console).load_state(path)
     return f"loaded {path}"
 
 
+def lua_frames(c, output, frames, timeout_s):
+    """Run `frames` frames after a Lua call and collect the output printed meanwhile."""
+    timed_out, states = native.run_group([c], frames, int(timeout_s * 1000))
+    return group_result([c], timed_out, states) | {"output": output + c.lua_output()}
+
+
 @server.tool()
-def lua_run(source: str, is_file: bool = False, console: int = 0) -> str:
+def lua_run(source: str, is_file: bool = False, console: int = 0, frames: int = 0, timeout_s: float = 60) -> str | dict:
     """Start a Lua script (BizHawk-style API: memory, emu, joypad, event, savestate, debugger).
-    The main body runs as a coroutine: emu.frameadvance() yields one frame. Replaces the previous script and its hooks."""
+    The main body runs as a coroutine: emu.frameadvance() yields one frame. Replaces the previous script and its hooks.
+    frames: then run this many frames and return the console state with all the output printed meanwhile."""
     c = con(console)
     c.lua_run(source, is_file)
+    if frames:
+        return lua_frames(c, c.lua_output(), frames, timeout_s)
     return c.lua_output() or "started"
 
 
 @server.tool()
-def lua_exec(code: str, console: int = 0) -> str:
-    """Run a Lua chunk in the console's persistent Lua state (keeps hooks); returns printed output."""
-    return con(console).lua_exec(code)
+def lua_exec(code: str, console: int = 0, frames: int = 0, timeout_s: float = 60) -> str | dict:
+    """Run a Lua chunk in the console's persistent Lua state (keeps hooks); returns printed output.
+    frames: then run this many frames (hooks fire) and return the console state with all the output."""
+    c = con(console)
+    out = c.lua_exec(code)
+    if frames:
+        return lua_frames(c, out, frames, timeout_s)
+    return out
 
 
 @server.tool()
@@ -660,6 +760,12 @@ def symbols_load(path: str, console: int = 0) -> dict:
     'addr name [size]' file. Overlay symbols resolve only while that overlay's code is in RAM.
     Tables are per console; a console id that does not exist yet gets its table when it is created."""
     return SYMBOLS.setdefault(console, SymbolTable()).load(path)
+
+
+@server.tool()
+def symbols_clear(console: int = 0) -> str:
+    """Drop one console's symbol table (addresses print as plain hex again)."""
+    return "cleared" if SYMBOLS.pop(console, None) else "no symbols"
 
 
 @server.tool()

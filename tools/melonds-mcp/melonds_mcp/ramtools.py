@@ -115,10 +115,36 @@ class Watches:
         return list(self.items)
 
 
-def text_search(console, text, start=0x02000000, length=0x400000, limit=32):
-    data = console.read(start, length)
+def decode_values(kind, raw):
+    """Decode little-endian bytes as an array of one watch type (u8 ... fx16; fx values are /4096), or as one
+    ascii / utf16 string (up to the first NUL)."""
+    if kind in WATCH_TYPES:
+        size, fmt = WATCH_TYPES[kind]
+        count = len(raw) // size
+        vals = list(struct.unpack("<" + fmt[1] * count, raw[:count * size]))
+        return [round(v / 4096, 4) for v in vals] if kind.startswith("fx") else vals
+    if kind == "ascii":
+        return [raw.split(b"\0")[0].decode("latin-1")]
+    return [raw.decode("utf-16-le", errors="replace").split("\0")[0]]
+
+
+TEXT_ENCODINGS = {"ascii": "ascii", "utf16": "utf-16-le", "utf16le": "utf-16-le", "utf-16-le": "utf-16-le",
+                  "utf8": "utf-8", "utf-8": "utf-8"}
+
+
+def text_search(console, text, start=0x02000000, length=0x400000, limit=32, encodings=None, cpu=9):
+    """(addr, encoding) of each hit of `text` as ASCII, UTF-16LE and UTF-8, or only as `encodings` (names
+    from TEXT_ENCODINGS); at most `limit` hits."""
+    if encodings:
+        for e in encodings:
+            if e.lower() not in TEXT_ENCODINGS:
+                raise ValueError(f"unknown encoding {e!r} (ascii, utf16, utf8)")
+        encs = list(dict.fromkeys(TEXT_ENCODINGS[e.lower()] for e in encodings))
+    else:
+        encs = ["ascii", "utf-16-le", "utf-8"]
+    data = console.read(start, length, cpu)
     hits = []
-    for enc in ("ascii", "utf-16-le", "utf-8"):
+    for enc in encs:
         try:
             needle = text.encode(enc)
         except UnicodeEncodeError:
