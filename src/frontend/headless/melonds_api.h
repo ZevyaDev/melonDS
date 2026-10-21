@@ -92,10 +92,10 @@ typedef struct
 } mds_packet;
 
 // Reference: docs/headless-api.md, section 1 (library-wide settings, errors, version and features).
-// API level: 1 up to the IPC merge, 2 from fix/api-quirks, 3 from feature/cheats, 4 from merge/upstream-debug
-// (MDS_API_VERSION). It goes up whenever functions are added or behaviour changes; mds_has names the individual
-// features.
-#define MDS_API_VERSION 5
+// API level: 1 up to the IPC merge, 2 from fix/api-quirks, 3 from feature/cheats, 4 from merge/upstream-debug,
+// 5 from merge/upstream-debug-2, 6 from fix/api-quirks-2 (MDS_API_VERSION). It goes up whenever functions are added
+// or behaviour changes; mds_has names the individual features.
+#define MDS_API_VERSION 6
 MDS_API int mds_version(void);
 // 1 if the library has the named feature or exported function ("serve_host", "mds_serve_host", ...; the list
 // is in docs/headless-api.md, section 1), else 0. Absent from libraries before API level 2: look the symbol up.
@@ -108,7 +108,8 @@ MDS_API void mds_set_pacing(int fps);
 
 // Reference: docs/headless-api.md, section 2 (lifecycle, save files, reset, clock).
 MDS_API int mds_create(const char* bios9, const char* bios7, const char* firmware, const char* nickname, int debug);
-MDS_API void mds_destroy(int id);
+// 0, or -1 for an unknown id (API level 6; it returned nothing before, so callers of older libraries ignore it).
+MDS_API int mds_destroy(int id);
 MDS_API int mds_load_rom(int id, const char* rom, const char* save);
 MDS_API int mds_reset(int id);
 // Clock as year (2000-2099), month, day, hour, minute, second. Needs a stopped console.
@@ -126,6 +127,8 @@ MDS_API int mds_stop_after(int id, uint32_t frames);
 MDS_API int mds_interrupt(int id);
 MDS_API int mds_state(int id);
 MDS_API int mds_take_break(int id, mds_break* out);
+// Frames run since the last reset or ROM load, or MDS_FRAMES_ERROR for an unknown id (API level 6; it was 0).
+#define MDS_FRAMES_ERROR UINT64_MAX
 MDS_API uint64_t mds_frames(int id);
 
 // Reference: docs/headless-api.md, section 3 (input queue, touch timeline, mic, input log).

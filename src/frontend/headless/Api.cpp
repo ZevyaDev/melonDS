@@ -251,6 +251,7 @@ int mds_has(const char* name)
         "pc_next",              // mds_get_regs pc = each CPU's next instruction at every park; frame-boundary requests too
         "write_regions",        // mds_write/Lua writes: halfwords for palette/VRAM/OAM, read back, errors name the region
         "packets_truncate",     // mds_packets_take cuts a first packet longer than max_data short (mds_packet.total)
+        "unknown_id_errors",    // mds_frames returns MDS_FRAMES_ERROR and mds_destroy -1 for an unknown id
     };
     static const char* const Functions[] = {
         "mds_has", "mds_serve_host", "mds_gdb_host", "mds_lastwriter_query",
@@ -347,14 +348,14 @@ int mds_create(const char* bios9, const char* bios7, const char* firmware, const
     return id;
 }
 
-void mds_destroy(int id)
+int mds_destroy(int id)
 {
     std::unique_ptr<Instance> inst;
     {
         std::lock_guard lock(SlotsLock);
         auto it = Slots.find(id);
         if (it == Slots.end())
-            return;
+            return Fail("no console " + std::to_string(id));
         inst = std::move(it->second.Inst);
         Slots.erase(it);
     }
@@ -366,6 +367,7 @@ void mds_destroy(int id)
     }
     if (hook)
         hook(id);
+    return 0;
 }
 
 int mds_load_rom(int id, const char* rom, const char* save)
@@ -564,7 +566,7 @@ int mds_take_break(int id, mds_break* out)
 uint64_t mds_frames(int id)
 {
     Slot* s = Find(id);
-    return s ? s->Inst->FramesRun : 0;
+    return s ? s->Inst->FramesRun : MDS_FRAMES_ERROR;
 }
 
 int mds_screen(int id, uint32_t* out)

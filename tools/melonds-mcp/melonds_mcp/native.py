@@ -15,6 +15,8 @@ KEYS = ["A", "B", "Select", "Start", "Right", "Left", "Up", "Down", "R", "L", "X
 WATCH_READ, WATCH_WRITE = 1, 2
 # pc of a DMA watchpoint break and tag of a DMA last-writer record: DMA_TAG | channel << 1 | (1 for ARM7)
 DMA_TAG = 0xFFFFFFF0
+# mds_frames for an unknown console (API level 6; older libraries return 0)
+FRAMES_ERROR = 0xFFFFFFFFFFFFFFFF
 
 
 class MdsBreak(Structure):
@@ -103,7 +105,7 @@ _SIGNATURES = {
     "mds_mp_timeout": (c_int, [c_int]),
     "mds_set_pacing": (None, [c_int]),
     "mds_create": (c_int, [c_char_p, c_char_p, c_char_p, c_char_p, c_int]),
-    "mds_destroy": (None, [c_int]),
+    "mds_destroy": (c_int, [c_int]),     # void before API level 6: the value is then meaningless
     "mds_load_rom": (c_int, [c_int, c_char_p, c_char_p]),
     "mds_reset": (c_int, [c_int]),
     "mds_set_rtc": (c_int, [c_int, c_int, c_int, c_int, c_int, c_int, c_int]),
@@ -462,7 +464,10 @@ class Console:
 
     @property
     def frames(self):
-        return lib().mds_frames(self.id)
+        n = lib().mds_frames(self.id)
+        if n == FRAMES_ERROR and api_version() >= 6:
+            raise MelonError(lib().mds_error().decode(errors="replace"))
+        return n
 
     def take_break(self):
         b = MdsBreak()

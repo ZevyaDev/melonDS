@@ -289,5 +289,30 @@ class PacketsNeverBlock(ConsoleTest):
         self.assertEqual(self.c.take_packets(), [{"timestamp": 0, "sent": True, "type": 0, "data": bytes([7] * 4)}])
 
 
+class UnknownIds(unittest.TestCase):
+    def test_frames_of_an_unknown_console_is_an_error(self):
+        lib = native.lib()
+        self.assertEqual(lib.mds_frames(9999), native.FRAMES_ERROR)
+        self.assertIn("no console 9999", lib.mds_error().decode())
+        c = native.Console()
+        c.reset()
+        self.addCleanup(c.close)
+        self.assertEqual(c.frames, 0)          # a fresh console is 0, not the error
+        c.run(2)
+        self.assertEqual(c.frames, 2)
+
+    def test_destroy_of_an_unknown_console_is_an_error(self):
+        lib = native.lib()
+        self.assertEqual(lib.mds_destroy(9999), -1)
+        self.assertIn("no console 9999", lib.mds_error().decode())
+        c = native.Console()
+        i = c.id
+        self.assertEqual(lib.mds_destroy(i), 0)
+        c.id = None
+        self.assertEqual(lib.mds_destroy(i), -1)       # already gone
+        with self.assertRaises(MelonError):
+            native.Console.frames.fget(type("C", (), {"id": i})())
+
+
 if __name__ == "__main__":
     unittest.main()
