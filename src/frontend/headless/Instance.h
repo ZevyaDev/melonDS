@@ -19,6 +19,7 @@
 #ifndef HEADLESS_INSTANCE_H
 #define HEADLESS_INSTANCE_H
 
+#include <array>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -120,6 +121,10 @@ public:
     void WriteSave(const melonDS::u8* data, melonDS::u32 len);
     void LogPacket(bool sent, melonDS::u8 type, const melonDS::u8* data, int len, melonDS::u64 timestamp);
 
+    // The event of the current (or last) park and each CPU's R15 when it parked. Emulator thread.
+    const melonDS::BreakEvent& ParkEvent() const { return ParkedWith; }
+    melonDS::u32 ParkR15(int cpu) const { return ParkedR15[cpu & 1]; }
+
     // True while the emulator thread is blocked at a frame boundary in Wait mode.
     bool WaitingForInput();
 
@@ -149,6 +154,8 @@ private:
     bool WaitInterrupt = false;     // Interrupt() arrived while Waiting
     bool BarrierEvent = false;      // a barrier partner arrived, dropped out or entered a wireless receive
     melonDS::BreakEvent LastBreak {};
+    melonDS::BreakEvent ParkedWith {};
+    std::array<melonDS::u32, 2> ParkedR15 {};
 
     std::mutex PacketLock;
     bool PacketLogging = false;
@@ -177,6 +184,10 @@ int InstanceBase();
 bool SetInstanceBase(int base);
 // "<rom>.sav" for effective id 0, "<rom>.sav.N+1" otherwise.
 std::string DefaultSavePath(const std::string& romPath, int effectiveId);
+
+// The address of the instruction the CPU executes next, between two instructions (idle, and at every park but a
+// fault, which parks inside the faulting instruction).
+melonDS::u32 NextInstruction(const melonDS::ARM& cpu);
 
 melonDS::Net& Network();
 const std::string& LocalDirectory();

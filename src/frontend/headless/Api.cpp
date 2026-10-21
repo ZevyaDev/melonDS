@@ -248,6 +248,7 @@ int mds_has(const char* name)
         "gdb_extended",         // GDB extended mode (!): vKill keeps the connection, vRun restarts (direct boot kept)
         // API level 6 (fix/api-quirks-2)
         "interrupt_clean",      // a park and the end of a run drop leftover break requests; mds_interrupt ignores a stopped console
+        "pc_next",              // mds_get_regs pc = each CPU's next instruction at every park; frame-boundary requests too
     };
     static const char* const Functions[] = {
         "mds_has", "mds_serve_host", "mds_gdb_host", "mds_lastwriter_query",
@@ -783,8 +784,17 @@ int mds_get_regs(int id, int cpu, uint32_t* out)
         ARM& arm = CPU(inst, n);
         for (int i = 0; i < 15; i++)
             out[i] = arm.R[i];
-        out[15] = inst.GetState() == RunState::Parked ? inst.NDS->Debugger.CurPC[n]
-            : arm.R[15] - ((arm.CPSR & 0x20) ? 2 : 4);
+        // The instruction the CPU runs next: both CPUs are between two instructions when idle and at every
+        // park (an instruction break parks before its instruction, a watchpoint at the next one, a DMA break
+        // between two DMA units, a request at a frame boundary or an instruction), except at a fault, which
+        // parks inside the faulting instruction: there it is that instruction until the pc is changed.
+        out[15] = NextInstruction(arm);
+        if (inst.GetState() == RunState::Parked)
+        {
+            const BreakEvent& ev = inst.ParkEvent();
+            if (ev.Kind == BreakKind::Fault && ev.CPU == n && arm.R[15] == inst.ParkR15(n))
+                out[15] = ev.PC;
+        }
         out[16] = arm.CPSR;
         out[17] = SPSR(arm);
         out[18] = arm.R[15];

@@ -252,6 +252,11 @@ void Instance::Reset()
     Lua->OnReset();
 }
 
+u32 NextInstruction(const ARM& cpu)
+{
+    return cpu.R[15] - ((cpu.CPSR & 0x20) ? 2 : 4);
+}
+
 static std::atomic<int> PacingFPS = 0;
 
 void SetPacing(int fps)
@@ -457,7 +462,7 @@ bool Instance::AwaitBarrier(uint32_t group)
             WaitInterrupt = false;
             BreakEvent ev {};
             ev.Kind = BreakKind::Request;
-            ev.PC = NDS->ARM9->R[15];
+            ev.PC = NextInstruction(*NDS->ARM9);
             lock.unlock();
             Park(ev);
             return false;
@@ -514,7 +519,7 @@ bool Instance::AcquireInput(AppliedInput& out)
             WaitInterrupt = false;
             BreakEvent ev {};
             ev.Kind = BreakKind::Request;
-            ev.PC = NDS->ARM9->R[15];
+            ev.PC = NextInstruction(*NDS->ARM9);
             lock.unlock();
             Park(ev);
             return false;
@@ -535,6 +540,8 @@ void Instance::Park(const BreakEvent& ev)
         return;
     LastBreak = ev;
     BreakPending = true;
+    ParkedWith = ev;
+    ParkedR15 = {NDS->ARM9->R[15], NDS->ARM7->R[15]};
     State = RunState::Parked;
     // mds_interrupt asks both CPUs to break and only the first one parks: the other CPU's request (and those of
     // a group's other consoles, which mds_wait interrupts) would park the resume again at once.
