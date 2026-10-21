@@ -85,7 +85,8 @@ add_library(core STATIC
 
     blip-buf/blip_buf.c
 
-    debug/Debugger.cpp)
+    debug/Debugger.cpp
+    debug/RomOverlays.cpp)
 
 if (ENABLE_GDBSTUB)
     message(NOTICE "Enabling GDB stub")

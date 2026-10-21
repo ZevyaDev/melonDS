@@ -61,7 +61,7 @@ public:
         int Overlay = -1;
         melonDS::u32 Base = 0;
         melonDS::u32 Size = 0;
-        QByteArray Image;
+        std::vector<melonDS::u8> Image;
         std::vector<Symbol> Symbols;
         std::vector<FileRange> Files;
 

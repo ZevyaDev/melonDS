@@ -27,7 +27,7 @@
 #include "DebugSource.h"
 #include "DebugSymbols.h"
 #include "NDS.h"
-#include "NDSCart.h"
+#include "debug/RomOverlays.h"
 
 #if __has_include(<cxxabi.h>)
 #include <cxxabi.h>
@@ -55,9 +55,6 @@ QString DemangleName(const QString& name)
     return name;
 #endif
 }
-
-constexpr int SampleWindows = 8;
-constexpr int SampleBytes = 16;
 
 struct YNode
 {
@@ -355,103 +352,6 @@ void ParseDelinks(const QByteArray& data, DebugSymbols::Set& set, QHash<QString,
     std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.Start < b.Start; });
 }
 
-bool BlzDecompress(QByteArray& data)
-{
-    u32 len = (u32)data.size();
-    if (len < 8)
-        return false;
-    const u8* src = (const u8*)data.constData();
-    u32 footer, extra;
-    memcpy(&footer, src + len - 8, 4);
-    memcpy(&extra, src + len - 4, 4);
-    if (!extra)
-        return true;
-    u32 packed = footer & 0xFFFFFF;
-    u32 header = footer >> 24;
-    if (packed > len || header > packed || header < 8)
-        return false;
-    std::vector<u8> out(len + extra);
-    memcpy(out.data(), src, len);
-    u32 in = len - header;
-    u32 stop = len - packed;
-    u32 pos = len + extra;
-    while (in > stop)
-    {
-        u8 flags = src[--in];
-        for (int bit = 0; bit < 8 && in > stop; bit++, flags <<= 1)
-        {
-            if (!(flags & 0x80))
-            {
-                if (pos == 0)
-                    return false;
-                out[--pos] = src[--in];
-                continue;
-            }
-            if (in < stop + 2)
-                return false;
-            u32 hi = src[--in];
-            u32 lo = src[--in];
-            u32 count = (hi >> 4) + 3;
-            u32 disp = (((hi & 0xF) << 8) | lo) + 3;
-            for (u32 k = 0; k < count; k++)
-            {
-                if (pos == 0 || pos - 1 + disp >= out.size())
-                    return false;
-                out[pos - 1] = out[pos - 1 + disp];
-                pos--;
-            }
-        }
-    }
-    data = QByteArray((const char*)out.data(), (int)out.size());
-    return true;
-}
-
-struct RomOverlay
-{
-    u32 Base;
-    u32 Size;
-    QByteArray Image;
-};
-
-QHash<int, RomOverlay> ReadRomOverlays(NDS* nds)
-{
-    QHash<int, RomOverlay> out;
-    NDSCart::CartCommon* cart = nds ? nds->GetNDSCart() : nullptr;
-    if (!cart || !cart->GetROM())
-        return out;
-    const u8* rom = cart->GetROM();
-    u32 len = cart->GetROMLength();
-    const NDSHeader& h = cart->GetHeader();
-    auto word = [&](u32 off) {
-        u32 v = 0;
-        if ((u64)off + 4 <= len)
-            memcpy(&v, rom + off, 4);
-        return v;
-    };
-    for (u32 i = 0; i < h.ARM9OverlaySize / 32; i++)
-    {
-        u32 at = h.ARM9OverlayOffset + i * 32;
-        if ((u64)at + 32 > len)
-            break;
-        u32 fat = h.FATOffset + word(at + 24) * 8;
-        u32 start = word(fat), end = word(fat + 4);
-        if (end <= start || end > len)
-            continue;
-        QByteArray image((const char*)rom + start, (int)(end - start));
-        u32 flags = word(at + 28);
-        if ((flags >> 24) & 1)
-        {
-            u32 packed = flags & 0xFFFFFF;
-            if (packed && packed < (u32)image.size())
-                image.truncate((int)packed);
-            if (!BlzDecompress(image))
-                continue;
-        }
-        out.insert((int)word(at), {word(at + 4), word(at + 8) + word(at + 12), image});
-    }
-    return out;
-}
-
 QString Str(const YNode& node, const std::string& key)
 {
     return QString::fromStdString(node.str(key));
@@ -551,7 +451,10 @@ bool DebugSymbols::load(const QString& rawPath, QString& error, NDS* nds)
             wanted << e.Symbols << e.Delinks;
         DebugSource::ReadAll(wanted, files);
 
-        QHash<int, RomOverlay> table = ReadRomOverlays(nds);
+        QHash<int, RomOverlay> table;
+        if (nds)
+            for (RomOverlay& ov : ReadRomOverlays(*nds))
+                table.insert(ov.Id, std::move(ov));
         std::string romCfg = cfg.str("rom_config");
         if (table.isEmpty() && !remote && !romCfg.empty())
         {
@@ -562,9 +465,11 @@ bool DebugSymbols::load(const QString& rawPath, QString& error, NDS* nds)
                 if (const YNode* list = ovTable.get("overlays"))
                     for (const YNode& ov : list->List)
                     {
-                        QFile image(DebugSource::Join(romDir, "arm9_overlays/" + Str(ov, "file_name")));
-                        table.insert((int)ov.num("id"), {ov.num("base_address"), ov.num("code_size") + ov.num("bss_size"),
-                            image.open(QIODevice::ReadOnly) ? image.readAll() : QByteArray()});
+                        QFile file(DebugSource::Join(romDir, "arm9_overlays/" + Str(ov, "file_name")));
+                        QByteArray image = file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+                        int id = (int)ov.num("id");
+                        table.insert(id, {id, ov.num("base_address"), ov.num("code_size") + ov.num("bss_size"),
+                            std::vector<u8>(image.begin(), image.end())});
                     }
         }
 
@@ -649,30 +554,8 @@ std::vector<int> DebugSymbols::detect(const Set& set, NDS& nds)
 {
     std::vector<int> out;
     for (const Module& mod : set.Modules)
-    {
-        if (mod.Overlay < 0 || mod.Image.isEmpty())
-            continue;
-        u32 code = std::min<u32>(mod.Image.size(), mod.Size);
-        int hits = 0;
-        for (int w = 0; w < SampleWindows; w++)
-        {
-            u32 off = (u32)((u64)code * (2 * w + 1) / (2 * SampleWindows)) & ~3u;
-            bool same = true;
-            for (u32 b = 0; b < SampleBytes && off + b + 4 <= (u32)mod.Image.size(); b += 4)
-            {
-                u32 want;
-                memcpy(&want, mod.Image.constData() + off + b, 4);
-                if (nds.Debugger.Peek(0, mod.Base + off + b, 4) != want)
-                {
-                    same = false;
-                    break;
-                }
-            }
-            hits += same;
-        }
-        if (hits * 4 >= SampleWindows * 3)
+        if (mod.Overlay >= 0 && OverlayLoaded(nds, mod.Base, mod.Size, mod.Image))
             out.push_back(mod.Overlay);
-    }
     return out;
 }
 
@@ -704,7 +587,7 @@ bool DebugSymbols::needsRom() const
     if (!Cur)
         return false;
     for (const Module& mod : Cur->Modules)
-        if (mod.Overlay >= 0 && mod.Image.isEmpty())
+        if (mod.Overlay >= 0 && mod.Image.empty())
             return true;
     return false;
 }

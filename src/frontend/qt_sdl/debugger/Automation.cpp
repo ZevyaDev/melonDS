@@ -326,7 +326,7 @@ QString Automation::run(const QStringList& args)
         auto set = bridge->symbols().set();
         int images = 0;
         for (const auto& mod : set->Modules)
-            images += !mod.Image.isEmpty();
+            images += !mod.Image.empty();
         return QString("ok %1 symbols, %2 source files, %3 overlay images").arg(set->SymbolCount).arg(set->SourceFiles.size()).arg(images);
     }
     if (c == "source")

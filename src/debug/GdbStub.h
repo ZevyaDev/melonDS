@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <sys/types.h>
 #include <map>
+#include <string>
 #include <vector>
 
 #include "../types.h"
@@ -56,7 +57,7 @@ public:
 	virtual void WriteMem(u32 addr, int len, u32 value) = 0;
 
 	virtual void ResetGdb() = 0;
-	virtual int RemoteCmd(const u8* cmd, size_t len) = 0;
+	virtual int RemoteCmd(const u8* cmd, size_t len, std::string& out) = 0;
 };
 
 enum class StubState
