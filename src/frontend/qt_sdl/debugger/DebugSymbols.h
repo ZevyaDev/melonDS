@@ -22,6 +22,7 @@
 #include <QByteArray>
 #include <QHash>
 #include <QString>
+#include <QStringList>
 
 #include <memory>
 #include <vector>
@@ -47,6 +48,13 @@ public:
         bool Thumb;
     };
 
+    struct FileRange
+    {
+        melonDS::u32 Start;
+        melonDS::u32 End;
+        int File;
+    };
+
     struct Module
     {
         QString Name;
@@ -55,6 +63,7 @@ public:
         melonDS::u32 Size = 0;
         QByteArray Image;
         std::vector<Symbol> Symbols;
+        std::vector<FileRange> Files;
 
         const Symbol* find(melonDS::u32 addr) const;
         bool covers(melonDS::u32 addr) const { return addr >= Base && addr - Base < Size; }
@@ -63,12 +72,14 @@ public:
     struct Set
     {
         QString Source;
+        QString Base;
         std::vector<Module> Modules;
+        QStringList SourceFiles;
         QMultiHash<QString, std::pair<int, int>> ByName;
         int SymbolCount = 0;
     };
 
-    bool load(const QString& path, QString& error);
+    bool load(const QString& path, QString& error, melonDS::NDS* nds = nullptr);
     void clear();
     bool empty() const { return !Cur || Cur->Modules.empty(); }
     QString source() const { return Cur ? Cur->Source : QString(); }
@@ -84,6 +95,8 @@ public:
 
     const Symbol* lookup(melonDS::u32 addr) const;
     const Module* moduleOf(const Symbol* sym) const;
+    bool sourceFile(melonDS::u32 addr, QString& file) const;
+    bool needsRom() const;
     QString describe(melonDS::u32 addr, bool withModule = true) const;
     QString exact(melonDS::u32 addr) const;
     bool resolve(const QString& name, melonDS::u32& out) const;

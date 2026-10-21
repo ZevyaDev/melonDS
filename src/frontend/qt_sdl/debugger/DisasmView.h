@@ -61,6 +61,7 @@ signals:
     void setPCRequested(melonDS::u32 addr);
     void addressHovered(melonDS::u32 addr);
     void modeChanged(int mode);
+    void selectionChanged(melonDS::u32 addr);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -108,6 +109,7 @@ private:
     DisasmLine decodeAt(melonDS::u32 addr, const QSet<melonDS::u32>& pool);
     void syncScroll();
     void scrollLines(int lines);
+    void select(melonDS::u32 addr);
     int rowAt(int y) const;
     melonDS::u32 readBuf(melonDS::u32 addr, int size, bool& ok) const;
     QString comment(const DisasmLine& line) const;

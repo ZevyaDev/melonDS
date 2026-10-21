@@ -22,9 +22,12 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QUrl>
 
+#include "DebugSource.h"
 #include "DebugSymbols.h"
 #include "NDS.h"
+#include "NDSCart.h"
 
 #if __has_include(<cxxabi.h>)
 #include <cxxabi.h>
@@ -217,13 +220,12 @@ YNode ParseBlock(std::vector<YLine>& lines, size_t& i, int indent)
     return ParseMap(lines, i, indent);
 }
 
-bool ParseYAML(const QString& path, YNode& out)
+bool ParseYAML(const QByteArray& data, YNode& out)
 {
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly))
+    if (data.isEmpty())
         return false;
     std::vector<YLine> lines;
-    for (const QByteArray& raw : f.readAll().split('\n'))
+    for (const QByteArray& raw : data.split('\n'))
     {
         std::string s = raw.toStdString();
         std::string t = Trim(s);
@@ -253,12 +255,9 @@ u32 ParseNumber(const std::string& s, bool& ok)
     }
 }
 
-void ParseDsdSymbols(const QString& path, int module, std::vector<DebugSymbols::Symbol>& out)
+void ParseDsdSymbols(const QByteArray& data, int module, std::vector<DebugSymbols::Symbol>& out)
 {
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly))
-        return;
-    for (const QByteArray& raw : f.readAll().split('\n'))
+    for (const QByteArray& raw : data.split('\n'))
     {
         std::string line = Trim(raw.toStdString());
         size_t sp = line.find_first_of(" \t");
@@ -311,6 +310,153 @@ void ParseDsdSymbols(const QString& path, int module, std::vector<DebugSymbols::
     }
 }
 
+std::string Field(const std::string& line, const std::string& key)
+{
+    size_t at = line.find(key);
+    if (at == std::string::npos)
+        return std::string();
+    at += key.size();
+    size_t end = line.find_first_of(" \t", at);
+    return line.substr(at, end == std::string::npos ? std::string::npos : end - at);
+}
+
+void ParseDelinks(const QByteArray& data, DebugSymbols::Set& set, QHash<QString, int>& index, std::vector<DebugSymbols::FileRange>& out)
+{
+    int file = -1;
+    for (const QByteArray& raw : data.split('\n'))
+    {
+        std::string line = raw.toStdString();
+        std::string t = Trim(line);
+        if (t.empty() || t.rfind("//", 0) == 0)
+            continue;
+        if (line[0] != ' ' && line[0] != '\t')
+        {
+            file = -1;
+            if (t.back() != ':')
+                continue;
+            QString path = QString::fromStdString(t.substr(0, t.size() - 1));
+            auto it = index.find(path);
+            if (it == index.end())
+            {
+                it = index.insert(path, (int)set.SourceFiles.size());
+                set.SourceFiles << path;
+            }
+            file = *it;
+            continue;
+        }
+        if (file < 0)
+            continue;
+        bool okStart, okEnd;
+        u32 start = ParseNumber(Field(t, "start:"), okStart);
+        u32 end = ParseNumber(Field(t, "end:"), okEnd);
+        if (okStart && okEnd && end > start)
+            out.push_back({start, end, file});
+    }
+    std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.Start < b.Start; });
+}
+
+bool BlzDecompress(QByteArray& data)
+{
+    u32 len = (u32)data.size();
+    if (len < 8)
+        return false;
+    const u8* src = (const u8*)data.constData();
+    u32 footer, extra;
+    memcpy(&footer, src + len - 8, 4);
+    memcpy(&extra, src + len - 4, 4);
+    if (!extra)
+        return true;
+    u32 packed = footer & 0xFFFFFF;
+    u32 header = footer >> 24;
+    if (packed > len || header > packed || header < 8)
+        return false;
+    std::vector<u8> out(len + extra);
+    memcpy(out.data(), src, len);
+    u32 in = len - header;
+    u32 stop = len - packed;
+    u32 pos = len + extra;
+    while (in > stop)
+    {
+        u8 flags = src[--in];
+        for (int bit = 0; bit < 8 && in > stop; bit++, flags <<= 1)
+        {
+            if (!(flags & 0x80))
+            {
+                if (pos == 0)
+                    return false;
+                out[--pos] = src[--in];
+                continue;
+            }
+            if (in < stop + 2)
+                return false;
+            u32 hi = src[--in];
+            u32 lo = src[--in];
+            u32 count = (hi >> 4) + 3;
+            u32 disp = (((hi & 0xF) << 8) | lo) + 3;
+            for (u32 k = 0; k < count; k++)
+            {
+                if (pos == 0 || pos - 1 + disp >= out.size())
+                    return false;
+                out[pos - 1] = out[pos - 1 + disp];
+                pos--;
+            }
+        }
+    }
+    data = QByteArray((const char*)out.data(), (int)out.size());
+    return true;
+}
+
+struct RomOverlay
+{
+    u32 Base;
+    u32 Size;
+    QByteArray Image;
+};
+
+QHash<int, RomOverlay> ReadRomOverlays(NDS* nds)
+{
+    QHash<int, RomOverlay> out;
+    NDSCart::CartCommon* cart = nds ? nds->GetNDSCart() : nullptr;
+    if (!cart || !cart->GetROM())
+        return out;
+    const u8* rom = cart->GetROM();
+    u32 len = cart->GetROMLength();
+    const NDSHeader& h = cart->GetHeader();
+    auto word = [&](u32 off) {
+        u32 v = 0;
+        if ((u64)off + 4 <= len)
+            memcpy(&v, rom + off, 4);
+        return v;
+    };
+    for (u32 i = 0; i < h.ARM9OverlaySize / 32; i++)
+    {
+        u32 at = h.ARM9OverlayOffset + i * 32;
+        if ((u64)at + 32 > len)
+            break;
+        u32 fat = h.FATOffset + word(at + 24) * 8;
+        u32 start = word(fat), end = word(fat + 4);
+        if (end <= start || end > len)
+            continue;
+        QByteArray image((const char*)rom + start, (int)(end - start));
+        u32 flags = word(at + 28);
+        if ((flags >> 24) & 1)
+        {
+            u32 packed = flags & 0xFFFFFF;
+            if (packed && packed < (u32)image.size())
+                image.truncate((int)packed);
+            if (!BlzDecompress(image))
+                continue;
+        }
+        out.insert((int)word(at), {word(at + 4), word(at + 8) + word(at + 12), image});
+    }
+    return out;
+}
+
+QString Str(const YNode& node, const std::string& key)
+{
+    return QString::fromStdString(node.str(key));
+}
+
 void Index(DebugSymbols::Module& mod)
 {
     std::sort(mod.Symbols.begin(), mod.Symbols.end(), [](const auto& a, const auto& b) { return a.Addr < b.Addr; });
@@ -336,89 +482,115 @@ const DebugSymbols::Symbol* DebugSymbols::Module::find(u32 addr) const
     return nullptr;
 }
 
-bool DebugSymbols::load(const QString& rawPath, QString& error)
+bool DebugSymbols::load(const QString& rawPath, QString& error, NDS* nds)
 {
-    QString path = rawPath;
-    QFileInfo info(path);
-    if (info.isDir())
-        path = QDir(path).filePath("config.yaml");
-    info = QFileInfo(path);
-    if (!info.exists())
+    static bool busy = false;
+    if (busy)
     {
-        error = "not found: " + path;
+        error = "symbols are already loading";
+        return false;
+    }
+    busy = true;
+    struct Release
+    {
+        ~Release() { busy = false; }
+    } release;
+
+    QString path = DebugSource::Normalize(rawPath);
+    bool remote = DebugSource::IsRemote(path);
+    QHash<QString, QByteArray> files;
+    DebugSource::ReadAll({path}, files);
+    if (!files.contains(path))
+    {
+        error = (remote ? "cannot download " : "not found: ") + path;
         return false;
     }
 
     auto set = std::make_shared<Set>();
     set->Source = path;
+    set->Base = DebugSource::DirOf(path);
+    QFileInfo info(remote ? QUrl(path).path() : path);
 
     if (info.suffix() == "yaml" || info.suffix() == "yml")
     {
         YNode cfg;
-        if (!ParseYAML(path, cfg))
+        if (!ParseYAML(files.value(path), cfg))
         {
             error = "cannot read " + path;
             return false;
         }
-        QDir root = info.dir();
-        auto add = [&](const QString& name, int overlay, const std::string& symbols) {
-            Module mod;
-            mod.Name = name;
-            mod.Overlay = overlay;
-            ParseDsdSymbols(root.filePath(QString::fromStdString(symbols)), (int)set->Modules.size(), mod.Symbols);
-            set->Modules.push_back(std::move(mod));
-        };
         const YNode* main = cfg.get("main_module");
         if (!main)
         {
             error = "no main_module in " + path;
             return false;
         }
-        add("main", -1, main->str("symbols"));
+        struct Entry
+        {
+            QString Name;
+            int Overlay;
+            QString Symbols;
+            QString Delinks;
+        };
+        std::vector<Entry> entries;
+        auto entry = [&](const QString& name, int overlay, const YNode& node) {
+            QString symbols = Str(node, "symbols"), delinks = Str(node, "delinks");
+            entries.push_back({name, overlay,
+                symbols.isEmpty() ? QString() : DebugSource::Join(set->Base, symbols),
+                delinks.isEmpty() ? QString() : DebugSource::Join(set->Base, delinks)});
+        };
+        entry("main", -1, *main);
         if (const YNode* autoloads = cfg.get("autoloads"))
             for (const YNode& a : autoloads->List)
-                add(QString::fromStdString(a.str("name")), -1, a.str("symbols"));
-
-        QHash<int, std::pair<YNode, QString>> table;
-        std::string romCfg = cfg.str("rom_config");
-        if (!romCfg.empty())
-        {
-            QDir romDir = QFileInfo(root.filePath(QString::fromStdString(romCfg))).dir();
-            QString tablePath = romDir.filePath("arm9_overlays/overlays.yaml");
-            YNode ovTable;
-            if (ParseYAML(tablePath, ovTable))
-                if (const YNode* list = ovTable.get("overlays"))
-                    for (const YNode& ov : list->List)
-                        table.insert((int)ov.num("id"), {ov, romDir.filePath("arm9_overlays/" + QString::fromStdString(ov.str("file_name")))});
-        }
+                entry(Str(a, "name"), -1, a);
         if (const YNode* overlays = cfg.get("overlays"))
             for (const YNode& ov : overlays->List)
+                entry(Str(ov, "name"), (int)ov.num("id"), ov);
+        QStringList wanted;
+        for (const Entry& e : entries)
+            wanted << e.Symbols << e.Delinks;
+        DebugSource::ReadAll(wanted, files);
+
+        QHash<int, RomOverlay> table = ReadRomOverlays(nds);
+        std::string romCfg = cfg.str("rom_config");
+        if (table.isEmpty() && !remote && !romCfg.empty())
+        {
+            QString romDir = DebugSource::DirOf(DebugSource::Join(set->Base, QString::fromStdString(romCfg)));
+            QFile tableFile(DebugSource::Join(romDir, "arm9_overlays/overlays.yaml"));
+            YNode ovTable;
+            if (tableFile.open(QIODevice::ReadOnly) && ParseYAML(tableFile.readAll(), ovTable))
+                if (const YNode* list = ovTable.get("overlays"))
+                    for (const YNode& ov : list->List)
+                    {
+                        QFile image(DebugSource::Join(romDir, "arm9_overlays/" + Str(ov, "file_name")));
+                        table.insert((int)ov.num("id"), {ov.num("base_address"), ov.num("code_size") + ov.num("bss_size"),
+                            image.open(QIODevice::ReadOnly) ? image.readAll() : QByteArray()});
+                    }
+        }
+
+        QHash<QString, int> fileIndex;
+        for (const Entry& e : entries)
+        {
+            Module mod;
+            mod.Name = e.Name;
+            mod.Overlay = e.Overlay;
+            ParseDsdSymbols(files.value(e.Symbols), (int)set->Modules.size(), mod.Symbols);
+            ParseDelinks(files.value(e.Delinks), *set, fileIndex, mod.Files);
+            auto it = table.find(e.Overlay);
+            if (e.Overlay >= 0 && it != table.end())
             {
-                int id = (int)ov.num("id");
-                add(QString::fromStdString(ov.str("name")), id, ov.str("symbols"));
-                Module& mod = set->Modules.back();
-                auto it = table.find(id);
-                if (it != table.end())
-                {
-                    mod.Base = it->first.num("base_address");
-                    mod.Size = it->first.num("code_size") + it->first.num("bss_size");
-                    QFile image(it->second);
-                    if (image.open(QIODevice::ReadOnly))
-                        mod.Image = image.readAll();
-                }
+                mod.Base = it->Base;
+                mod.Size = it->Size;
+                mod.Image = it->Image;
             }
+            set->Modules.push_back(std::move(mod));
+        }
     }
     else
     {
-        QFile f(path);
-        if (!f.open(QIODevice::ReadOnly))
-        {
-            error = "cannot read " + path;
-            return false;
-        }
         Module mod;
         mod.Name = info.baseName();
-        for (const QByteArray& raw : f.readAll().split('\n'))
+        for (const QByteArray& raw : files.value(path).split('\n'))
         {
             QList<QByteArray> parts = raw.simplified().split(' ');
             if (parts.size() < 2)
@@ -525,6 +697,38 @@ const DebugSymbols::Module* DebugSymbols::moduleOf(const Symbol* sym) const
     if (!Cur || !sym || sym->Module < 0 || sym->Module >= (int)Cur->Modules.size())
         return nullptr;
     return &Cur->Modules[sym->Module];
+}
+
+bool DebugSymbols::needsRom() const
+{
+    if (!Cur)
+        return false;
+    for (const Module& mod : Cur->Modules)
+        if (mod.Overlay >= 0 && mod.Image.isEmpty())
+            return true;
+    return false;
+}
+
+bool DebugSymbols::sourceFile(u32 addr, QString& file) const
+{
+    if (!Cur)
+        return false;
+    addr &= ~1u;
+    auto search = [&](const Module& mod) {
+        auto it = std::upper_bound(mod.Files.begin(), mod.Files.end(), addr, [](u32 a, const FileRange& r) { return a < r.Start; });
+        if (it == mod.Files.begin() || addr >= (--it)->End)
+            return false;
+        file = Cur->SourceFiles[it->File];
+        return true;
+    };
+    if (const Module* mod = moduleOf(lookup(addr)))
+        if (search(*mod))
+            return true;
+    for (const Module& mod : Cur->Modules)
+        if (mod.Overlay < 0 || std::find(Loaded.begin(), Loaded.end(), mod.Overlay) != Loaded.end())
+            if (search(mod))
+                return true;
+    return false;
 }
 
 QString DebugSymbols::describe(u32 addr, bool withModule) const

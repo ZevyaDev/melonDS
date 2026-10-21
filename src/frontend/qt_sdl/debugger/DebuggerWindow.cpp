@@ -17,6 +17,7 @@
 */
 
 #include <QActionGroup>
+#include <QApplication>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -48,6 +49,8 @@
 #include "DebugTool.h"
 #include "DebugTools.h"
 #include "DisasmView.h"
+#include "DebugSource.h"
+#include "SourceView.h"
 #include "EmuInstance.h"
 #include "Config.h"
 #include "ARM.h"
@@ -291,8 +294,17 @@ void DebuggerWindow::buildToolbar()
     bar->addAction("PC", this, [this] { Disasm->goToPC(); })->setToolTip("Show the current instruction");
     bar->addAction("Back", Disasm, &DisasmView::back)->setToolTip("Back (Backspace)");
     bar->addSeparator();
-    bar->addAction("Symbols...", this, &DebuggerWindow::loadSymbols)
-        ->setToolTip("Load a dsd config.yaml (or a folder holding one), or a text file of 'address name [size]' lines");
+    QToolButton* symbols = new QToolButton(this);
+    symbols->setText("Symbols...");
+    symbols->setPopupMode(QToolButton::MenuButtonPopup);
+    symbols->setToolTip("Load a dsd config.yaml (or a folder holding one), or a text file of 'address name [size]' lines; "
+        "the arrow also takes a URL");
+    connect(symbols, &QToolButton::clicked, this, &DebuggerWindow::loadSymbols);
+    QMenu* symbolMenu = new QMenu(symbols);
+    symbolMenu->addAction("From a file...", this, &DebuggerWindow::loadSymbols);
+    symbolMenu->addAction("From a URL...", this, &DebuggerWindow::loadSymbolsUrl);
+    symbols->setMenu(symbolMenu);
+    bar->addWidget(symbols);
     QAction* demangle = bar->addAction("Demangle");
     demangle->setCheckable(true);
     demangle->setChecked(Bridge->symbols().demangle());
@@ -479,6 +491,14 @@ void DebuggerWindow::buildDocks()
     addDockWidget(Qt::BottomDockWidgetArea, sdock);
     tabifyDockWidget(pdock, sdock);
     pdock->raise();
+
+    Source = new SourceView(Bridge, this);
+    QDockWidget* srcDock = new QDockWidget("Source", this);
+    srcDock->setObjectName("Source");
+    srcDock->setWidget(Source);
+    addDockWidget(Qt::RightDockWidgetArea, srcDock, Qt::Vertical);
+    connect(Disasm, &DisasmView::selectionChanged, Source, &SourceView::showAddress);
+    connect(Bridge, &DebugBridge::symbolsChanged, Source, [this] { Source->showAddress(Disasm->selected()); });
 }
 
 void DebuggerWindow::refresh()
@@ -563,6 +583,7 @@ void DebuggerWindow::applySnapshot(const DebugSnapshot& s)
     updateStack();
     updateActions();
     updateStatus();
+    Source->showAddress(Disasm->selected());
     if (stopped)
         Prev = s.CPU;
 }
@@ -850,15 +871,35 @@ void DebuggerWindow::loadSymbols()
 {
     QString path = QFileDialog::getOpenFileName(this, "Load symbols", QString(),
         "dsd config or symbol list (*.yaml *.yml *.txt *.sym);;All files (*)");
-    if (path.isEmpty())
-        return;
+    if (!path.isEmpty())
+        applySymbols(path);
+}
+
+void DebuggerWindow::loadSymbolsUrl()
+{
+    QString current = Bridge->symbols().source();
+    bool ok;
+    QString url = QInputDialog::getText(this, "Load symbols from a URL",
+        "URL of a dsd config.yaml or the folder holding it (github.com links work):", QLineEdit::Normal,
+        DebugSource::IsRemote(current) ? current : QString(), &ok);
+    if (ok && !url.trimmed().isEmpty())
+        applySymbols(url);
+}
+
+void DebuggerWindow::applySymbols(const QString& location)
+{
     QString error;
-    if (!Bridge->symbols().load(path, error))
+    Status->setText("Loading symbols from " + location);
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    bool ok = Bridge->symbols().load(location, error, Bridge->instance()->getNDS());
+    QApplication::restoreOverrideCursor();
+    if (!ok)
     {
+        updateStatus();
         QMessageBox::warning(this, "melonDS", error);
         return;
     }
-    DebugTools::rememberSymbols(Bridge, path);
+    DebugTools::rememberSymbols(Bridge, Bridge->symbols().source());
     emit Bridge->symbolsChanged();
     refresh();
     Disasm->reload();

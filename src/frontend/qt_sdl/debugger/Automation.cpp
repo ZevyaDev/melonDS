@@ -39,6 +39,8 @@
 #include "SPU.h"
 #include "DebugSymbols.h"
 #include "DebugTools.h"
+#include "DebuggerWindow.h"
+#include "SourceView.h"
 #include "EmuInstance.h"
 #include "EmuThread.h"
 #include "Window.h"
@@ -317,11 +319,30 @@ QString Automation::run(const QStringList& args)
     if (c == "symbols")
     {
         QString error;
-        if (!bridge->symbols().load(rest, error))
+        if (!bridge->symbols().load(rest, error, bridge->instance()->getNDS()))
             return "error: " + error;
-        DebugTools::rememberSymbols(bridge, rest);
+        DebugTools::rememberSymbols(bridge, bridge->symbols().source());
         emit bridge->symbolsChanged();
-        return QString("ok %1").arg(bridge->symbols().set()->SymbolCount);
+        auto set = bridge->symbols().set();
+        int images = 0;
+        for (const auto& mod : set->Modules)
+            images += !mod.Image.isEmpty();
+        return QString("ok %1 symbols, %2 source files, %3 overlay images").arg(set->SymbolCount).arg(set->SourceFiles.size()).arg(images);
+    }
+    if (c == "source")
+    {
+        auto* debugger = qobject_cast<DebuggerWindow*>(FindWindow("Debugger"));
+        SourceView* view = debugger ? debugger->findChild<SourceView*>() : nullptr;
+        if (!view)
+            return "error: open the debugger first";
+        if (args.size() > 1)
+        {
+            u32 addr;
+            if (!bridge->symbols().parseAddress(rest, addr))
+                return "error: cannot read the address";
+            debugger->goTo(addr);
+        }
+        return view->describe();
     }
     if (c == "newinstance")
         return createEmuInstance() ? "ok" : "error";

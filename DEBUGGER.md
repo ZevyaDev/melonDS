@@ -13,13 +13,24 @@ raw opcodes.
 ## Symbols
 
 Symbols... in the debugger window's toolbar loads a dsd `config.yaml` (or the folder holding it),
-or a text file of `address name [size]` lines. The choice is remembered per game code and shared
-by every tool.
+or a text file of `address name [size]` lines. Its arrow also takes a URL: a raw or github.com
+link to a `config.yaml` or its folder, such as
+`https://github.com/OWNER/REPO/blob/BRANCH/config/usa/arm9/config.yaml`; nothing needs to be
+checked out. The choice is remembered per game code and shared by every tool.
 
-- Overlays are detected by comparing RAM with `arm9_overlays/*.bin` from the extract that the
-  config's `rom_config` points to; only loaded overlays' names are shown.
+- Overlays are detected by comparing RAM with the overlays in the running ROM, decompressed, so no
+  extract is needed; only loaded overlays' names are shown.
 - C++ names are demangled (Demangle toggles it). Go to, breakpoint and watch fields accept an
   address, a symbol in either form, or `symbol+0x10`.
+
+## Source
+
+The Source dock shows the source of the function at the selected line of the listing, with the
+function highlighted: C, C++ or assembly, from the file that the config's `delinks.txt` assigns
+to that address. It follows the selection, so a click in the listing or a double-click in the call
+stack shows that function. Files come from beside the config, or from the same repository when the
+symbols came from a URL; downloads are cached. Open opens a local file in its editor, or a GitHub
+file in the browser at those lines. A function that is not in any delinked file has no source yet.
 
 ## Debugger window
 

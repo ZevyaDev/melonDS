@@ -35,6 +35,7 @@ class QTreeWidget;
 class QTableWidget;
 class QTimer;
 class DisasmView;
+class SourceView;
 
 struct CPUSnapshot
 {
@@ -89,6 +90,7 @@ protected:
 private:
     DebugBridge* Bridge;
     DisasmView* Disasm;
+    SourceView* Source;
     QComboBox* CPUBox;
     QLineEdit* GotoEdit;
     QLabel* Status;
@@ -138,6 +140,8 @@ private:
     void editRegister(int cpu, int row);
     void setPC(melonDS::u32 addr);
     void loadSymbols();
+    void loadSymbolsUrl();
+    void applySymbols(const QString& location);
     void autoLoadSymbols();
     QString describeBreak(const melonDS::BreakEvent& ev) const;
 };

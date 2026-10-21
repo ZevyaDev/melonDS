@@ -89,7 +89,7 @@ void DisasmView::goTo(u32 addr, bool record)
         History.push_back(Top);
     if (History.size() > 256)
         History.erase(History.begin());
-    Selected = addr & ~1u;
+    select(addr & ~1u);
     if (ViewMode == mode_Auto)
     {
         const DebugSymbols::Symbol* sym = Bridge->symbols().lookup(addr);
@@ -114,7 +114,7 @@ void DisasmView::goToPC()
     u32 span = lines * step();
     if (PC >= Top + step() * 2 && PC < Top + span - step() * 3)
     {
-        Selected = PC;
+        select(PC);
         fetch();
         return;
     }
@@ -407,7 +407,7 @@ void DisasmView::mousePressEvent(QMouseEvent* event)
     u32 addr = Rows[i].Addr;
     if (event->button() == Qt::LeftButton && event->pos().x() < fontMetrics().horizontalAdvance('0') * 2)
         emit toggleBreakpoint(addr);
-    Selected = addr;
+    select(addr);
     viewport()->update();
 }
 
@@ -428,6 +428,14 @@ void DisasmView::mouseDoubleClickEvent(QMouseEvent* event)
         if (ok)
             goTo(v);
     }
+}
+
+void DisasmView::select(u32 addr)
+{
+    if (addr == Selected)
+        return;
+    Selected = addr;
+    emit selectionChanged(addr);
 }
 
 void DisasmView::scrollLines(int lines)
@@ -452,12 +460,12 @@ void DisasmView::keyPressEvent(QKeyEvent* event)
     switch (event->key())
     {
     case Qt::Key_Up:
-        Selected -= step();
+        select(Selected - step());
         if (sel <= 1)
             scrollLines(-1);
         break;
     case Qt::Key_Down:
-        Selected += sel >= 0 ? Rows[sel].Line.Size : step();
+        select(Selected + (sel >= 0 ? Rows[sel].Line.Size : step()));
         if (sel >= visibleLines() - 2)
             scrollLines(1);
         break;
@@ -493,7 +501,7 @@ void DisasmView::contextMenuEvent(QContextMenuEvent* event)
 {
     int i = rowAt(event->pos().y());
     if (i >= 0 && !Rows[i].Label)
-        Selected = Rows[i].Addr;
+        select(Rows[i].Addr);
     viewport()->update();
     u32 addr = Selected;
     const DisasmLine* line = i >= 0 && !Rows[i].Label ? &Rows[i].Line : nullptr;
