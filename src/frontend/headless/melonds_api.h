@@ -51,6 +51,10 @@ typedef struct
     int32_t dma;
 } mds_break;
 
+// mds_point.flags: 1 read, 2 write (watchpoints); MDS_POINT_LUA marks a Lua memory hook (API level 6), which
+// mds_point_remove refuses (the script removes it: event.unregisterbyid / unregisterbyname).
+#define MDS_POINT_LUA 0x100
+
 typedef struct
 {
     int32_t id;
@@ -203,7 +207,10 @@ MDS_API int mds_bp_add(int id, uint32_t cpumask, uint32_t addr);
 MDS_API int mds_wp_add(int id, uint32_t cpumask, uint32_t addr, uint32_t size, uint32_t flags);
 MDS_API int mds_point_remove(int id, int point);
 MDS_API int mds_point_enable(int id, int point, int enabled);
+// Copies up to max points (breakpoints, then watchpoints) and returns how many it copied.
 MDS_API int mds_point_list(int id, mds_point* out, int max);
+// How many points mds_point_list has to list (API level 6): a buffer this size gets them all.
+MDS_API int mds_point_count(int id);
 MDS_API int mds_step(int id, int cpu, uint32_t count);
 
 // Reference: docs/headless-api.md, section 5 (trace, call tracking, coverage, last writer).

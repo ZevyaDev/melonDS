@@ -252,12 +252,14 @@ int mds_has(const char* name)
         "write_regions",        // mds_write/Lua writes: halfwords for palette/VRAM/OAM, read back, errors name the region
         "packets_truncate",     // mds_packets_take cuts a first packet longer than max_data short (mds_packet.total)
         "unknown_id_errors",    // mds_frames returns MDS_FRAMES_ERROR and mds_destroy -1 for an unknown id
+        "point_lua_tag",        // mds_point_list flags MDS_POINT_LUA on Lua hooks; mds_point_remove refuses them
+        "point_count",          // mds_point_count: the total mds_point_list has to list
     };
     static const char* const Functions[] = {
         "mds_has", "mds_serve_host", "mds_gdb_host", "mds_lastwriter_query",
         "mds_cheat_add", "mds_cheat_remove", "mds_cheat_enable", "mds_cheat_clear", "mds_cheat_list",
         "mds_cheat_get", "mds_threadstacks", "mds_overlays",
-        "mds_debug_packet",
+        "mds_debug_packet", "mds_point_count",
     };
     if (!name)
         return 0;
@@ -850,6 +852,13 @@ int mds_point_remove(int id, int point)
     if (!s)
         return -1;
     return OnEmu(s, [&](Instance& inst, std::string& error) {
+        // A Lua hook removed from here would leave the script with a dead id (and its callback registered).
+        if (inst.NDS->Debugger.IsHook(point))
+        {
+            error = "point " + std::to_string(point) + " is a Lua hook: the script removes it "
+                    "(event.unregisterbyid / unregisterbyname)";
+            return -1;
+        }
         if (inst.NDS->Debugger.Remove(point))
             return 0;
         error = "no such point";
@@ -880,11 +889,22 @@ int mds_point_list(int id, mds_point* out, int max)
         int n = 0;
         for (auto& b : dbg.GetBreakpoints())
             if (n < max)
-                out[n++] = {b.ID, 0, b.CPUMask, 0, b.Enabled, b.Addr, b.Addr, b.Hits};
+                out[n++] = {b.ID, 0, b.CPUMask, b.Callback ? MDS_POINT_LUA : 0u, b.Enabled, b.Addr, b.Addr, b.Hits};
         for (auto& w : dbg.GetWatchpoints())
             if (n < max)
-                out[n++] = {w.ID, 1, w.CPUMask, w.Flags, w.Enabled, w.Start, w.End, w.Hits};
+                out[n++] = {w.ID, 1, w.CPUMask, w.Flags | (w.Callback ? MDS_POINT_LUA : 0u), w.Enabled, w.Start, w.End,
+                            w.Hits};
         return n;
+    });
+}
+
+int mds_point_count(int id)
+{
+    Slot* s = StoppedDebug(id);
+    if (!s)
+        return -1;
+    return OnEmu(s, [&](Instance& inst, std::string&) {
+        return int(inst.NDS->Debugger.GetBreakpoints().size() + inst.NDS->Debugger.GetWatchpoints().size());
     });
 }
 

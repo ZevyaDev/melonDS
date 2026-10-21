@@ -145,6 +145,20 @@ bool Debugger::Remove(int id)
     return false;
 }
 
+bool Debugger::IsHook(int id) const
+{
+    for (auto& b : Breakpoints)
+        if (b.ID == id)
+            return bool(b.Callback);
+    for (auto& w : Watchpoints)
+        if (w.ID == id)
+            return bool(w.Callback);
+    for (auto& h : WifiHooks)
+        if (h.first == id)
+            return true;
+    return false;
+}
+
 int Debugger::AddWifiHook(WifiCallback callback)
 {
     WifiHooks.push_back({NextID, std::move(callback)});

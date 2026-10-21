@@ -102,6 +102,7 @@ ERROR_CODES = {1: "bad_message", 2: "unknown_type", 3: "no_console", 4: "busy", 
                6: "input_queue_full", 7: "bad_payload", 8: "bad_option", 9: "jit_on", 10: "not_supported",
                11: "internal", 12: "failed"}
 BREAK_KINDS = ["exec", "read", "write", "step", "request", "fault"]
+POINT_LUA = 0x100       # point flags: a Lua memory hook (server API level 6); point_remove refuses it
 
 
 class ProtocolError(RuntimeError):
@@ -698,7 +699,8 @@ class Client:
             pid, watch, enabled, mask, flags, start, end, hits = r.take("<iBBIIIIQ")
             out.append({"id": pid, "kind": "watch" if watch else "exec", "enabled": bool(enabled),
                         "cpu": {1: 9, 2: 7, 3: "both"}.get(mask, mask), "read": bool(flags & 1),
-                        "write": bool(flags & 2), "start": start, "end": end, "hits": hits})
+                        "write": bool(flags & 2), "lua": bool(flags & POINT_LUA), "start": start, "end": end,
+                        "hits": hits})
         return out
 
     # ----------------------------------------------------------------- savestates, Lua

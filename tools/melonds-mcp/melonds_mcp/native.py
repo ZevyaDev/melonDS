@@ -13,6 +13,7 @@ IDLE, RUNNING, PARKED = 0, 1, 2
 BREAK_KINDS = ["exec", "read", "write", "step", "request", "fault"]
 KEYS = ["A", "B", "Select", "Start", "Right", "Left", "Up", "Down", "R", "L", "X", "Y"]
 WATCH_READ, WATCH_WRITE = 1, 2
+POINT_LUA = 0x100       # mds_point.flags: a Lua memory hook (API level 6)
 # pc of a DMA watchpoint break and tag of a DMA last-writer record: DMA_TAG | channel << 1 | (1 for ARM7)
 DMA_TAG = 0xFFFFFFF0
 # mds_frames for an unknown console (API level 6; older libraries return 0)
@@ -191,6 +192,7 @@ _SIGNATURES |= {
 # API level 6 (fix/api-quirks-2)
 _SIGNATURES |= {
     "mds_debug_packet": (c_int, [c_int, c_int, c_int, POINTER(c_uint8), c_int]),
+    "mds_point_count": (c_int, [c_int]),
 }
 
 
@@ -549,13 +551,19 @@ class Console:
     def enable_point(self, point, enabled):
         _check(lib().mds_point_enable(self.id, point, int(enabled)))
 
+    def point_count(self):
+        """How many points (breakpoints, watchpoints, Lua memory hooks) the console has (API level 6)."""
+        return _check(lib().mds_point_count(self.id))
+
     def points(self):
-        out = (MdsPoint * 512)()
-        n = _check(lib().mds_point_list(self.id, out, 512))
+        """Every point; "lua" marks a Lua memory hook (API level 6), which remove_point refuses."""
+        max_n = max(self.point_count(), 1) if lib().has_symbol("mds_point_count") else 4096
+        out = (MdsPoint * max_n)()
+        n = _check(lib().mds_point_list(self.id, out, max_n))
         return [{"id": p.id, "kind": "watch" if p.watch else "exec",
                  "cpu": {1: 9, 2: 7, 3: "both"}.get(p.cpumask, p.cpumask),
-                 "read": bool(p.flags & 1), "write": bool(p.flags & 2), "enabled": bool(p.enabled),
-                 "start": p.start, "end": p.end, "hits": p.hits} for p in out[:n]]
+                 "read": bool(p.flags & 1), "write": bool(p.flags & 2), "lua": bool(p.flags & POINT_LUA),
+                 "enabled": bool(p.enabled), "start": p.start, "end": p.end, "hits": p.hits} for p in out[:n]]
 
     def step(self, count=1, cpu=9):
         _check(lib().mds_step(self.id, _cpu(cpu), count))

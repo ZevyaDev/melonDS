@@ -151,6 +151,9 @@ public:
     void InjectWifi(std::vector<u8> frame, u8 rate);
     bool TakeWifiInjection(WifiFrame& frame);
     bool Remove(int id);
+    // True for an id whose owner is code, not a client: a point with a callback (a Lua memory hook, a Qt debugger
+    // temporary) or a wifi hook.
+    bool IsHook(int id) const;
     bool SetEnabled(int id, bool enabled);
     void ClearAll();
     const std::vector<Breakpoint>& GetBreakpoints() const { return Breakpoints; }

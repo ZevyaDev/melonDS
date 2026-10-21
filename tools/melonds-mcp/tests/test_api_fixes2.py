@@ -314,5 +314,47 @@ class UnknownIds(unittest.TestCase):
             native.Console.frames.fget(type("C", (), {"id": i})())
 
 
+class PointList(ConsoleTest):
+    def test_lua_hooks_are_tagged_and_protected(self):
+        bp = self.c.add_breakpoint(CODE9 + 0x40)
+        self.c.lua_run("hook = event.onmemorywrite(function() end, 0x%x, 'w', 'arm9', 4)\n"
+                       "xhook = event.onmemoryexecute(function() end, 0x%x)" % (DATA, CODE9 + 0x80))
+        points = {p["id"]: p for p in self.c.points()}
+        self.assertEqual(len(points), 3)
+        self.assertFalse(points[bp]["lua"])
+        hooks = [p for p in points.values() if p["lua"]]
+        self.assertEqual(sorted(p["kind"] for p in hooks), ["exec", "watch"])
+        watch = next(p for p in hooks if p["kind"] == "watch")
+        self.assertTrue(watch["write"])                      # the tag does not hide the watch flags
+        for p in hooks:
+            with self.subTest(p["id"]):
+                with self.assertRaises(MelonError) as cm:
+                    self.c.remove_point(p["id"])
+                self.assertIn(f"point {p['id']} is a Lua hook", str(cm.exception))
+        self.c.remove_point(bp)                              # an ordinary point still goes
+        self.assertEqual(self.c.point_count(), 2)
+        # the script removes its own hooks
+        self.c.lua_exec("event.unregisterbyid(hook); event.unregisterbyid(xhook)")
+        self.assertEqual(self.c.points(), [])
+
+    def test_wifi_hooks_cannot_be_removed_from_outside(self):
+        self.c.lua_run("wh = wifi.hook(function() end)")
+        wid = int(self.c.lua_exec("print(wh)").strip())
+        with self.assertRaises(MelonError) as cm:
+            self.c.remove_point(wid)
+        self.assertIn("is a Lua hook", str(cm.exception))
+
+    def test_count_and_truncation(self):
+        lib = native.lib()
+        for i in range(10):
+            self.c.add_breakpoint(CODE9 + 0x100 + 4 * i)
+        self.c.add_watchpoint(DATA, 4)
+        self.assertEqual(lib.mds_point_count(self.c.id), 11)
+        buf = (native.MdsPoint * 4)()
+        self.assertEqual(lib.mds_point_list(self.c.id, buf, 4), 4)    # still the number copied
+        self.assertEqual(len(self.c.points()), 11)
+        self.assertEqual(lib.mds_point_count(9999), -1)
+
+
 if __name__ == "__main__":
     unittest.main()
