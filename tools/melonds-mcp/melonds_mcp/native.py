@@ -143,6 +143,7 @@ _SIGNATURES = {
     "mds_calls": (c_int, [c_int, c_int]),
     "mds_callstack": (c_int, [c_int, c_int, POINTER(MdsFrame), c_int]),
     "mds_threadstacks": (c_int, [c_int, c_int, POINTER(c_uint32), POINTER(c_uint32), c_int, POINTER(MdsFrame), c_int]),
+    "mds_overlays": (c_int, [c_int, POINTER(c_int), POINTER(c_uint32), POINTER(c_uint32), c_int]),
     "mds_callcounts_take": (c_int, [c_int, c_int, POINTER(c_uint32), POINTER(c_uint64), c_int]),
     "mds_coverage": (c_int, [c_int, c_int]),
     "mds_coverage_take": (c_int, [c_int, c_int, POINTER(c_uint32), c_int]),
@@ -573,6 +574,16 @@ class Console:
             stacks.append({"sp": sps[i], "frames": [_frame(f) for f in out[at:at + depths[i]]]})
             at += depths[i]
         return stacks
+
+    def overlays(self):
+        """The cart's ARM9 overlays resident now (API level 5): [{"id", "base", "size"}], in ROM table order."""
+        max_n = 256
+        while True:
+            ids, bases, sizes = (c_int * max_n)(), (c_uint32 * max_n)(), (c_uint32 * max_n)()
+            n = _check(lib().mds_overlays(self.id, ids, bases, sizes, max_n))
+            if n <= max_n:
+                return [{"id": ids[i], "base": bases[i], "size": sizes[i]} for i in range(n)]
+            max_n = n
 
     def take_call_counts(self, cpu=9):
         counts = {}

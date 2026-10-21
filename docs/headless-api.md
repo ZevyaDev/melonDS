@@ -11,10 +11,12 @@ reading the code but no test covers them. Claims marked *(verified)* were checke
 one-console experiment against this branch's DLL. Bugs and surprises are collected at the end, in
 [Known issues and surprises](#11-known-issues-and-surprises).
 
-This revision describes **API level 4**: the `fix/api-quirks` changes (level 2), Action Replay
-cheat codes from the `feature/cheats` branch (level 3), and the debugger work merged from
+This revision describes **API level 5**: the `fix/api-quirks` changes (level 2), Action Replay
+cheat codes from the `feature/cheats` branch (level 3), the debugger work merged from
 ZevyaDev's `debug` branch on `merge/upstream-debug` (level 4: thread stacks, the new call tracker,
-PC changes at a break, pipeline refetch, Lua `memory.execute` and `wifi`). See
+PC changes at a break, pipeline refetch, Lua `memory.execute` and `wifi`), and its next merge on
+`merge/upstream-debug-2` (level 5: `mds_overlays`, the GDB stub's session handling, extended mode
+and `monitor overlays`, DWARF line info in the symbol tables). See
 [Version and features](#version-and-features) for what changed at each level.
 
 Contents
@@ -79,7 +81,7 @@ The calls fall into three groups by what they need:
 | --- | --- |
 | no console | `mds_version`, `mds_has`, `mds_error`, `mds_set_local_dir`, `mds_set_log_level`, `mds_set_pacing`, `mds_mp_timeout` (after the first `mds_create`), `mds_serve*`, `mds_set_instance_base` (no console may exist), `mds_instance_base` |
 | any state | `mds_destroy`, `mds_stop_after`, `mds_interrupt` (debugger), `mds_state`, `mds_take_break`, `mds_frames`, `mds_wait`, `mds_screen`, `mds_set_keys`, `mds_touch`, `mds_set_lid`, all `mds_input_*`, `mds_debug_recv_pending`, `mds_read`, `mds_write`, all `mds_cheat_*`, `mds_savestate`/`mds_loadstate` (accepted, but fail unless idle), `mds_lua_output`, `mds_packets`, `mds_packets_take`, `mds_mac`, `mds_save_path` |
-| stopped (idle **or** parked; fails with `console N is running`) | `mds_set_rtc`, `mds_get_rtc`, `mds_run`, `mds_start`, `mds_get_regs`, `mds_set_reg`, `mds_lua_run`, `mds_lua_exec`, `mds_lua_stop`, and the debugger calls: `mds_gdb`, `mds_gdb_host`, `mds_bp_add`, `mds_wp_add`, `mds_point_remove`, `mds_point_enable`, `mds_point_list`, `mds_step`, `mds_trace`, `mds_trace_take`, `mds_calls`, `mds_callstack`, `mds_threadstacks`, `mds_callcounts_take`, `mds_coverage`, `mds_coverage_take`, `mds_lastwriter`, `mds_lastwriter_get`, `mds_lastwriter_query` |
+| stopped (idle **or** parked; fails with `console N is running`) | `mds_set_rtc`, `mds_get_rtc`, `mds_run`, `mds_start`, `mds_get_regs`, `mds_set_reg`, `mds_lua_run`, `mds_lua_exec`, `mds_lua_stop`, and the debugger calls: `mds_gdb`, `mds_gdb_host`, `mds_bp_add`, `mds_wp_add`, `mds_point_remove`, `mds_point_enable`, `mds_point_list`, `mds_step`, `mds_trace`, `mds_trace_take`, `mds_calls`, `mds_callstack`, `mds_threadstacks`, `mds_callcounts_take`, `mds_coverage`, `mds_coverage_take`, `mds_lastwriter`, `mds_lastwriter_get`, `mds_lastwriter_query`; `mds_overlays` (no debugger needed) |
 | idle only | `mds_load_rom` ("loading a ROM needs an idle console"), `mds_reset` ("reset needs an idle console"), `mds_savestate`, `mds_loadstate` ("savestates need a frame boundary; finish the frame first") |
 
 The calls marked *debugger* above (`mds_interrupt` and the debugger calls) also need a console created
@@ -131,7 +133,7 @@ debugger (debug = 0)` (see [section 2](#creating-and-destroying)).
 
 | Function | Does |
 | --- | --- |
-| `int mds_version(void)` | The API level: 4 for this branch (`MDS_API_VERSION` in `melonds_api.h`), 1 for every library before the level scheme. See [Version and features](#version-and-features). |
+| `int mds_version(void)` | The API level: 5 for this branch (`MDS_API_VERSION` in `melonds_api.h`), 1 for every library before the level scheme. See [Version and features](#version-and-features). |
 | `int mds_has(const char* name)` | 1 if the library has the named feature or exports the named function, else 0 (also for NULL). Level 2 and later; on a level-1 library look the symbol up. |
 | `void mds_set_local_dir(const char* dir)` | Directory for the files the melonDS core opens *by relative name* through `Platform::OpenLocalFile` (DSi NAND, SD/FAT image index, OpenGL shader cache). NULL means `.`. It does **not** affect BIOS, firmware, ROM, save or state paths: those are opened exactly as given, relative to the process's working directory. Process-wide, not synchronised: set it before creating consoles. |
 | `void mds_set_log_level(int level)` | Core log threshold: 0 Debug, 1 Info, 2 Warn (default), 3 Error. Messages at or above it go to stderr. Process-wide. |
@@ -151,6 +153,7 @@ does this: `native.api_version()`, `native.has(name)` (see [section 9](#9-python
 | 2 | `fix/api-quirks` | `mds_has`, `mds_serve_host`, `mds_gdb_host`, `mds_lastwriter_query`; the behaviour changes named by the features below |
 | 3 | `feature/cheats` | `mds_cheat_add`, `mds_cheat_remove`, `mds_cheat_enable`, `mds_cheat_clear`, `mds_cheat_list`, `mds_cheat_get` (feature `cheats`); a state load or ROM load clears the console's codes |
 | 4 | `merge/upstream-debug` | `mds_threadstacks`; the call tracker, PC changes at a break, pipeline refetch, Lua `memory.execute`, `debugger.threadstacks` and `wifi.*`, ROM overlays for the server's symbols (the features of level 4 below) |
+| 5 | `merge/upstream-debug-2` | `mds_overlays`; the GDB stub's per-connection reset, EOF detection, extended mode and `monitor overlays`; ROM overlay detection in the core; DWARF line info in the symbol tables (the features of level 5 below) |
 
 Features of level 2 (`mds_has` also answers 1 for every exported function name, `"mds_serve_host"`,
 `"mds_read"`, ...):
@@ -188,6 +191,15 @@ Features of level 4:
 | `lua_execute` | Lua `memory.execute(op, ...)` in exec hooks and at breaks ([section 7](#7-lua)) |
 | `lua_wifi` | Lua `wifi.hook`, `wifi.inject`, `wifi.decode` ([section 7](#7-lua)) |
 | `symbols_rom` | the socket server's `symbols_load` takes overlay images from the running ROM (no extract needed) and reads the config's `delinks.txt` ([section 8](#8-gdb-stub-and-socket-server)) |
+
+Features of level 5:
+
+| feature | meaning |
+| --- | --- |
+| `rom_overlays` | `mds_overlays`: the cart's ARM9 overlays that are resident now ([Resident overlays](#resident-overlays)) |
+| `gdb_monitor_overlays` | the GDB stub answers `monitor overlays` with the resident overlays ([section 8](#8-gdb-stub-and-socket-server)) |
+| `gdb_session_reset` | a GDB disconnect, including the client closing the socket (EOF, now detected), clears the stub's breakpoints and watchpoints, no-ack mode and extended mode, so the next client starts clean |
+| `gdb_extended` | GDB extended mode (`!`, `target extended-remote`): `vKill` keeps the connection, `vRun` restarts the console, and a GDB restart (`monitor reset`, `vRun`) keeps a direct-booted ROM direct-booted |
 
 ### Wireless between consoles, and one console per process
 
@@ -966,6 +978,26 @@ and for every error, which cannot be told apart. Lua's `debugger.lastwriter(addr
 A reset and a state load zero the table (the records described the RAM before the load). Cost: a
 hook on every data access of both CPUs (it arms the data hooks) and 16 MiB.
 
+### Resident overlays
+
+```c
+int mds_overlays(int id, int* ids, uint32_t* bases, uint32_t* sizes, int max);   /* level 5, "rom_overlays" */
+```
+
+The ARM9 overlays of the loaded cart that are in memory now: the same answer as the GDB stub's
+`monitor overlays` and the overlay detection of the symbol tables (one implementation, in the core:
+`src/debug/RomOverlays`). The overlay table and the overlay files are read from the ROM image
+(BLZ-compressed ones decompressed), and an overlay counts as resident when at least 6 of 8 sampled
+16-byte windows of its code match ARM9 memory (read without side effects). Overlays that share an
+address are told apart that way.
+
+It writes the ids, base addresses and sizes (code + bss) of up to `max` resident overlays in the
+order of the ROM's overlay table (each array may be NULL) and returns how many are resident, which
+may exceed `max`. Without a ROM it returns 0. It needs a stopped console (idle or parked), not the
+debugger, and runs on the emulator thread; it reads and decompresses the overlay files on every call
+(milliseconds for DQ9), so call it at a break or a frame boundary, not per instruction. Python:
+`Console.overlays()` -> `[{"id", "base", "size"}]`. Tests: `test_gdb_overlays.py`.
+
 ### Wireless packet capture
 
 ```c
@@ -1310,6 +1342,27 @@ CPU stopped, the emulator thread is blocked inside the stub, the console still r
 without the GDB stub" when compiled without `ENABLE_GDBSTUB` (on by default). Watchpoints work
 through GDB too (README).
 
+Behaviour of a GDB session (level 5, upstream's stub changes):
+
+- **One client at a time, and each starts clean** (`gdb_session_reset`). When a client detaches,
+  kills a non-extended session, or closes the socket (EOF is now detected: before level 5 a closed
+  socket was taken for "no data" and the stub kept a dead connection), the stub drops the
+  connection and clears its breakpoints and watchpoints, no-ack mode and extended mode. The next
+  client must send the initial `+` again. The stub's breakpoints are its own: the C API's
+  `mds_bp_add` points are not touched.
+- **Extended mode** (`gdb_extended`): after `!` (GDB's `target extended-remote`), `vKill` clears
+  the stub's points and keeps the connection; without it `vKill` ends the session. `vRun` restarts
+  the console (reply `S05`); a running target answers it by breaking first.
+- **Restart keeps direct boot**: `monitor reset` and `vRun` call `NDS::Restart`, which resets the
+  console and, if the ROM was direct-booted, direct-boots it again (before, a reset from GDB
+  dropped to the firmware). The headless library direct-boots a ROM when the console needs it
+  (`NDS::NeedsDirectBoot`, no firmware boot), so there a GDB restart boots the game again; the
+  console's input queue, debugger points and Lua state are not reset by it.
+- **`monitor overlays`** (`gdb_monitor_overlays`): prints `overlay N at 0xBASE-0xEND` for each
+  resident ARM9 overlay (as `mds_overlays`), or `no overlays loaded`. The text comes back as GDB
+  console output (`O` packets) before `OK`. `monitor reset` resets the CPU as before; any other
+  command fails with `E01`.
+
 ### Socket server
 
 ```c
@@ -1358,6 +1411,13 @@ emulator thread (decompressed), so no extract is needed; without a ROM, a local 
 addresses to source files for the Qt source view; the server does not use them yet). The headless
 library reads local files only: a URL fails with "cannot download URL" (only the Qt frontend
 downloads). The protocol has no thread-stacks message yet (use `mds_threadstacks` in-process).
+
+Line info (level 5): a symbol table also takes the DWARF `.debug_line` of an ELF linked with
+`-sym on`, matched to modules through the delinked source files. A local decomp's
+`config/<region>/arm9/config.yaml` loads `build/<region>/arm9.o` by itself when that file exists
+(a missing or unreadable ELF does not fail the load); the Qt source dock uses it to mark the exact
+line, the PC line and line breakpoints. No protocol message returns line info yet, so for the
+server and the C API this only costs the read of that ELF at `symbols_load`.
 
 ### Instance base, MAC and save numbering
 
@@ -1441,6 +1501,7 @@ melonds_headless library"). `native.has(name)` and `native.api_version()` tell w
 | `mds_calls` | `track_calls(enabled=True)` |
 | `mds_callstack` | `callstack(cpu=9)` -> list of dicts, innermost first |
 | `mds_threadstacks` | `thread_stacks(cpu=9)` -> list of `{"sp", "frames"}` (up to 64 stacks, 8192 frames); the MCP tool `callstack(threads=true)` appends them |
+| `mds_overlays` | `overlays()` -> list of `{"id", "base", "size"}` (level 5) |
 | `mds_callcounts_take` | `take_call_counts(cpu=9)` -> `{entry: count}` (all of it) |
 | `mds_coverage` / `_take` | `coverage(enabled=True)` / `take_coverage(cpu=9)` -> sorted list |
 | `mds_lastwriter` / `_query` | `track_writers(enabled=True)` / `last_writer(addr)` -> None (no record), `(pc, cpu)` or `("dma", channel, cpu)`; raises `MelonError` for errors (tracking off, running, no debugger). With a level-1 library it falls back to `mds_lastwriter_get`, where errors also give None |
@@ -1668,6 +1729,16 @@ open ones, with what changed; the open items were renumbered.
     them (`callstack(threads=true)`).
 24. **The headless symbol loader reads local files only**; a URL (which the Qt debugger accepts)
     fails with "cannot download URL".
+25. **A GDB restart is a reset** (level 5): `monitor reset` and `vRun` reset the console on the
+    emulator thread while GDB holds it. The C API is not told (no break event, `mds_frames` keeps
+    counting) and recorded runs do not replay across it.
+26. **Overlay detection samples memory** (`mds_overlays`, `monitor overlays`, symbol tables): an
+    overlay whose code was partly overwritten, or patched by more than 2 of the 8 sampled windows,
+    is reported as not loaded, and one whose sampled bytes happen to match another overlay's code
+    at the same address can be reported as loaded.
+27. **`src/debug/gdb_test` does not build**: upstream's mock stub predates the current `GdbStub`
+    constructor and `Init` signatures. The GDB behaviour is tested over a socket instead
+    (`test_gdb_overlays.py`).
 
 ### Fixed in fix/api-quirks
 

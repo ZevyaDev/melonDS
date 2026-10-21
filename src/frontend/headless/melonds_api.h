@@ -94,7 +94,7 @@ typedef struct
 // API level: 1 up to the IPC merge, 2 from fix/api-quirks, 3 from feature/cheats, 4 from merge/upstream-debug
 // (MDS_API_VERSION). It goes up whenever functions are added or behaviour changes; mds_has names the individual
 // features.
-#define MDS_API_VERSION 4
+#define MDS_API_VERSION 5
 MDS_API int mds_version(void);
 // 1 if the library has the named feature or exported function ("serve_host", "mds_serve_host", ...; the list
 // is in docs/headless-api.md, section 1), else 0. Absent from libraries before API level 2: look the symbol up.
@@ -222,6 +222,11 @@ MDS_API uint32_t mds_lastwriter_get(int id, uint32_t addr);
 // (raw = 0, dma = -1), or -1 (mds_error: unknown console, running, no debugger, tracking off). Either
 // pointer may be NULL.
 MDS_API int mds_lastwriter_query(int id, uint32_t addr, uint32_t* raw, int* dma);
+// The ARM9 overlays of the cart that are resident now (API level 5, "rom_overlays"): what the GDB stub's
+// "monitor overlays" reports. Writes the ids, base addresses and sizes (code + bss) of up to max of them, in the
+// ROM's overlay-table order; any array may be NULL. Returns how many are resident (which may exceed max), 0
+// without a ROM. Needs a stopped console, not the debugger.
+MDS_API int mds_overlays(int id, int* ids, uint32_t* bases, uint32_t* sizes, int max);
 
 // Reference: docs/headless-api.md, section 6 (savestates).
 MDS_API int mds_savestate(int id, const char* path);

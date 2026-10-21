@@ -32,6 +32,7 @@
 #include "MPInterface.h"
 #include "Server.h"
 #include "Socket.h"
+#include "debug/RomOverlays.h"
 
 using namespace melonDS;
 using namespace Headless;
@@ -240,11 +241,16 @@ int mds_has(const char* name)
         "lua_execute",          // Lua memory.execute in exec hooks and at breaks
         "lua_wifi",             // Lua wifi.hook, wifi.inject, wifi.decode
         "symbols_rom",          // the server's symbols_load takes overlay images from the running ROM; delinks
+        // API level 5 (merge/upstream-debug-2)
+        "rom_overlays",         // mds_overlays: the resident ARM9 overlays, detected in the core (RomOverlays)
+        "gdb_monitor_overlays", // the GDB stub answers "monitor overlays" (qRcmd output)
+        "gdb_session_reset",    // a GDB disconnect (also EOF) clears the stub's breakpoints, no-ack and extended mode
+        "gdb_extended",         // GDB extended mode (!): vKill keeps the connection, vRun restarts (direct boot kept)
     };
     static const char* const Functions[] = {
         "mds_has", "mds_serve_host", "mds_gdb_host", "mds_lastwriter_query",
         "mds_cheat_add", "mds_cheat_remove", "mds_cheat_enable", "mds_cheat_clear", "mds_cheat_list",
-        "mds_cheat_get", "mds_threadstacks",
+        "mds_cheat_get", "mds_threadstacks", "mds_overlays",
     };
     if (!name)
         return 0;
@@ -1047,6 +1053,29 @@ int mds_lastwriter_query(int id, uint32_t addr, uint32_t* raw, int* dma)
     if (dma)
         *dma = writer >= DMAWriterTag ? int((writer >> 1) & 3) : -1;
     return writer ? 1 : 0;
+}
+
+int mds_overlays(int id, int* ids, uint32_t* bases, uint32_t* sizes, int max)
+{
+    Slot* s = Stopped(id);
+    if (!s || !CountOk(max, "max"))
+        return -1;
+    return OnEmu(s, [&](Instance& inst, std::string&) {
+        int n = 0;
+        for (const RomOverlay& ov : ReadRomOverlays(*inst.NDS))
+        {
+            if (!OverlayLoaded(*inst.NDS, ov.Base, ov.Size, ov.Image))
+                continue;
+            if (n < max)
+            {
+                if (ids) ids[n] = ov.Id;
+                if (bases) bases[n] = ov.Base;
+                if (sizes) sizes[n] = ov.Size;
+            }
+            n++;
+        }
+        return n;
+    });
 }
 
 int mds_savestate(int id, const char* path)
