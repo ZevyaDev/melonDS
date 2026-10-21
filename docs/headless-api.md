@@ -11,9 +11,11 @@ reading the code but no test covers them. Claims marked *(verified)* were checke
 one-console experiment against this branch's DLL. Bugs and surprises are collected at the end, in
 [Known issues and surprises](#11-known-issues-and-surprises).
 
-This revision describes **API level 3**: the `fix/api-quirks` changes (level 2) plus Action Replay
-cheat codes from the `feature/cheats` branch (see [Version and features](#version-and-features) for
-what changed at each level).
+This revision describes **API level 4**: the `fix/api-quirks` changes (level 2), Action Replay
+cheat codes from the `feature/cheats` branch (level 3), and the debugger work merged from
+ZevyaDev's `debug` branch on `merge/upstream-debug` (level 4: thread stacks, the new call tracker,
+PC changes at a break, pipeline refetch, Lua `memory.execute` and `wifi`). See
+[Version and features](#version-and-features) for what changed at each level.
 
 Contents
 
@@ -77,7 +79,7 @@ The calls fall into three groups by what they need:
 | --- | --- |
 | no console | `mds_version`, `mds_has`, `mds_error`, `mds_set_local_dir`, `mds_set_log_level`, `mds_set_pacing`, `mds_mp_timeout` (after the first `mds_create`), `mds_serve*`, `mds_set_instance_base` (no console may exist), `mds_instance_base` |
 | any state | `mds_destroy`, `mds_stop_after`, `mds_interrupt` (debugger), `mds_state`, `mds_take_break`, `mds_frames`, `mds_wait`, `mds_screen`, `mds_set_keys`, `mds_touch`, `mds_set_lid`, all `mds_input_*`, `mds_debug_recv_pending`, `mds_read`, `mds_write`, all `mds_cheat_*`, `mds_savestate`/`mds_loadstate` (accepted, but fail unless idle), `mds_lua_output`, `mds_packets`, `mds_packets_take`, `mds_mac`, `mds_save_path` |
-| stopped (idle **or** parked; fails with `console N is running`) | `mds_set_rtc`, `mds_get_rtc`, `mds_run`, `mds_start`, `mds_get_regs`, `mds_set_reg`, `mds_lua_run`, `mds_lua_exec`, `mds_lua_stop`, and the debugger calls: `mds_gdb`, `mds_gdb_host`, `mds_bp_add`, `mds_wp_add`, `mds_point_remove`, `mds_point_enable`, `mds_point_list`, `mds_step`, `mds_trace`, `mds_trace_take`, `mds_calls`, `mds_callstack`, `mds_callcounts_take`, `mds_coverage`, `mds_coverage_take`, `mds_lastwriter`, `mds_lastwriter_get`, `mds_lastwriter_query` |
+| stopped (idle **or** parked; fails with `console N is running`) | `mds_set_rtc`, `mds_get_rtc`, `mds_run`, `mds_start`, `mds_get_regs`, `mds_set_reg`, `mds_lua_run`, `mds_lua_exec`, `mds_lua_stop`, and the debugger calls: `mds_gdb`, `mds_gdb_host`, `mds_bp_add`, `mds_wp_add`, `mds_point_remove`, `mds_point_enable`, `mds_point_list`, `mds_step`, `mds_trace`, `mds_trace_take`, `mds_calls`, `mds_callstack`, `mds_threadstacks`, `mds_callcounts_take`, `mds_coverage`, `mds_coverage_take`, `mds_lastwriter`, `mds_lastwriter_get`, `mds_lastwriter_query` |
 | idle only | `mds_load_rom` ("loading a ROM needs an idle console"), `mds_reset` ("reset needs an idle console"), `mds_savestate`, `mds_loadstate` ("savestates need a frame boundary; finish the frame first") |
 
 The calls marked *debugger* above (`mds_interrupt` and the debugger calls) also need a console created
@@ -129,7 +131,7 @@ debugger (debug = 0)` (see [section 2](#creating-and-destroying)).
 
 | Function | Does |
 | --- | --- |
-| `int mds_version(void)` | The API level: 2 for this branch (`MDS_API_VERSION` in `melonds_api.h`), 1 for every library before it. See [Version and features](#version-and-features). |
+| `int mds_version(void)` | The API level: 4 for this branch (`MDS_API_VERSION` in `melonds_api.h`), 1 for every library before the level scheme. See [Version and features](#version-and-features). |
 | `int mds_has(const char* name)` | 1 if the library has the named feature or exports the named function, else 0 (also for NULL). Level 2 and later; on a level-1 library look the symbol up. |
 | `void mds_set_local_dir(const char* dir)` | Directory for the files the melonDS core opens *by relative name* through `Platform::OpenLocalFile` (DSi NAND, SD/FAT image index, OpenGL shader cache). NULL means `.`. It does **not** affect BIOS, firmware, ROM, save or state paths: those are opened exactly as given, relative to the process's working directory. Process-wide, not synchronised: set it before creating consoles. |
 | `void mds_set_log_level(int level)` | Core log threshold: 0 Debug, 1 Info, 2 Warn (default), 3 Error. Messages at or above it go to stderr. Process-wide. |
@@ -148,6 +150,7 @@ does this: `native.api_version()`, `native.has(name)` (see [section 9](#9-python
 | 1 | up to the IPC merge (`merge/ipc`) | everything in the C API before this table existed; `mds_version` returned 1 throughout, as functions were added |
 | 2 | `fix/api-quirks` | `mds_has`, `mds_serve_host`, `mds_gdb_host`, `mds_lastwriter_query`; the behaviour changes named by the features below |
 | 3 | `feature/cheats` | `mds_cheat_add`, `mds_cheat_remove`, `mds_cheat_enable`, `mds_cheat_clear`, `mds_cheat_list`, `mds_cheat_get` (feature `cheats`); a state load or ROM load clears the console's codes |
+| 4 | `merge/upstream-debug` | `mds_threadstacks`; the call tracker, PC changes at a break, pipeline refetch, Lua `memory.execute`, `debugger.threadstacks` and `wifi.*`, ROM overlays for the server's symbols (the features of level 4 below) |
 
 Features of level 2 (`mds_has` also answers 1 for every exported function name, `"mds_serve_host"`,
 `"mds_read"`, ...):
@@ -173,6 +176,18 @@ Feature of level 3:
 | feature | meaning |
 | --- | --- |
 | `cheats` | the `mds_cheat_*` calls: Action Replay codes run by the core's engine every frame ([section 6a](#6a-action-replay-cheat-codes)) |
+
+Features of level 4:
+
+| feature | meaning |
+| --- | --- |
+| `thread_stacks` | `mds_threadstacks` and Lua `debugger.threadstacks`: the stacks of the threads that are not running ([Call tracking](#call-tracking-call-stacks-and-call-counts)) |
+| `callstack_unwind` | the call tracker also follows calls made without `BL`, tail calls and NitroSDK context switches, and seeds the frames below the first call from stack memory; call counts include those calls ([Call tracking](#call-tracking-call-stacks-and-call-counts)) |
+| `step_redirect` | a PC changed at a break (`mds_set_reg` 15) or by a hook takes effect before anything executes: the hooks run again at the new PC (a breakpoint there fires) and `mds_step(n)` counts n instructions from it ([Stepping](#stepping-mds_step)) |
+| `pipeline_refetch` | a write made at a break or from a hook (`mds_write`, Lua `memory.write*`) over the instruction about to run, or the one after it, takes effect: the CPU refetches its pipeline ([Breakpoints and watchpoints](#breakpoints-and-watchpoints)) |
+| `lua_execute` | Lua `memory.execute(op, ...)` in exec hooks and at breaks ([section 7](#7-lua)) |
+| `lua_wifi` | Lua `wifi.hook`, `wifi.inject`, `wifi.decode` ([section 7](#7-lua)) |
+| `symbols_rom` | the socket server's `symbols_load` takes overlay images from the running ROM (no extract needed) and reads the config's `delinks.txt` ([section 8](#8-gdb-stub-and-socket-server)) |
 
 ### Wireless between consoles, and one console per process
 
@@ -210,7 +225,7 @@ void mds_destroy(int id);
   `debug = 0` has no debugger**: the hooks never run, so every call that would silently do nothing
   fails instead, with `console N was created without the debugger (debug = 0)`: `mds_bp_add`,
   `mds_wp_add`, `mds_point_remove`, `mds_point_enable`, `mds_point_list`, `mds_step`, `mds_trace`,
-  `mds_trace_take`, `mds_calls`, `mds_callstack`, `mds_callcounts_take`, `mds_coverage`,
+  `mds_trace_take`, `mds_calls`, `mds_callstack`, `mds_threadstacks`, `mds_callcounts_take`, `mds_coverage`,
   `mds_coverage_take`, `mds_lastwriter`, `mds_lastwriter_query` (and `mds_lastwriter_get`, which
   returns 0), `mds_interrupt`, `mds_gdb`/`mds_gdb_host`, and in Lua the `event.onmemory*` hooks and
   the `debugger.*` functions except `peek` and `resume` (a Lua error with the same text). The socket
@@ -409,6 +424,23 @@ from idle, and from any park that was not in that CPU's own instruction hook.)
 the CPU is halted (waiting for an interrupt) the step completes when it wakes. Give the run a frame
 budget large enough to reach the step (the socket server uses a cap); the frame count advances only
 when a frame ends. The step break is reported through `mds_take_break` with kind 3.
+
+**A new PC while parked** (level 4, feature `step_redirect`). Changing PC at a break (`mds_set_reg`
+index 15, Lua `emu.setregister("pc", ...)`, or a hook whose `memory.execute` branched) takes effect
+before anything executes: on resume the instruction hooks run again for the new PC, so a breakpoint
+there fires (kind exec, without running anything) and an armed step counts from the new PC:
+`mds_set_reg(id, 9, 15, X)` then `mds_step(id, 9, n)` executes n instructions starting at X (test
+`StepRedirect` in `test_upstream_debug.py`). The repeat hook call does not advance the step
+countdown, because the instruction of the first call never ran. Before level 4 the instruction
+already fetched at the break address ran first.
+
+**Smart stepping is not in the C API.** The Qt debugger has "Step to branch" (Ctrl+F10: run to the
+next instruction that may write PC at the current call depth, stepping over calls) and "Run to taken
+branch" (Ctrl+F11: run until a branch, call or return actually jumps; stop at its target), and the
+Qt automation commands `stepbranch`/`steptaken` (see `DEBUGGER.md`). They use a separate mechanism
+in the core (`Debugger::StepTo`) that does not touch the step countdown: `mds_step`, the socket
+server's `step` and Lua's `debugger.step` keep the exact counts above. Any break cancels a pending
+smart step; a smart step does not cancel an armed count.
 
 ---
 
@@ -751,6 +783,15 @@ Cost: with at least one enabled breakpoint, every instruction of that CPU calls 
 and checks a 1 MiB page table; with a watchpoint, every data access of that CPU does. Points
 persist across reset, ROM loads and savestate loads.
 
+**Writing code at a break** (level 4, feature `pipeline_refetch`). The CPU has already fetched the
+instruction it is parked before and the one after it. A write made while parked at a break or from
+inside a hook (`mds_write`, Lua `memory.write*`) that overlaps those 8 bytes (4 in Thumb) makes the
+CPU refetch them, so the new code is what runs (test `PipelineRefetch`). Before level 4 the old
+opcodes ran once more. Writes from an idle console (at a frame boundary) need no refetch, and a
+write made by a watchpoint callback in the middle of an instruction does not refetch. The refetch
+reads code through the bus like a fetch *(inferred: it may add code-fetch cycles, so a run that
+writes code at a break is not cycle-identical to one that does not)*.
+
 ### Instruction trace
 
 ```c
@@ -799,11 +840,23 @@ typedef struct {
 `mds_calls(id, 1)` turns tracking on for both CPUs; `mds_calls(id, 0)` turns it off and **clears the
 call stacks** (not the counts).
 
-**What counts as a call:** `BL`, `BLX` (immediate and register) in ARM state, and Thumb `BL`/`BLX`
-(the second half of the pair) and `BLX Rm`. Nothing else: `B`/`BX` tail calls, `MOV PC, ...`,
-`LDR PC, ...` and the `MOV LR, PC; BX Rn` idiom are not counted and do not push a frame. A call
-through a veneer (`BL veneer; veneer: LDR PC/BX`) is counted at the veneer *(inferred)*. IRQs and
-SWIs are tracked as exception frames but not counted.
+**What counts as a call** (level 4, feature `callstack_unwind`; the tracker came with the merge of
+ZevyaDev's `debug` branch). A frame is pushed for:
+
+- `BL`, `BLX` (immediate and register) in ARM state, and Thumb `BL`/`BLX` (the second half of the
+  pair) and `BLX Rm` (the core's call hook);
+- a jump to an address other than the next instruction and other than LR, made while LR holds the
+  return address: the `MOV LR, PC; BX Rn` / `LDR PC, ...` idioms, and `LDR LR, =ret` followed by an
+  indirect jump;
+- a function entered without a tracked call whose first instruction is a `PUSH {..., LR}`
+  (`STMDB SP!` / Thumb `PUSH`) and whose LR is not already the return of one of the 8 innermost
+  frames: the entry is taken as the target of the last jump if that is at most 0x20 bytes before.
+
+A tail call is followed instead of pushed: an indirect jump (or a jump to a known entry) with SP, LR and
+mode unchanged retargets the innermost frame to the new entry and counts it. `B`/`BX` to the next
+part of the same function push nothing. IRQs and SWIs are tracked as exception frames but not counted.
+These are heuristics *(inferred)*: hand-written code that pushes LR without being called can add a
+frame, and a call through a veneer is counted at the veneer.
 
 **Call stack.** Each call pushes a frame (at most 4096 deep; the oldest frame is dropped beyond
 that). Before every instruction the tracker pops frames whose return address has been reached in
@@ -811,18 +864,49 @@ the same mode with the stack back at or above the frame's SP, and frames whose S
 risen past (so tail calls and longjmp-style exits unwind). It is **thread aware** *(heuristic)*:
 when SP jumps by 0x400 or more, or changes in the same mode without a stack-adjusting instruction,
 the current stack is parked under the old SP and the parked stack whose SP is closest to the new SP
-(within 0x200) is restored, keeping up to 64 parked thread stacks. It is **interrupt aware**: an
-IRQ or SWI saves the interrupted stack (up to 16 nested) and starts a new one whose first frame is
-the exception entry (`exception = 1`, `site = ret` = the interrupted address, `entry` = the vector
-address); the exception return restores it. Unwinding only runs in debug mode.
+(within 0x200) is restored, keeping up to 64 parked thread stacks. A switch that happens on the way
+out of an exception (NitroSDK loading another thread's context) rebuilds the resumed thread's
+innermost frame from its LR, and if nothing was known about that thread, its stack is unwound from
+stack memory. It is **interrupt aware**: an IRQ or SWI saves the interrupted stack (up to 16
+nested) and starts a new one whose first frame is the exception entry (`exception = 1`, `site =
+ret` = the interrupted address, `entry` = the vector address); the exception return restores it.
+Unwinding only runs in debug mode. Stacks are tracked in system and user mode only: in an exception
+mode SP changes are not treated as thread switches.
+
+**Frames from before tracking.** After `mds_calls(id, 1)` and after a state load, the first frame
+pushed outside an exception also **seeds the frames below it** from stack memory: the caller chain
+is unwound by scanning back for each function's prologue (how much it pushed, where it saved LR)
+for up to 64 frames. Seeded frames are not counted in the call counts. So a stack read soon after
+enabling tracking is usually complete, not just the calls made since *(inferred; the unwinder relies
+on standard prologues)*.
 
 `mds_callstack` copies the stack of one CPU **innermost first**: the current frames, then for each
 interrupted context its exception frame and the frames below it. It returns the count copied
-(empty if tracking is off). Frames from before tracking was enabled are unknown, so enable it
-before running to the point of interest. A reset and a savestate load clear the stacks (a load
-puts the CPUs somewhere else entirely; tracking stays on and builds new stacks from there).
+(empty if tracking is off). A reset and a savestate load clear the stacks (a load puts the CPUs
+somewhere else entirely; tracking stays on and builds new stacks from there, seeded as above).
 
-**Call counts.** Each call increments a counter for its `entry`, per CPU.
+```c
+int mds_threadstacks(int id, int cpu, uint32_t* sps, uint32_t* depths, int max_stacks,
+                     mds_frame* out, int max_frames);   /* level 4, "thread_stacks" */
+```
+
+`mds_threadstacks` returns the stacks of the threads that are **not running**: first the parked
+stacks of the tracker (each under the SP it was parked at), then every other thread of the
+NitroSDK thread list (the `OSThreadInfo` pointed to by `0x027FFFA0` for the ARM9, `0x027FFFA4` for
+the ARM7; up to 64 threads) whose saved context was not already tracked, unwound from its saved
+PC, SP and LR. A tracked thread's innermost frame is refreshed from its saved context. It returns
+the number of stacks copied (at most `max_stacks`); `sps[i]` is the stack's SP and `depths[i]` its
+number of frames; the frames of all stacks are packed into `out` one stack after the other,
+innermost first, at most `max_frames` in total (a stack cut short has a smaller `depths[i]`). Both
+counts must not be negative. It needs the debugger and a stopped console. Thread-list stacks are
+found even with tracking off (they come from memory); the parked stacks need tracking. A game that
+is not built on NitroSDK, or before `OS_InitThread`, has no thread list *(inferred)*. Lua:
+`debugger.threadstacks([cpu])` returns `{ {sp = ..., frames = {...}}, ... }`. Python:
+`Console.thread_stacks(cpu=9)`.
+
+**Call counts.** Each pushed frame (above) and each followed tail call increments a counter for its
+`entry`, per CPU; seeded frames do not. From level 4 this includes calls made without `BL`, so counts
+can be higher than before for the same run.
 `mds_callcounts_take` returns up to `max` (entry, count) pairs in no particular order and removes
 them (staged like the trace: loop until 0). Counts accumulate across frames, resets and state
 loads until taken; turning tracking off does not clear them. Python sums the chunks into a dict.
@@ -908,7 +992,7 @@ negative.
 | --- | --- | --- | --- |
 | breakpoints, watchpoints, hits | kept | kept | `mds_point_remove` |
 | trace ring | emptied (config kept) | kept (a log of what ran) | `mds_trace` |
-| call stacks | cleared | **cleared** (tracking stays on) | `mds_calls(id, 0)` |
+| call stacks | cleared | **cleared** (tracking stays on; re-seeded from stack memory at the next call) | `mds_calls(id, 0)` |
 | a watchpoint hit not yet taken | cleared | **cleared** | parking on it |
 | call counts | kept | kept (a log) | `mds_callcounts_take` |
 | coverage | kept | kept (a log) | `mds_coverage_take` |
@@ -921,7 +1005,9 @@ The rule for a load (`Debugger::OnStateLoaded`, also used by the Qt frontend): w
 execution or memory before the load is dropped (call stacks, the parked thread stacks and
 interrupted contexts behind them, a pending watchpoint hit, last-writer records); configuration
 (points, trace range, tracking switches, armed steps and break requests) and accumulated logs
-(trace, call counts, coverage, packets) are kept. API level 1 kept everything over a load.
+(trace, call counts, coverage, packets) are kept. API level 1 kept everything over a load. From level 4
+a load also arms the stack seeding (the frames below the first call made after the load are read back
+from stack memory) and forgets the calls that `memory.execute` was waiting to return from.
 
 ---
 
@@ -1154,7 +1240,9 @@ Functions available (`LuaHost.cpp`, `lua_debug/LuaDebug.cpp`):
 | `input` | `NDSTapDown(x, y)`, `NDSTapUp()` |
 | `savestate` | `save(path)`, `load(path)`; they only succeed while the console is idle, i.e. from `mds_lua_exec`/the start of `mds_lua_run`, not from a running script or hook |
 | `event` | `onmemoryexecute(fn, addr, [name], [cpu])`, `onmemoryread(fn, addr, [name], [cpu], [size=1])`, `onmemorywrite(...)`, `onframeend(fn, [name])`, `unregisterbyid(id)`, `unregisterbyname(name)` |
-| `debugger` | `callstack([cpu])`, `trackcalls(on)`, `callcounts([cpu])` (drains), `coverage(on)`, `draincoverage([cpu])`, `trace([capacity=65536], [cpu], [start], [end])` (one CPU), `draintrace()`, `trackwriters(on)`, `lastwriter(addr)` (returns `pc, cpu` for an instruction, `nil, cpu, channel` for a DMA write, `nil` for none), `pause([cpu])` (break request on one CPU), `step([count=1], [cpu])` (exact, as `mds_step`), `peek(addr, [size=4], [cpu])`; `resume` raises "not available here" in headless. On a console without the debugger all but `peek` and `resume` raise "console N was created without the debugger (debug = 0)" |
+| `debugger` | `callstack([cpu])` (frames `{entry, site, ret, sp, mode, exception}`, innermost first), `threadstacks([cpu])` (level 4: `{ {sp, frames}, ... }`, as `mds_threadstacks`), `trackcalls(on)`, `callcounts([cpu])` (drains), `coverage(on)`, `draincoverage([cpu])`, `trace([capacity=65536], [cpu], [start], [end])` (one CPU), `draintrace()`, `trackwriters(on)`, `lastwriter(addr)` (returns `pc, cpu` for an instruction, `nil, cpu, channel` for a DMA write, `nil` for none), `pause([cpu])` (break request on one CPU), `step([count=1], [cpu])` (exact, as `mds_step`), `peek(addr, [size=4], [cpu])`; `resume` raises "not available here" in headless. On a console without the debugger all but `peek` and `resume` raise "console N was created without the debugger (debug = 0)" |
+| `memory` (level 4) | `execute(op, ...)`: see below |
+| `wifi` (level 4) | `hook(fn, [name])`, `inject(data, [rate=2])`, `decode(data, [fcs=true])`: see below |
 | global | `print` (to the output buffer) |
 
 Memory hooks are ordinary debugger points with a callback: they get ids from the same counter,
@@ -1166,6 +1254,33 @@ like a breakpoint (break kind exec/read/write with the hook's id), anything else
 makes any hook a conditional breakpoint. `event.onframeend` ids are negative. The Lua debugger
 tables share their data with the C API (`debugger.draintrace` drains the same ring as
 `mds_trace_take`).
+
+**`memory.execute(op, ...)`** (level 4, feature `lua_execute`) runs instructions as if they sat in
+front of the hooked one. Opcodes are numbers or one table of numbers, ARM or Thumb by the CPU's
+current state (a Thumb `BL` pair as one 32-bit value); an optional string argument names the CPU
+(`"arm9"`/`"arm7"`). It only works on the emulator thread inside an exec hook (`event.onmemoryexecute`)
+or at a break of that CPU, and raises "memory.execute runs only inside an exec hook or at a break, on
+that CPU, with JIT off" anywhere else (from `mds_lua_exec` on an idle console, inside a read/write
+hook); on a console without the debugger it raises the debug = 0 error. PC reads as it would at the
+hooked instruction. It returns `true` if one of the instructions
+branched: the hooked instruction is then skipped and execution continues at the target, so
+`memory.execute(0xE12FFF1E)` (`bx lr`; `0x4770` in Thumb) at a function's entry makes the function
+return at once (test `LuaExecute`). A call (`bl`, `blx`, `swi`) returns to the hooked instruction with
+r0-r3, r12, LR and the flags restored to what they were before `memory.execute`, without firing that
+instruction's hooks again; the callee's return value is not kept. With `false` the hooked instruction
+runs next. An armed `mds_step` counts the hooked instruction, not the executed ones; after a branch the
+target is the first counted instruction (`step_redirect`).
+
+**`wifi`** (level 4, feature `lua_wifi`): `wifi.hook(fn, [name])` sees every frame the console sends
+or receives (local multiplayer commands, replies and acks, beacons, management and data frames) as
+`{tx, data, rate, channel, time}` with `data` the 802.11 frame including its FCS; return `false` to drop
+it or a string to replace it. It returns an id from the point counter (remove it with
+`event.unregisterbyid`/`unregisterbyname`; it does not show in `mds_point_list`). `wifi.inject(data,
+[rate])` queues a frame (up to 256) to be received as if from the air; `wifi.decode(data, [fcs])`
+returns the 802.11 header, the Nintendo MP fields, and the fixed fields and elements of management
+frames. Wifi hooks work without the debugger and run on the emulator thread. Dropping, replacing or
+injecting frames changes what the console and its partners see, so runs that use them are not
+comparable with runs that do not.
 
 ---
 
@@ -1234,6 +1349,15 @@ Effects on the in-process API while the server runs:
   connect, earlier breaks and output are discarded.
 - On disconnect the server clears every console's input queue and frame subscriptions and stops the
   consoles that client started.
+
+Symbols (`symbols_load`, level 4 feature `symbols_rom`): the server loads a dsd `config.yaml` (or its
+folder) or an `address name [size]` text file into the console's own table, as the Qt debugger does.
+Overlay images, which overlay detection compares with RAM, are read from the **running ROM** on the
+emulator thread (decompressed), so no extract is needed; without a ROM, a local config's
+`rom_config` extract is used as before. The config's `delinks` files are read too (they map
+addresses to source files for the Qt source view; the server does not use them yet). The headless
+library reads local files only: a URL fails with "cannot download URL" (only the Qt frontend
+downloads). The protocol has no thread-stacks message yet (use `mds_threadstacks` in-process).
 
 ### Instance base, MAC and save numbering
 
@@ -1316,6 +1440,7 @@ melonds_headless library"). `native.has(name)` and `native.api_version()` tell w
 | `mds_trace_take` | `take_trace()` -> list of `(cycle, cpu, pc, instr, cpsr)` (all of it) |
 | `mds_calls` | `track_calls(enabled=True)` |
 | `mds_callstack` | `callstack(cpu=9)` -> list of dicts, innermost first |
+| `mds_threadstacks` | `thread_stacks(cpu=9)` -> list of `{"sp", "frames"}` (up to 64 stacks, 8192 frames); the MCP tool `callstack(threads=true)` appends them |
 | `mds_callcounts_take` | `take_call_counts(cpu=9)` -> `{entry: count}` (all of it) |
 | `mds_coverage` / `_take` | `coverage(enabled=True)` / `take_coverage(cpu=9)` -> sorted list |
 | `mds_lastwriter` / `_query` | `track_writers(enabled=True)` / `last_writer(addr)` -> None (no record), `(pc, cpu)` or `("dma", channel, cpu)`; raises `MelonError` for errors (tracking off, running, no debugger). With a level-1 library it falls back to `mds_lastwriter_get`, where errors also give None |
@@ -1523,6 +1648,26 @@ open ones, with what changed; the open items were renumbered.
     folder (those paths are opened as given); coverage is per instruction, not "every block";
     many calls return counts or ids rather than "0 or a negative error"; the server serves one
     client at a time, not "several clients".
+19. **The call tracker is heuristic** (level 4): besides `BL`/`BLX` it pushes frames for jumps made
+    with the return address in LR and for functions that start with `PUSH {..., LR}`, and it seeds
+    the frames below the first call from stack memory by scanning for prologues. Hand-written code
+    that saves LR without being called can add a frame, a non-standard prologue can stop the seeding
+    early, and call counts are higher than level 3 gave for the same run (they include those calls).
+20. **A PC change at a break re-runs the hooks there** (level 4, `step_redirect`): with a breakpoint
+    at the new PC, the resume parks again at once (kind exec) before running anything. Resume again
+    to go on.
+21. **`memory.execute` drops the callee's return value**: a call made with it returns with r0-r3,
+    r12, LR and the flags as they were before. It works only inside an exec hook or at a break of
+    the same CPU, never from a read/write hook or from `mds_lua_exec` on an idle console.
+22. **Lua `wifi` hooks and injected frames change the run**: a hook that drops or replaces frames,
+    or `wifi.inject`, alters what the console (and its partners) receive, so such runs are not
+    deterministic replicas of runs without them. A hook that only looks returns nothing (or `true`)
+    and changes nothing.
+23. **No thread stacks over the socket protocol or the CLI**: `mds_threadstacks` and Lua
+    `debugger.threadstacks` have no wire message yet; the MCP server uses the native library and has
+    them (`callstack(threads=true)`).
+24. **The headless symbol loader reads local files only**; a URL (which the Qt debugger accepts)
+    fails with "cannot download URL".
 
 ### Fixed in fix/api-quirks
 

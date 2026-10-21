@@ -58,7 +58,7 @@ what local multiplayer needs, and a stop in one stops the others at their next i
 | `text_find` | find on-screen text in RAM (ASCII, UTF-16, UTF-8, or chosen encodings) |
 | `input_sequence`, `press`, `touch`, `lid_set` | input through the setters; `"A*4 w20 Down*30"` plays a whole sequence in one call, on several consoles |
 | `input_queue`, `input_mode`, `input_status`, `input_clear`, `input_log` | frame-exact input through the queue (touch tokens `touch:X,Y*N` too, like the CLI's `input`), empty-queue mode, applied-input log |
-| `calls_track`, `callstack`, `calls_read` | shadow call stack across threads and nested IRQs, per-function call counts |
+| `calls_track`, `callstack`, `calls_read` | shadow call stack across threads and nested IRQs (`threads=true` adds the stacks of threads that are not running), per-function call counts |
 | `coverage_track`, `coverage_read` | every executed instruction, grouped by symbol (optionally the addresses) |
 | `trace_start`, `trace_read` | instruction ring buffer, or function transitions only |
 | `writers_track`, `last_writer` | which instruction (or DMA channel) last wrote a main-RAM word |
@@ -95,11 +95,12 @@ BizHawk-style API, the same names as the Qt Lua console where they overlap.
 
 | table | functions |
 |---|---|
-| `memory` | `read_u8` `read_s8` `read_u16_le` `read_s16_le` `read_u24_le` `read_u32_le` `read_s32_le` `write_*` `read_bytes_as_array` `write_bytes_as_array`; optional domain `"ARM9 System Bus"`, `"ARM7 System Bus"`, `"Main RAM"` |
+| `memory` | `read_u8` `read_s8` `read_u16_le` `read_s16_le` `read_u24_le` `read_u32_le` `read_s32_le` `write_*` `read_bytes_as_array` `write_bytes_as_array`, `execute` (in exec hooks: run instructions in front of the hooked one); optional domain `"ARM9 System Bus"`, `"ARM7 System Bus"`, `"Main RAM"` |
 | `emu` | `frameadvance` `framecount` `getsystemid` `getregister` `getregisters` `setregister` |
 | `event` | `onmemoryexecute(fn, addr, [name], [domain])` `onmemoryread(fn, addr, [name], [domain], [size])` `onmemorywrite(...)` `onframeend(fn)` `unregisterbyid` `unregisterbyname` |
-| `debugger` | `callstack` `trackcalls` `callcounts` `coverage` `draincoverage` `trace` `draintrace` `trackwriters` `lastwriter` `pause` `step` `peek` |
+| `debugger` | `callstack` `threadstacks` `trackcalls` `callcounts` `coverage` `draincoverage` `trace` `draintrace` `trackwriters` `lastwriter` `pause` `step` `peek` |
 | `joypad`, `input`, `savestate` | `set` `get`, `NDSTapDown` `NDSTapUp`, `save` `load` |
+| `wifi` | `hook(fn, [name])` `inject(data, [rate])` `decode(data, [fcs])` |
 
 Hook callbacks receive `(addr, value, pc)`. Returning `true` stops the console, which makes any
 hook a conditional breakpoint. The script body runs as a coroutine; `emu.frameadvance()` yields
