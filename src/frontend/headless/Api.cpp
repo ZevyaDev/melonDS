@@ -255,6 +255,9 @@ int mds_has(const char* name)
         "point_lua_tag",        // mds_point_list flags MDS_POINT_LUA on Lua hooks; mds_point_remove refuses them
         "point_count",          // mds_point_count: the total mds_point_list has to list
         "gdb_reset_event",      // a GDB restart queues an MDS_BREAK_RESET event (socket: a break event); mds_reset_count
+        // API level 7 (fix/savestate-irq)
+        "savestate_derived",    // a load recomputes the CPUs' IRQ lines and the ARM9 code timing: nothing of the run before it survives
+        "gx_fifo_zeroed",       // GX FIFO entries are written with zeroed padding, so states hold no stray bytes
     };
     static const char* const Functions[] = {
         "mds_has", "mds_serve_host", "mds_gdb_host", "mds_lastwriter_query",

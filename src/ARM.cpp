@@ -248,6 +248,7 @@ void ARM::Reset()
     Halted = 0;
 
     IRQ = 0;
+    IdleLoop = 0;
 
     for (int i = 0; i < 16; i++)
         R[i] = 0;
@@ -339,10 +340,14 @@ void ARM::DoSavestate(Savestate* file)
         R_IRQ[2] |= 0x00000010;
         R_UND[2] |= 0x00000010;
 
+        // Not saved, and only meaningful to the JIT (which a load resets): a value left from
+        // before the load must not survive it.
+        IdleLoop = 0;
+
         if (!Num)
         {
-            SetupCodeMem(R[15]); // should fix it
-            ((ARMv5*)this)->RegionCodeCycles = ((ARMv5*)this)->MemTimings[R[15] >> 12][0];
+            // the code region and its timing are set up in ARMv5::DoSavestate, once CP15
+            // (the TCMs and the protection unit the timings come from) is loaded
 
             if ((CPSR & 0x1F) == 0x10)
                 ((ARMv5*)this)->PU_Map = ((ARMv5*)this)->PU_UserMap;
@@ -361,6 +366,18 @@ void ARMv5::DoSavestate(Savestate* file)
 {
     ARM::DoSavestate(file);
     CP15DoSavestate(file);
+
+    if (!file->Saving)
+    {
+        // RegionCodeCycles (the fetch timing of the code region, set by every JumpTo) is not in
+        // the state. Derive it from the loaded protection unit, which CP15DoSavestate has just
+        // restored (UpdatePURegions rebuilds MemTimings). It used to be taken before CP15 was
+        // loaded, from the MemTimings of whatever ran before the load: a console fresh from a
+        // reset got the uncached timing and one that had been running the game the cached one,
+        // so the first instructions after a load ran at different speeds on the two.
+        SetupCodeMem(R[15]);
+        RegionCodeCycles = MemTimings[R[15] >> 12][0];
+    }
 }
 
 

@@ -2526,7 +2526,7 @@ void GPU3D::WriteToGXFIFO(u32 val) noexcept
     {
         if ((CurCommand & 0xFF) || (NumCommands == 4 && CurCommand == 0))
         {
-            CmdFIFOEntry entry;
+            CmdFIFOEntry entry {}; // zeroed: the 3 padding bytes go into savestates
             entry.Command = CurCommand & 0xFF;
             entry.Param = val;
             CmdFIFOWrite(entry);
@@ -2881,7 +2881,7 @@ void GPU3D::Write32(u32 addr, u32 val) noexcept
 
     if (addr >= 0x04000440 && addr < 0x040005CC)
     {
-        CmdFIFOEntry entry;
+        CmdFIFOEntry entry {}; // zeroed: the 3 padding bytes go into savestates
         entry.Command = (addr & 0x1FC) >> 2;
         entry.Param = val;
         CmdFIFOWrite(entry);

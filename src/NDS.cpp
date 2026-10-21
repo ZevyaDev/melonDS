@@ -811,6 +811,12 @@ bool NDS::DoSavestate(Savestate* file)
         SPU.SetPowerCnt(PowerControl7 & 0x0001);
         Wifi.SetPowerCnt(PowerControl7 & 0x0002);
 
+        // The CPUs' pending-interrupt flags are derived from IME, IE and IF (and IE2/IF2 on the
+        // DSi ARM7) and are not in the state; recompute them, or they keep their pre-load value
+        // until the next write to one of those registers.
+        UpdateIRQ(0);
+        UpdateIRQ(1);
+
 #ifdef JIT_ENABLED
         JIT.Reset();
 #endif
