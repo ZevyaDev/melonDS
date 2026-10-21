@@ -1305,6 +1305,11 @@ bool EmuInstance::updateConsole() noexcept
             gdbopt.GetBool("ARM7.BreakOnStartup"),
             gdbopt.GetBool("ARM9.BreakOnStartup"),
     };
+    // Gdb.BindAddress (config file only, default 127.0.0.1): the IPv4 address the stubs listen on;
+    // "0.0.0.0" for every interface
+    std::string gdbhost = gdbopt.GetString("BindAddress");
+    if (!gdbhost.empty())
+        _gdbargs.BindAddress = gdbhost;
     auto gdbargs = gdbopt.GetBool("Enabled") ? std::make_optional(_gdbargs) : std::nullopt;
 #else
     std::optional<GDBArgs> gdbargs = std::nullopt;

@@ -63,11 +63,11 @@ GdbStub::GdbStub(StubCallbacks* cb)
 	, ClientSA((void*)new struct sockaddr_in())
 { }
 
-bool GdbStub::Init(int port)
+bool GdbStub::Init(int port, const std::string& host)
 {
     Port = port;
-	Log(LogLevel::Info, "[GDB] initializing GDB stub for core %d on port %d\n",
-		Cb->GetCPU(), Port);
+	Log(LogLevel::Info, "[GDB] initializing GDB stub for core %d on %s port %d\n",
+		Cb->GetCPU(), host.c_str(), Port);
 
 #if MOCKTEST
 	SockFd = 0;
@@ -120,13 +120,20 @@ bool GdbStub::Init(int port)
 #endif
 
 	server->sin_family = AF_INET;
-	server->sin_addr.s_addr = htonl(INADDR_ANY);
 	server->sin_port = htons(Port);
+	if (inet_pton(AF_INET, host.c_str(), &server->sin_addr) != 1)
+	{
+		Log(LogLevel::Error, "[GDB] err: bad bind address %s (an IPv4 address such as 127.0.0.1)\n", host.c_str());
+		goto err;
+	}
+	if ((ntohl(server->sin_addr.s_addr) >> 24) != 127)
+		Log(LogLevel::Warn, "[GDB] warning: listening on %s, not loopback: anyone who can reach this machine "
+			"can control the emulator\n", host.c_str());
 
 	r = bind(SockFd, (const sockaddr*)server, sizeof(*server));
 	if (r < 0)
 	{
-		Log(LogLevel::Error, "[GDB] err: can't bind to address <any> and port %d\n", Port);
+		Log(LogLevel::Error, "[GDB] err: can't bind to address %s and port %d\n", host.c_str(), Port);
 		goto err;
 	}
 
