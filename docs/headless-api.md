@@ -11,15 +11,16 @@ reading the code but no test covers them. Claims marked *(verified)* were checke
 one-console experiment against this branch's DLL. Bugs and surprises are collected at the end, in
 [Known issues and surprises](#11-known-issues-and-surprises).
 
-This revision describes **API level 6**: the `fix/api-quirks` changes (level 2), Action Replay
+This revision describes **API level 7**: the `fix/api-quirks` changes (level 2), Action Replay
 cheat codes from the `feature/cheats` branch (level 3), the debugger work merged from
 ZevyaDev's `debug` branch on `merge/upstream-debug` (level 4: thread stacks, the new call tracker,
 PC changes at a break, pipeline refetch, Lua `memory.execute` and `wifi`), its next merge on
 `merge/upstream-debug-2` (level 5: `mds_overlays`, the GDB stub's session handling, extended mode
 and `monitor overlays`, DWARF line info in the symbol tables), and the `fix/api-quirks-2` fixes
 (level 6: interrupts leave nothing armed, the pc at a park, `mds_write` for palette/VRAM/OAM,
-packets that cannot block, errors for unknown ids, Lua hooks in the point list, GDB reset events).
-See [Version and features](#version-and-features) for what changed at each level.
+packets that cannot block, errors for unknown ids, Lua hooks in the point list, GDB reset events),
+and `fix/savestate-irq` (level 7: a state load recomputes the CPU state it does not carry, so
+nothing of the run before the load survives it). See [Version and features](#version-and-features) for what changed at each level.
 
 Contents
 
@@ -158,6 +159,7 @@ does this: `native.api_version()`, `native.has(name)` (see [section 9](#9-python
 | 4 | `merge/upstream-debug` | `mds_threadstacks`; the call tracker, PC changes at a break, pipeline refetch, Lua `memory.execute`, `debugger.threadstacks` and `wifi.*`, ROM overlays for the server's symbols (the features of level 4 below) |
 | 5 | `merge/upstream-debug-2` | `mds_overlays`; the GDB stub's per-connection reset, EOF detection, extended mode and `monitor overlays`; ROM overlay detection in the core; DWARF line info in the symbol tables (the features of level 5 below) |
 | 6 | `fix/api-quirks-2` | `mds_point_count`, `mds_reset_count`, `mds_debug_packet` (test hook); `mds_destroy` returns int; `mds_packet.total`; `MDS_POINT_LUA`, `MDS_BREAK_RESET`, `MDS_FRAMES_ERROR`; the behaviour changes named by the features of level 6 below |
+| 7 | `fix/savestate-irq` | no new functions; savestate loads recompute derived CPU state, GX FIFO padding is zeroed (the features of level 7 below) |
 
 Features of level 2 (`mds_has` also answers 1 for every exported function name, `"mds_serve_host"`,
 `"mds_read"`, ...):
@@ -218,6 +220,13 @@ Features of level 6 (the fixes are listed with what changed in
 | `point_lua_tag` | `mds_point_list` sets `MDS_POINT_LUA` in `flags` for Lua hooks; `mds_point_remove` refuses them ([Breakpoints and watchpoints](#breakpoints-and-watchpoints)) |
 | `point_count` | `mds_point_count`: how many points `mds_point_list` has to list |
 | `gdb_reset_event` | a GDB restart (`vRun`, `R`, `r`, `monitor reset`) queues an `MDS_BREAK_RESET` event, which the socket server forwards; `mds_reset_count` ([Breaks](#breaks-what-happens-and-mds_take_break), [section 8](#gdb-stub)) |
+
+Features of level 7 (core changes, so they apply to every frontend built from this branch):
+
+| feature | meaning |
+| --- | --- |
+| `savestate_derived` | a state load recomputes the CPUs' pending-interrupt lines and the ARM9 code-fetch timing from the loaded state, instead of keeping their pre-load values: a console that loads a state runs exactly as a fresh console that loads it, and as the console that saved it ran on ([section 6](#6-savestates)) |
+| `gx_fifo_zeroed` | GX command FIFO entries are written with their 3 padding bytes zeroed, so states (which hold the FIFO arrays raw) no longer contain stray stack bytes ([section 6](#6-savestates)) |
 
 ### Wireless between consoles, and one console per process
 
@@ -1190,10 +1199,43 @@ What it does not contain (and what happens on load):
   cache-related is missing from a state.
 - JIT is off in headless, so states are taken from the interpreter's real pipeline.
 
+Derived state (level 7, feature `savestate_derived`). Some CPU state is not in the format and is
+derived on load:
+
+- **The CPUs' interrupt lines** (`ARM::IRQ`, which the core keeps equal to `IME & (IE & IF)` and
+  updates on every write to those registers) are recomputed with `UpdateIRQ` for both CPUs. Before
+  level 7 the line kept its pre-load value: after a load of a state with an interrupt pending
+  (raised while the CPU had IRQs masked), a console whose line was clear did not take it when the
+  game unmasked IRQs, until the next write to IME, IE or IF or the next raised interrupt.
+- **The ARM9's code-fetch timing** (`RegionCodeCycles`, set by every branch from the protection
+  unit and cache settings) is taken from the loaded CP15 state. Before level 7 it was read before
+  CP15 was loaded, from the timing tables of whatever the console ran before: a console fresh from a
+  reset fetched the game's cached code at uncached speed (18 cycles instead of 1-3) until the
+  game's first branch, while a console that had been running the game fetched it at cached speed.
+  The first instructions after a load therefore took a different number of cycles on the two, and
+  that was enough to shift when interrupts, DMA and GX commands landed: in DQ9 the RAM differed for
+  a frame or two after the load (then converged) and the GX FIFO ring stayed offset for good.
+- The JIT idle-loop flag is cleared (only the JIT uses it, and a load resets the JIT).
+
+GX FIFO entries (feature `gx_fifo_zeroed`) are written with zeroed padding: the state holds the
+FIFO arrays raw, and bytes 5-7 of each entry used to be uninitialised stack, so two runs that
+emulated the same thing could save states that differed in those bytes.
+
+With these, after a load a reused console is byte for byte the same as a fresh console that loaded
+the same state, frame after frame (`tools/melonds-mcp/tests/test_savestate_reuse.py`; checked on 15
+DQ9 states over 30 frames), and a load reproduces the run that saved the state. **Runs from a
+loaded state made before level 7 can differ from runs made now** in their first frames (a fresh
+console now runs the first instructions at the speed the game ran them); states themselves are
+unchanged and load as before. Nothing else in the core was found to survive a load: with the
+fixes, the saved state of a reused console matched a fresh one in every section.
+
 Determinism: with 14.1 and later, a save, run, load, run sequence reproduces a run that never loaded
 (dq9-re replays all scenarios byte for byte; 14.2 states reproduce the RAM and screen hashes
 recorded with 14.1). With 14.2 the input held at the save, the pen and the mic samples also carry
 over, so a run that relies on the repeat rule after a load, or feeds the microphone, reproduces too.
+Before level 7 that held for a fresh console only when the ARM9 code timing taken from the reset
+console happened to match (see "Derived state" above); from level 7 it holds for fresh and reused
+consoles alike.
 Keep to one console per process and set the RTC after loading (the state carries its own clock).
 
 ---
@@ -1822,6 +1864,18 @@ renumbered each time.
 21. **Every park drops every break request** (level 6): a Lua `debugger.pause()` for one CPU that has
     not fired yet when the console parks for another reason (a breakpoint on the other CPU, an
     interrupt) is dropped with the rest. Armed step counts are kept.
+
+### Fixed in fix/savestate-irq
+
+Not items of the level-6 list (found while pooling consoles in dq9-re); the tests are in
+`tools/melonds-mcp/tests/test_savestate_reuse.py`.
+
+- **A load kept CPU state from before it**: the interrupt lines and the ARM9 code-fetch timing were
+  not recomputed, so a console that had run something before a load ran its first instructions
+  differently from a fresh console (and a fresh one differently from the run that saved the state).
+  Both are derived from the loaded state now ([section 6](#6-savestates); feature
+  `savestate_derived`).
+- **States held uninitialised bytes** in the GX FIFO entries' padding (feature `gx_fifo_zeroed`).
 
 ### Fixed in fix/api-quirks-2
 
