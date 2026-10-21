@@ -37,7 +37,9 @@ class MdsFrame(Structure):
 
 
 class MdsPacket(Structure):
-    _fields_ = [("timestamp", c_uint64), ("sent", c_uint32), ("type", c_uint32), ("length", c_uint32)]
+    # total (API level 6) sits in what was the struct's padding: older libraries leave it 0
+    _fields_ = [("timestamp", c_uint64), ("sent", c_uint32), ("type", c_uint32), ("length", c_uint32),
+                ("total", c_uint32)]
 
 
 class MdsCheat(Structure):
@@ -183,6 +185,10 @@ _SIGNATURES |= {
     "mds_cheat_clear": (c_int, [c_int]),
     "mds_cheat_list": (c_int, [c_int, POINTER(MdsCheat), c_int]),
     "mds_cheat_get": (c_int, [c_int, c_int, POINTER(c_char), c_int, POINTER(c_uint32), c_int]),
+}
+# API level 6 (fix/api-quirks-2)
+_SIGNATURES |= {
+    "mds_debug_packet": (c_int, [c_int, c_int, c_int, POINTER(c_uint8), c_int]),
 }
 
 
@@ -702,7 +708,10 @@ class Console:
         while n := _check(lib().mds_packets_take(self.id, hdrs, data, 256, 256 * 2048)):
             off = 0
             for h in hdrs[:n]:
-                out.append({"timestamp": h.timestamp, "sent": bool(h.sent), "type": h.type,
-                            "data": bytes(data[off:off + h.length])})
+                p = {"timestamp": h.timestamp, "sent": bool(h.sent), "type": h.type,
+                     "data": bytes(data[off:off + h.length])}
+                if h.total > h.length:      # longer than the buffer (level 6): the rest was dropped
+                    p["size"] = h.total
+                out.append(p)
                 off += h.length
         return out

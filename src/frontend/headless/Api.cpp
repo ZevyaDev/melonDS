@@ -250,11 +250,13 @@ int mds_has(const char* name)
         "interrupt_clean",      // a park and the end of a run drop leftover break requests; mds_interrupt ignores a stopped console
         "pc_next",              // mds_get_regs pc = each CPU's next instruction at every park; frame-boundary requests too
         "write_regions",        // mds_write/Lua writes: halfwords for palette/VRAM/OAM, read back, errors name the region
+        "packets_truncate",     // mds_packets_take cuts a first packet longer than max_data short (mds_packet.total)
     };
     static const char* const Functions[] = {
         "mds_has", "mds_serve_host", "mds_gdb_host", "mds_lastwriter_query",
         "mds_cheat_add", "mds_cheat_remove", "mds_cheat_enable", "mds_cheat_clear", "mds_cheat_list",
         "mds_cheat_get", "mds_threadstacks", "mds_overlays",
+        "mds_debug_packet",
     };
     if (!name)
         return 0;
@@ -1283,15 +1285,31 @@ int mds_packets_take(int id, mds_packet* headers, uint8_t* data, int max_packets
     while (n < max_packets && n < (int)s->Packets.size())
     {
         auto& p = s->Packets[n];
-        if (used + (int)p.Data.size() > max_data)
-            break;
-        headers[n] = {p.Timestamp, p.Sent, p.Type, (uint32_t)p.Data.size()};
-        memcpy(data + used, p.Data.data(), p.Data.size());
-        used += p.Data.size();
+        int size = (int)p.Data.size();
+        if (used + size > max_data)
+        {
+            if (n > 0)
+                break;
+            size = max_data;        // the first one does not fit: cut it short rather than block every call
+        }
+        headers[n] = {p.Timestamp, p.Sent, p.Type, (uint32_t)size, (uint32_t)p.Data.size()};
+        memcpy(data + used, p.Data.data(), size);
+        used += size;
         n++;
     }
     s->Packets.erase(s->Packets.begin(), s->Packets.begin() + n);
     return n;
+}
+
+int mds_debug_packet(int id, int sent, int type, const uint8_t* data, int len)
+{
+    Slot* s = Find(id);
+    if (!s || !CountOk(len, "len"))
+        return -1;
+    if (!data && len > 0)
+        return Fail("no data");
+    s->Inst->LogPacket(sent != 0, (u8)type, data, len, 0);
+    return 0;
 }
 
 int mds_serve(int port, int flags, int* bound)

@@ -249,5 +249,45 @@ class WriteRegions(ConsoleTest):
         self.assertIn("memory write failed: I/O at 0x04000208", str(cm.exception))
 
 
+class PacketsNeverBlock(ConsoleTest):
+    """A staged packet longer than max_data used to be returned by no call: every mds_packets_take returned 0 and
+    the packets behind it were stuck. The first packet of a call is now cut to max_data (length < total)."""
+
+    def log(self, size, fill):
+        data = (c_uint8 * size)(*([fill] * size))
+        self.assertEqual(native.lib().mds_debug_packet(self.c.id, 1, 0, data, size), 0)
+
+    def take(self, max_packets, max_data):
+        hdrs, data = (native.MdsPacket * max_packets)(), (c_uint8 * max(max_data, 1))()
+        n = native.lib().mds_packets_take(self.c.id, hdrs, data, max_packets, max_data)
+        self.assertGreaterEqual(n, 0)
+        out, off = [], 0
+        for h in hdrs[:n]:
+            out.append((h.length, h.total, bytes(data[off:off + h.length])))
+            off += h.length
+        return out
+
+    def test_long_packet_is_cut_short_and_the_rest_follow(self):
+        self.c.packet_log(True)
+        self.log(100, 1)
+        self.log(10, 2)
+        self.log(10, 3)
+        self.assertEqual(self.take(8, 32), [(32, 100, bytes([1] * 32))])
+        self.assertEqual(self.take(8, 32), [(10, 10, bytes([2] * 10)), (10, 10, bytes([3] * 10))])
+        self.assertEqual(self.take(8, 32), [])
+
+    def test_a_packet_that_does_not_fit_after_others_waits(self):
+        self.c.packet_log(True)
+        self.log(10, 1)
+        self.log(30, 2)
+        self.assertEqual(self.take(8, 32), [(10, 10, bytes([1] * 10))])
+        self.assertEqual(self.take(8, 32), [(30, 30, bytes([2] * 30))])
+
+    def test_wrapper_reports_the_size(self):
+        self.c.packet_log(True)
+        self.log(4, 7)
+        self.assertEqual(self.c.take_packets(), [{"timestamp": 0, "sent": True, "type": 0, "data": bytes([7] * 4)}])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -87,7 +87,8 @@ typedef struct
     uint64_t timestamp;
     uint32_t sent;
     uint32_t type;
-    uint32_t length;
+    uint32_t length;    // bytes of the packet in the data buffer
+    uint32_t total;     // the packet's size (API level 6; the struct's former padding): > length when cut short
 } mds_packet;
 
 // Reference: docs/headless-api.md, section 1 (library-wide settings, errors, version and features).
@@ -263,7 +264,13 @@ MDS_API int mds_lua_output(int id, char* out, int max);
 
 // Reference: docs/headless-api.md, section 5 (wireless packet capture).
 MDS_API int mds_packets(int id, int enabled, int capacity);
+// Moves up to max_packets staged packets out, their data packed into data (max_data bytes). A packet that does not
+// fit is left for the next call, unless it is the first: then its first max_data bytes are returned (length <
+// total) and the rest is dropped, so a packet longer than max_data never blocks the ones behind it.
 MDS_API int mds_packets_take(int id, mds_packet* headers, uint8_t* data, int max_packets, int max_data);
+// Test hook (API level 6): log a packet as the platform layer does for the console's wireless traffic (sent 1 for
+// a packet the console sent; type 0 data, 1 MP command, 2 MP reply, 3 MP ack). Needs packet logging on.
+MDS_API int mds_debug_packet(int id, int sent, int type, const uint8_t* data, int len);
 
 // Reference: docs/headless-api.md, section 8 (socket server, instance base).
 // Socket server (protocol: Protocol.h). One server thread per process serves every console, on 127.0.0.1.
