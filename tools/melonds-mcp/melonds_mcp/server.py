@@ -425,6 +425,123 @@ def input_sequence(steps: str, consoles: list[int] | None = None) -> dict:
     return group_result(group, timed_out, states)
 
 
+def key_names(mask):
+    return [k for i, k in enumerate(KEYS) if mask >> i & 1]
+
+
+@server.tool()
+def input_queue(sequence: str, frames: int = 0, run: bool = True, mode: str = "", release: bool = True,
+                console: int = 0, timeout_s: float = 120) -> dict:
+    """Queue one input payload per frame and run them, frame-exact (the CLI's `input`). Tokens as input_sequence
+    plus touch: "A*4 w20 touch:128,96*3 A+touch:10,20*5" (a touch is released by the next token without one).
+    frames: run at least this many frames in total (frames past the sequence follow the empty-queue mode).
+    run=False only queues the payloads (at most 600; they apply as the console runs). mode: first set the
+    empty-queue mode (repeat, neutral, wait; it stays set, see input_mode). release: afterwards queue a keys-up
+    so repeat mode does not keep holding the last keys. Stops early on a break; unplayed payloads stay queued."""
+    c = con(console)
+    try:
+        seq = expand(sequence)
+    except ValueError as e:
+        raise MelonError(str(e)) from None
+    if mode:
+        input_mode(mode, console=console)
+    start = c.frames
+    timed_out, states = False, [c.state]
+    if not run:
+        if len(seq) > 600:
+            raise MelonError("the input queue holds 600 payloads; use run=True for longer sequences")
+        for f in seq:
+            c.submit_input(f.buttons, touch=f.touch)
+    else:
+        total = max(frames, len(seq))
+        for i in range(0, max(len(seq), 1), INPUT_CHUNK):
+            part = seq[i:i + INPUT_CHUNK]
+            for f in part:
+                c.submit_input(f.buttons, touch=f.touch)
+            n = len(part) + (total - len(seq) if i + INPUT_CHUNK >= len(seq) else 0)
+            if n:
+                timed_out, states = native.run_group([c], n, int(timeout_s * 1000))
+            if PARKED in states or timed_out:
+                break
+    if release:
+        c.set_keys([])
+    return group_result([c], timed_out, states) | {"payloads": len(seq), "frames_run": c.frames - start,
+                                                   "queue_depth": c.input_depth()}
+
+
+@server.tool()
+def input_mode(mode: str = "", stall_frames: int = -1, console: int = 0) -> str:
+    """What a frame gets when the console's input queue is empty: repeat (default: hold the last input), neutral
+    (release keys and pen) or wait (block until input arrives: run then times out). Empty = unchanged.
+    stall_frames: in repeat mode, release a socket client's input after this many empty frames (0 = never,
+    -1 = unchanged). The mode survives reset and savestate loads."""
+    if mode and mode not in native.INPUT_MODES:
+        raise MelonError("mode must be repeat, neutral or wait")
+    con(console).input_mode(mode or None, None if stall_frames < 0 else stall_frames)
+    return f"mode {mode or 'unchanged'}, stall {'unchanged' if stall_frames < 0 else stall_frames}"
+
+
+@server.tool()
+def input_status(console: int = 0) -> dict:
+    """Payloads queued, and whether the console is blocked at a frame boundary waiting for input (wait mode or
+    a multiplayer barrier)."""
+    c = con(console)
+    return {"queue_depth": c.input_depth(), "waiting": c.input_waiting()}
+
+
+@server.tool()
+def input_clear(console: int = 0) -> dict:
+    """Drop the queued input payloads (the held keys and the input log stay)."""
+    c = con(console)
+    c.input_clear()
+    return {"queue_depth": c.input_depth()}
+
+
+@server.tool()
+def input_log(from_frame: int = 0, limit: int = 4096, path: str = "", console: int = 0) -> dict:
+    """Applied-input log, oldest first: one entry per consumed payload (frames that ran on the empty-queue rule
+    have none). Reading does not clear it; reset and rom_load do. path: save the log as JSON there instead."""
+    c = con(console)
+    entries = [e | {"buttons": key_names(e["buttons"])} for e in c.input_log(from_frame, limit)]
+    doc = {"console": console, "truncated": len(entries) >= limit, "entries": entries}
+    if path:
+        Path(path).write_text(json.dumps(doc, indent=1))
+        return {"path": path, "count": len(entries), "truncated": doc["truncated"]}
+    return doc
+
+
+@server.tool()
+def lid_set(closed: bool = True, console: int = 0) -> str:
+    """Close or open the lid (applies at the next frame; the game sees it as a sleep request)."""
+    con(console).set_lid(closed)
+    return "closed" if closed else "open"
+
+
+def parse_range(text, c):
+    parts = str(text).split(":")
+    if len(parts) not in (2, 3):
+        raise MelonError(f"range must be ADDR:LEN[:CPU], not {text!r}")
+    return addr_of(parts[0], c), int(parts[1], 0), int(parts[2], 0) if len(parts) == 3 else 9
+
+
+@server.tool()
+def memory_sample(ranges: list[str], frames: int = 1, every: int = 1, console: int = 0, timeout_s: float = 120) -> dict:
+    """Sample memory while running (the CLI's `subscribe`): run `every` frames, read each range, `frames` times.
+    ranges: "ADDR:LEN[:CPU]" (ADDR may be a symbol). Returns one {frame, data: [hex per range]} per sample;
+    stops early on a break."""
+    c = con(console)
+    spans = [parse_range(r, c) for r in ranges]
+    samples, timed_out, states = [], False, [c.state]
+    for _ in range(frames):
+        timed_out, states = native.run_group([c], every, int(timeout_s * 1000))
+        if timed_out:
+            break
+        samples.append({"frame": c.frames, "data": [c.read(a, n, cpu).hex() for a, n, cpu in spans]})
+        if PARKED in states:
+            break
+    return group_result([c], timed_out, states) | {"samples": samples}
+
+
 @server.tool()
 def ramsearch_start(start: str = "0x02000000", length: int = 0x400000, size: int = 4, signed: bool = True, cpu: int = 9, console: int = 0) -> dict:
     """Begin a RAM search: snapshot every aligned value in the range. Then change the game state and narrow

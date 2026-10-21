@@ -131,6 +131,63 @@ class McpToolsTest(unittest.TestCase):
         out = server.lua_run("print('a') emu.frameadvance() print('b')", console=self.c, frames=2)
         self.assertEqual(out["output"].split(), ["a", "b"])
 
+    # input
+
+    def test_input_queue_is_frame_exact(self):
+        out = server.input_queue("A*3 w2 B+Up*1", console=self.c)
+        self.assertEqual((out["payloads"], out["frames_run"], out[self.c]["state"]), (6, 6, "idle"))
+        self.assertEqual(out["queue_depth"], 1)  # the release, applied by the next frame
+        log = server.input_log(console=self.c)["entries"]
+        self.assertEqual([e["buttons"] for e in log], [["A"]] * 3 + [[]] * 2 + [["B", "Up"]])
+        self.assertEqual([e["frame"] for e in log], list(range(log[0]["frame"], log[0]["frame"] + 6)))
+        server.run(1, [self.c])
+        self.assertEqual(server.input_log(console=self.c)["entries"][-1]["buttons"], [])
+
+    def test_input_queue_frames_touch_and_no_run(self):
+        out = server.input_queue("touch:10,20*2 A*1", frames=6, console=self.c)
+        self.assertEqual((out["payloads"], out["frames_run"]), (3, 6))
+        out = server.input_queue("A*4", run=False, console=self.c)
+        # the first call's release, the four payloads, this call's release
+        self.assertEqual((out["frames_run"], out["queue_depth"]), (0, 6))
+        self.assertEqual(server.input_status(console=self.c), {"queue_depth": 6, "waiting": False})
+        self.assertEqual(server.input_clear(console=self.c), {"queue_depth": 0})
+        with self.assertRaises(server.MelonError):
+            server.input_queue("touch:300,20", console=self.c)
+        with self.assertRaises(server.MelonError):
+            server.input_queue("A*601", run=False, console=self.c)
+
+    def test_input_mode_and_lid(self):
+        self.assertEqual(server.input_mode("neutral", console=self.c), "mode neutral, stall unchanged")
+        self.assertEqual(server.input_mode(stall_frames=0, console=self.c), "mode unchanged, stall 0")
+        with self.assertRaises(server.MelonError):
+            server.input_mode("hold", console=self.c)
+        server.input_mode("repeat", console=self.c)
+        self.assertEqual(server.lid_set(True, console=self.c), "closed")
+        server.run(1, [self.c])
+        self.assertEqual(server.input_log(console=self.c)["entries"][-1]["lid"], 1)
+        server.lid_set(False, console=self.c)
+        server.run(1, [self.c])
+        self.assertEqual(server.input_log(console=self.c)["entries"][-1]["lid"], 0)
+
+    def test_input_log_to_file(self):
+        server.input_queue("X*2", console=self.c)
+        out = self.path("log.json")
+        self.assertEqual(server.input_log(limit=1, path=out, console=self.c), {"path": out, "count": 1, "truncated": True})
+        with open(out) as f:
+            self.assertEqual(json.load(f)["entries"][0]["buttons"], ["X"])
+
+    def test_memory_sample(self):
+        server.lua_exec(f"event.onframeend(function() memory.write_u32_le({RAM}, emu.framecount()) end)", console=self.c)
+        out = server.memory_sample([f"{RAM:#x}:4", f"{RAM:#x}:2:7"], frames=3, every=2, console=self.c)
+        frames = [s["frame"] for s in out["samples"]]
+        self.assertEqual(len(frames), 3)
+        self.assertEqual(frames, [frames[0], frames[0] + 2, frames[0] + 4])
+        for s in out["samples"]:
+            self.assertEqual(int.from_bytes(bytes.fromhex(s["data"][0]), "little"), s["frame"])
+            self.assertEqual(len(s["data"][1]), 4)
+        with self.assertRaises(server.MelonError):
+            server.memory_sample([f"{RAM:#x}"], console=self.c)
+
     # watches and symbols
 
     def test_watch_list_and_read_names(self):
