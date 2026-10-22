@@ -277,9 +277,10 @@ Param Classify(const QString& raw)
 bool Signature(const DebugSymbols::Symbol& sym, QList<Param>& params)
 {
     QString list;
-    if (!sym.Name.startsWith("_Z") || sym.Pretty == sym.Name || !ParamList(sym.Pretty, list))
+    QString name = QString::fromStdString(sym.Name), pretty = QString::fromStdString(sym.Pretty);
+    if (!name.startsWith("_Z") || pretty == name || !ParamList(pretty, list))
         return false;
-    if (sym.Name.startsWith("_ZN"))
+    if (name.startsWith("_ZN"))
         params << Param{"this", Kind::Pointer, 32, true};
     for (const QString& p : SplitParams(list))
         if (p != "void")
@@ -311,8 +312,8 @@ Value Format(const Param& p, u64 v, const DebugSymbols& syms, const Memory& mem)
     {
         if (!lo)
             return {"NULL", "NULL"};
-        QString exact = syms.exact(lo);
-        QString where = syms.describe(lo);
+        QString exact = QString::fromStdString(syms.exact(lo));
+        QString where = QString::fromStdString(syms.describe(lo));
         return {exact.isEmpty() ? Hex(lo) : "&" + exact, where.isEmpty() ? Hex(lo) : Hex(lo) + "  " + where};
     }
     u64 masked = p.Bits >= 64 ? v : v & ((1ull << p.Bits) - 1);
@@ -422,7 +423,7 @@ Shown Describe(const CallFrame& f, const DebugSymbols& syms, const Memory& mem)
     }
 
     out.Text = texts.join(", ");
-    QString title = sym ? syms.name(*sym) : Hex(f.Entry);
+    QString title = sym ? QString::fromStdString(syms.name(*sym)) : Hex(f.Entry);
     QString note = typed ? "Arguments at the call" : "No C++ signature: r0-r3 at the call";
     out.Detail = "<b>" + title.toHtmlEscaped() + "</b><br>" + note + "<table>" + rows + "</table>";
     return out;

@@ -352,9 +352,10 @@ static void reloadLines(DebugBridge* bridge, LineWatch& watch, QTimer* timer)
     std::vector<int> loaded = syms.loaded();
     QString lines = watch.Path;
     QString error;
-    if (!DebugSource::IsRemote(syms.source()))
-        syms.load(syms.source(), error, bridge->instance()->getNDS());
-    bool ok = syms.lineSource() == lines || syms.loadLines(lines, error);
+    QString source = SymStr(syms.source());
+    if (!DebugSource::IsRemote(source))
+        LoadSymbols(syms, source, error, bridge->instance()->getNDS());
+    bool ok = SymStr(syms.lineSource()) == lines || LoadLines(syms, lines, error);
     syms.setLoaded(loaded);
     watch.Retry = !ok;
     emit bridge->symbolsChanged();
@@ -376,7 +377,7 @@ static void watchLines(DebugBridge* bridge)
         }
         else
         {
-            QString path = bridge->symbols().lineSource();
+            QString path = SymStr(bridge->symbols().lineSource());
             watch->Path = DebugSource::IsRemote(path) ? QString() : path;
             QFileInfo info(watch->Path);
             watch->Modified = info.lastModified();
