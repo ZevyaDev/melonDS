@@ -69,7 +69,6 @@ constexpr size_t MaxWifiInjected = 256;
 static bool IsIndirectJump(u32 instr, bool thumb);
 static bool WritesPC(u32 instr, bool thumb);
 constexpr u32 MainRAMWords = 0x400000 >> 2;
-constexpr u32 DMAWriterTag = 0xFFFFFFF0;
 constexpr u32 PipelineSentinel = 0xE7F0DEF0;
 constexpr size_t MaxReturnSkips = 16;
 
@@ -229,7 +228,13 @@ void Debugger::CancelBreakRequests()
 
 void Debugger::Step(u8 cpu, u32 count)
 {
-    StepRemaining[cpu & 1] = count;
+    u8 n = cpu & 1;
+    // Parked inside this CPU's instruction hook, the instruction at the break has passed its hook already and
+    // runs on resume, so it is the first of the count. Otherwise the next hook call is for the first one, and
+    // the countdown reaching zero there would park before anything ran.
+    if (count && InstrBreakCPU != n && count != 0xFFFFFFFF)
+        count++;
+    StepRemaining[n] = count;
     Rearm();
 }
 
@@ -327,9 +332,24 @@ void Debugger::OnStateLoaded()
         ParkedStacks[i].clear();
         Exceptions[i].clear();
         LastSP[i] = {};
+        LastMode[i] = 0;
+        PrevInstr[i] = 0;
+        PrevThumb[i] = false;
+        Prev2Instr[i] = 0;
+        JumpTarget[i] = 0;
+        PendingValid[i] = false;
+        // rebuild the stacks from the loaded CPU state: the frames below the first call are unwound from
+        // the stack again (see SeedBelow), and calls that return into a hook's memory.execute are forgotten
         SeedPending[i] = CallTracking;
         ReturnSkips[i].clear();
     }
+    ARM* cpus[2] = {NDS.ARM9, NDS.ARM7};
+    for (int i = 0; i < 2; i++)
+        CurPC[i] = cpus[i]->R[15] - ((cpus[i]->CPSR & 0x20) ? 2 : 4);
+    if (!LastWriter.empty())
+        std::fill(LastWriter.begin(), LastWriter.end(), 0);
+    CoverageLastBits = {};
+    Rearm();
 }
 
 std::vector<CallFrame> Debugger::GetCallStack(u8 cpu) const
@@ -1172,7 +1192,7 @@ void Debugger::UnwindCalls(ARM& cpu, u32 pc)
     }
 }
 
-void Debugger::OnInstr(ARM& cpu, u32 pc)
+void Debugger::OnInstr(ARM& cpu, u32 pc, bool redirected)
 {
     u8 n = cpu.Num;
     u32 prev = CurPC[n];
@@ -1236,7 +1256,7 @@ void Debugger::OnInstr(ARM& cpu, u32 pc)
         ev.Kind = BreakKind::Request;
         raise = true;
     }
-    if (StepRemaining[n] && --StepRemaining[n] == 0 && !raise)
+    if (StepRemaining[n] && !redirected && --StepRemaining[n] == 0 && !raise)
     {
         ev.Kind = BreakKind::Step;
         raise = true;
@@ -1276,7 +1296,9 @@ void Debugger::OnInstr(ARM& cpu, u32 pc)
     if (raise)
     {
         ContextGuard guard(*this, HookContext::Hook, n);
+        InstrBreakCPU = n;
         Raise(ev);
+        InstrBreakCPU = -1;
     }
 }
 
@@ -1314,23 +1336,40 @@ void Debugger::WatchHit(u8 n, u32 addr, u8 size, u32 value, bool write, u8 dma)
 
     if (!write)
         value = Peek(n, addr, size);
+    bool raiseDMA = false;
+    BreakEvent dmaEvent {};
     for (int id : hits)
     {
         auto it = std::find_if(Watchpoints.begin(), Watchpoints.end(), [id](const Watchpoint& w) { return w.ID == id; });
         if (it == Watchpoints.end())
             continue;
-        BreakEvent hit {write ? BreakKind::Write : BreakKind::Read, n, size, id, CurPC[n], addr, value, dma};
+        // A DMA write is not made by an instruction: its pc is the DMA tag, and it parks at once (the DMA
+        // is between two units, the CPUs between two instructions) instead of at the CPU's next instruction.
+        u32 pc = dma == 0xFF ? CurPC[n] : (DMAWriterTag | (dma << 1) | n);
+        BreakEvent hit {write ? BreakKind::Write : BreakKind::Read, n, size, id, pc, addr, value, dma};
         BreakCallback cb = it->Callback;
         MidInstr[n]++;
         bool brk = !cb || cb(hit);
         MidInstr[n]--;
-        if (brk && !PendingValid[n])
+        if (!brk)
+            continue;
+        if (dma != 0xFF)
+        {
+            if (!raiseDMA)
+            {
+                dmaEvent = hit;
+                raiseDMA = true;
+            }
+        }
+        else if (!PendingValid[n])
         {
             Pending[n] = hit;
             PendingValid[n] = true;
             Armed[n] = true;
         }
     }
+    if (raiseDMA)
+        Raise(dmaEvent);
 }
 
 void Debugger::OnCall(ARM& cpu)
