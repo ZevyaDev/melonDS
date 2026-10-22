@@ -714,8 +714,6 @@ bool NDS::DoSavestate(Savestate* file)
     file->Var16(&DivCnt);
     file->Var16(&SqrtCnt);
 
-    // 14.1: the divider and square root operands and results. Games read them back (the SDK saves
-    // them in thread contexts), so leaving them out made a load not fully restore the console.
     if (file->Saving || file->IsAtLeastVersion(14, 1))
     {
         file->VarArray(DivNumerator, sizeof(DivNumerator));
@@ -762,7 +760,6 @@ bool NDS::DoSavestate(Savestate* file)
     file->Var32(&NumLagFrames);
     file->Bool32(&LagFrameFlag);
 
-    // 14.2: KeyInput (buttons, pen-down and lid bits). Older states keep the current value, as before.
     if (file->Saving || file->IsAtLeastVersion(14, 2))
         file->Var32(&KeyInput);
     file->VarArray(KeyCnt, 2*sizeof(u16));

@@ -126,7 +126,6 @@ public:
 	GdbStub(StubCallbacks* cb);
 	~GdbStub();
 
-	// Listen on host:port; host is an IPv4 address ("127.0.0.1" by default, "0.0.0.0" for every interface).
 	bool Init(int port, const std::string& host = "127.0.0.1");
 	void Close();
 

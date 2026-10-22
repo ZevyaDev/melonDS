@@ -80,7 +80,6 @@ struct GDBArgs
     u16 PortARM9 = 0;
     bool ARM7BreakOnStartup = false;
     bool ARM9BreakOnStartup = false;
-    /// IPv4 address the stubs listen on. Loopback by default: anyone who can connect controls the emulator.
     std::string BindAddress = "127.0.0.1";
 };
 

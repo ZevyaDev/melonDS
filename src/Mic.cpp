@@ -69,7 +69,6 @@ void Mic::DoSavestate(melonDS::Savestate *file)
     file->Var8(&StopMask);
     file->VarArray(StopCount, sizeof(StopCount));
 
-    // 14.2: the samples already taken from the platform, so a load does not drop them
     bool buffered = file->Saving || file->IsAtLeastVersion(14, 2);
     if (buffered)
     {

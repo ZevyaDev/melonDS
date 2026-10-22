@@ -58,8 +58,6 @@ void ARM::GdbCheckB()
 }
 void ARM::GdbCheckC()
 {
-    // a hook or a break that changes PC (memory.execute branching, a register write while parked) runs the
-    // hook again for the new instruction before anything executes
     for (bool redirected = false; NDS.Debugger.Armed[Num]; redirected = true)
     {
         u32 pc = R[15];
@@ -109,8 +107,6 @@ void ARM::GdbCheckA() {}
 void ARM::GdbCheckB() {}
 void ARM::GdbCheckC()
 {
-    // a hook or a break that changes PC (memory.execute branching, a register write while parked) runs the
-    // hook again for the new instruction before anything executes
     for (bool redirected = false; NDS.Debugger.Armed[Num]; redirected = true)
     {
         u32 pc = R[15];

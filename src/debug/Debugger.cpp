@@ -229,10 +229,8 @@ void Debugger::CancelBreakRequests()
 void Debugger::Step(u8 cpu, u32 count)
 {
     u8 n = cpu & 1;
-    // Parked inside this CPU's instruction hook, the instruction at the break has passed its hook already and
-    // runs on resume, so it is the first of the count. Otherwise the next hook call is for the first one, and
-    // the countdown reaching zero there would park before anything ran.
-    if (count && InstrBreakCPU != n && count != 0xFFFFFFFF)
+    // outside this CPU's instruction hook, its next hook call decrements before anything runs
+    if (count && count != 0xFFFFFFFF && InstrBreakCPU != n && HookedCPU() != n)
         count++;
     StepRemaining[n] = count;
     Rearm();
@@ -338,8 +336,6 @@ void Debugger::OnStateLoaded()
         Prev2Instr[i] = 0;
         JumpTarget[i] = 0;
         PendingValid[i] = false;
-        // rebuild the stacks from the loaded CPU state: the frames below the first call are unwound from
-        // the stack again (see SeedBelow), and calls that return into a hook's memory.execute are forgotten
         SeedPending[i] = CallTracking;
         ReturnSkips[i].clear();
     }
@@ -1343,8 +1339,6 @@ void Debugger::WatchHit(u8 n, u32 addr, u8 size, u32 value, bool write, u8 dma)
         auto it = std::find_if(Watchpoints.begin(), Watchpoints.end(), [id](const Watchpoint& w) { return w.ID == id; });
         if (it == Watchpoints.end())
             continue;
-        // A DMA write is not made by an instruction: its pc is the DMA tag, and it parks at once (the DMA
-        // is between two units, the CPUs between two instructions) instead of at the CPU's next instruction.
         u32 pc = dma == 0xFF ? CurPC[n] : (DMAWriterTag | (dma << 1) | n);
         BreakEvent hit {write ? BreakKind::Write : BreakKind::Read, n, size, id, pc, addr, value, dma};
         BreakCallback cb = it->Callback;
@@ -1369,7 +1363,10 @@ void Debugger::WatchHit(u8 n, u32 addr, u8 size, u32 value, bool write, u8 dma)
         }
     }
     if (raiseDMA)
+    {
+        ContextGuard guard(*this, HookContext::Service, n);
         Raise(dmaEvent);
+    }
 }
 
 void Debugger::OnCall(ARM& cpu)

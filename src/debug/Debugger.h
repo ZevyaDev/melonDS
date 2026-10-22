@@ -66,7 +66,6 @@ enum WatchFlags : u8
     Watch_Write = 2,
 };
 
-// The pc of a break or last-writer record made by DMA, not by an instruction: 0xFFFFFFF0 | channel << 1 | arm7.
 constexpr u32 DMAWriterTag = 0xFFFFFFF0;
 
 struct BreakEvent
@@ -162,9 +161,6 @@ public:
     void RequestService();
     void RequestBreak(u8 cpuMask);
     void CancelBreakRequests();
-    // Park the console after the CPU has executed count more instructions (0 disarms). Counted from the
-    // instruction the CPU is parked at when called during a break of that CPU's instruction hook, else from
-    // its next instruction, so count = n always executes n instructions.
     void Step(u8 cpu, u32 count);
     void StepTo(u8 cpu, StepMode mode);
     u32 CallReturn(u8 cpu, u32 pc, bool thumb, u32 lr) const;
@@ -173,9 +169,6 @@ public:
     std::vector<TraceEntry> DrainTrace();
 
     void SetCallTracking(bool enabled);
-    // After a savestate load: drop what described the execution before it (call stacks, a pending
-    // watchpoint hit, the last-writer records). Points, the trace, call counts, coverage and armed
-    // steps/break requests are kept.
     void OnStateLoaded();
     std::vector<CallFrame> GetCallStack(u8 cpu) const;
     std::vector<std::pair<u32, std::vector<CallFrame>>> GetThreadStacks(u8 cpu) const;
@@ -200,11 +193,8 @@ public:
     std::array<bool, 2> DataArmed {};
     bool CallsArmed = false;
 
-    // redirected: a repeat call for the same instruction slot because a hook or a break changed PC (see
-    // ARM::GdbCheckC); the instruction of the first call never ran, so the step countdown does not advance.
     void OnInstr(ARM& cpu, u32 pc, bool redirected = false);
     void OnData(ARM& cpu, u32 addr, u8 size, u32 value, bool write);
-    // A DMA unit was written (called after the write, so a break sees the new memory).
     void OnDMA(u8 cpu, u8 channel, u32 addr, u8 size, u32 value);
     void OnCall(ARM& cpu);
     void OnException(ARM& cpu, u32 ret);
@@ -230,7 +220,7 @@ private:
     std::array<bool, 2> PendingValid {};
     std::array<BreakEvent, 2> Pending {};
     bool InBreak = false;
-    int InstrBreakCPU = -1;     // the CPU whose OnInstr is parked in Raise, else -1
+    int InstrBreakCPU = -1;
 
     u8 TraceMask = 0;
     u32 TraceStart = 0, TraceEnd = 0;
