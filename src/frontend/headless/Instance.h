@@ -19,6 +19,7 @@
 #ifndef HEADLESS_INSTANCE_H
 #define HEADLESS_INSTANCE_H
 
+#include <array>
 #include <condition_variable>
 #include <deque>
 #include <memory>
@@ -89,6 +90,9 @@ public:
     void WriteSave(const melonDS::u8* data, melonDS::u32 len);
     void LogPacket(bool sent, melonDS::u8 type, const melonDS::u8* data, int len, melonDS::u64 timestamp);
 
+    const melonDS::BreakEvent& ParkEvent() const { return ParkedWith; }
+    melonDS::u32 ParkR15(int cpu) const { return ParkedR15[cpu & 1]; }
+
     melonDS::u64 FramesRun = 0;
 
 private:
@@ -102,6 +106,8 @@ private:
     bool Quit = false;
     bool BreakPending = false;
     melonDS::BreakEvent LastBreak {};
+    melonDS::BreakEvent ParkedWith {};
+    std::array<melonDS::u32, 2> ParkedR15 {};
 
     std::mutex PacketLock;
     bool PacketLogging = false;
@@ -110,7 +116,10 @@ private:
 
     void ThreadMain();
     void Park(const melonDS::BreakEvent& ev);
+    void StopRunning();
 };
+
+melonDS::u32 NextInstruction(const melonDS::ARM& cpu);
 
 melonDS::Net& Network();
 const std::string& LocalDirectory();

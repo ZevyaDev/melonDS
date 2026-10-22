@@ -74,16 +74,24 @@ static int ReadValue(lua_State* L)
     return 1;
 }
 
+static int WriteGuest(lua_State* L, int cpu, u32 addr, const u8* data, u32 len)
+{
+    std::string error;
+    if (!Console(L).Debugger.WriteMemory(cpu, addr, data, len, error))
+        return luaL_error(L, "memory write failed: %s", error.c_str());
+    return 0;
+}
+
 template <int size>
 static int WriteValue(lua_State* L)
 {
     int cpu;
     u32 addr = DomainAddress(L, 3, (u32)luaL_checkinteger(L, 1), cpu);
     u32 v = (u32)luaL_checkinteger(L, 2);
-    melonDS::NDS& nds = Console(L);
+    u8 bytes[4];
     for (int i = 0; i < size; i++)
-        nds.Debugger.Poke(cpu, addr + i, 1, (v >> (8 * i)) & 0xFF);
-    return 0;
+        bytes[i] = (v >> (8 * i)) & 0xFF;
+    return WriteGuest(L, cpu, addr, bytes, size);
 }
 
 static int ReadBytes(lua_State* L)
@@ -106,15 +114,15 @@ static int WriteBytes(lua_State* L)
     int cpu;
     u32 addr = DomainAddress(L, 3, (u32)luaL_checkinteger(L, 1), cpu);
     luaL_checktype(L, 2, LUA_TTABLE);
-    melonDS::NDS& nds = Console(L);
     lua_Integer len = luaL_len(L, 2);
+    std::vector<u8> bytes(len > 0 ? len : 0);
     for (lua_Integer i = 0; i < len; i++)
     {
         lua_rawgeti(L, 2, i + 1);
-        nds.Debugger.Poke(cpu, addr + i, 1, (u32)lua_tointeger(L, -1) & 0xFF);
+        bytes[i] = (u32)lua_tointeger(L, -1) & 0xFF;
         lua_pop(L, 1);
     }
-    return 0;
+    return WriteGuest(L, cpu, addr, bytes.data(), (u32)bytes.size());
 }
 
 static int FrameCount(lua_State* L)
@@ -223,6 +231,14 @@ static void SetFuncs(lua_State* L, const char* table, const luaL_Reg* funcs)
     lua_setglobal(L, table);
 }
 
+static std::string ErrorText(lua_State* L)
+{
+    const char* text = lua_tostring(L, -1);
+    if (!text)
+        return "(error object is not a string)";
+    return *text ? text : "(empty error message)";
+}
+
 LuaHost::LuaHost(Instance& inst) : Inst(inst)
 {
     Open();
@@ -322,7 +338,7 @@ bool LuaHost::Run(const std::string& source, bool isFile, std::string& error)
     int status = isFile ? luaL_loadfile(Main, source.c_str()) : luaL_loadbuffer(Main, source.data(), source.size(), "=script");
     if (status != LUA_OK)
     {
-        error = lua_tostring(Main, -1);
+        error = ErrorText(Main);
         Stop();
         return false;
     }
@@ -334,7 +350,7 @@ bool LuaHost::Exec(const std::string& code, std::string& error)
 {
     if (luaL_loadbuffer(L, code.data(), code.size(), "=exec") != LUA_OK || lua_pcall(L, 0, 0, 0) != LUA_OK)
     {
-        error = lua_tostring(L, -1);
+        error = ErrorText(L);
         lua_pop(L, 1);
         return false;
     }
@@ -353,7 +369,7 @@ void LuaHost::Resume()
         return;
     }
     if (status != LUA_OK)
-        Print(std::string("lua: ") + lua_tostring(Main, -1));
+        Print("lua: " + ErrorText(Main));
     luaL_unref(L, LUA_REGISTRYINDEX, MainRef);
     MainRef = LUA_NOREF;
     Main = nullptr;

@@ -87,6 +87,7 @@ typedef struct
     uint32_t sent;
     uint32_t type;
     uint32_t length;
+    uint32_t total;
 } mds_packet;
 
 MDS_API int mds_version(void);

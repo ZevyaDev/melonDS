@@ -245,7 +245,21 @@ RunState Instance::GetState()
 
 void Instance::Interrupt()
 {
+    std::lock_guard lock(Lock);
+    if (State != RunState::Running)
+        return;
     NDS->Debugger.RequestBreak(3);
+}
+
+void Instance::StopRunning()
+{
+    State = RunState::Idle;
+    NDS->Debugger.CancelBreakRequests(false);
+}
+
+u32 NextInstruction(const ARM& cpu)
+{
+    return cpu.R[15] - ((cpu.CPSR & 0x20) ? 2 : 4);
 }
 
 bool Instance::TakeBreak(BreakEvent& out)
@@ -275,7 +289,7 @@ void Instance::ThreadMain()
                 std::lock_guard lock(Lock);
                 if (Quit || FramesLeft == 0)
                 {
-                    State = RunState::Idle;
+                    StopRunning();
                     break;
                 }
             }
@@ -308,7 +322,10 @@ void Instance::Park(const BreakEvent& ev)
         return;
     LastBreak = ev;
     BreakPending = true;
+    ParkedWith = ev;
+    ParkedR15 = {NDS->ARM9->R[15], NDS->ARM7->R[15]};
     State = RunState::Parked;
+    NDS->Debugger.CancelBreakRequests(false);
     Cond.notify_all();
     Cond.wait(lock, [this] { return Quit || State == RunState::Running; });
 }

@@ -806,6 +806,9 @@ bool NDS::DoSavestate(Savestate* file)
         SPU.SetPowerCnt(PowerControl7 & 0x0001);
         Wifi.SetPowerCnt(PowerControl7 & 0x0002);
 
+        UpdateIRQ(0);
+        UpdateIRQ(1);
+
 #ifdef JIT_ENABLED
         JIT.Reset();
 #endif

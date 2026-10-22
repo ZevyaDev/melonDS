@@ -24,6 +24,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -160,7 +161,7 @@ public:
     void SetServiceHandler(std::function<void()> handler);
     void RequestService();
     void RequestBreak(u8 cpuMask);
-    void CancelBreakRequests();
+    void CancelBreakRequests(bool steps = true);
     void Step(u8 cpu, u32 count);
     void StepTo(u8 cpu, StepMode mode);
     u32 CallReturn(u8 cpu, u32 pc, bool thumb, u32 lr) const;
@@ -183,6 +184,8 @@ public:
 
     u32 Peek(u8 cpu, u32 addr, u8 size) const;
     bool Poke(u8 cpu, u32 addr, u8 size, u32 value);
+    bool WriteMemory(u8 cpu, u32 addr, const u8* data, u32 len, std::string& error);
+    const char* RegionName(u8 cpu, u32 addr) const;
     void SyncPipelines(u32 addr, u32 size);
     int HookedCPU() const;
     ExecResult Execute(u8 cpu, const std::vector<u32>& ops);

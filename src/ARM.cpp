@@ -244,6 +244,7 @@ void ARM::Reset()
     Halted = 0;
 
     IRQ = 0;
+    IdleLoop = 0;
 
     for (int i = 0; i < 16; i++)
         R[i] = 0;
@@ -335,11 +336,10 @@ void ARM::DoSavestate(Savestate* file)
         R_IRQ[2] |= 0x00000010;
         R_UND[2] |= 0x00000010;
 
+        IdleLoop = 0;
+
         if (!Num)
         {
-            SetupCodeMem(R[15]); // should fix it
-            ((ARMv5*)this)->RegionCodeCycles = ((ARMv5*)this)->MemTimings[R[15] >> 12][0];
-
             if ((CPSR & 0x1F) == 0x10)
                 ((ARMv5*)this)->PU_Map = ((ARMv5*)this)->PU_UserMap;
             else
@@ -357,6 +357,12 @@ void ARMv5::DoSavestate(Savestate* file)
 {
     ARM::DoSavestate(file);
     CP15DoSavestate(file);
+
+    if (!file->Saving)
+    {
+        SetupCodeMem(R[15]);
+        RegionCodeCycles = MemTimings[R[15] >> 12][0];
+    }
 }
 
 

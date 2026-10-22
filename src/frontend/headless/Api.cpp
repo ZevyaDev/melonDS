@@ -47,7 +47,8 @@ struct Slot
 };
 
 std::mutex SlotsLock;
-std::map<int, Slot> Slots;
+// never destroyed: at exit Windows kills the emulator threads before static destructors run
+std::map<int, Slot>& Slots = *new std::map<int, Slot>;
 thread_local std::string LastError;
 bool MPReady = false;
 
@@ -434,10 +435,9 @@ int mds_write(int id, int cpu, uint32_t addr, uint32_t len, const uint8_t* data)
     Slot* s = Stopped(id);
     if (!s)
         return -1;
-    melonDS::NDS& nds = *s->Inst->NDS;
-    for (u32 i = 0; i < len; i++)
-        if (!nds.Debugger.Poke(cpu == 7 || cpu == 1, addr + i, 1, data[i]))
-            return Fail("address not writable");
+    std::string error;
+    if (!s->Inst->NDS->Debugger.WriteMemory(cpu == 7 || cpu == 1, addr, data, len, error))
+        return Fail(error);
     return 0;
 }
 
@@ -450,8 +450,13 @@ int mds_get_regs(int id, int cpu, uint32_t* out)
     ARM& arm = CPU(*s->Inst, n);
     for (int i = 0; i < 15; i++)
         out[i] = arm.R[i];
-    out[15] = s->Inst->GetState() == RunState::Parked ? s->Inst->NDS->Debugger.CurPC[n]
-        : arm.R[15] - ((arm.CPSR & 0x20) ? 2 : 4);
+    out[15] = NextInstruction(arm);
+    if (s->Inst->GetState() == RunState::Parked)
+    {
+        const BreakEvent& ev = s->Inst->ParkEvent();
+        if (ev.Kind == BreakKind::Fault && ev.CPU == n && arm.R[15] == s->Inst->ParkR15(n))
+            out[15] = ev.PC;
+    }
     out[16] = arm.CPSR;
     out[17] = SPSR(arm);
     out[18] = arm.R[15];
@@ -731,11 +736,16 @@ int mds_packets_take(int id, mds_packet* headers, uint8_t* data, int max_packets
     while (n < max_packets && n < (int)s->Packets.size())
     {
         auto& p = s->Packets[n];
-        if (used + (int)p.Data.size() > max_data)
-            break;
-        headers[n] = {p.Timestamp, p.Sent, p.Type, (uint32_t)p.Data.size()};
-        memcpy(data + used, p.Data.data(), p.Data.size());
-        used += p.Data.size();
+        int size = (int)p.Data.size();
+        if (used + size > max_data)
+        {
+            if (n > 0)
+                break;
+            size = max_data;
+        }
+        headers[n] = {p.Timestamp, p.Sent, p.Type, (uint32_t)size, (uint32_t)p.Data.size()};
+        memcpy(data + used, p.Data.data(), size);
+        used += size;
         n++;
     }
     s->Packets.erase(s->Packets.begin(), s->Packets.begin() + n);
