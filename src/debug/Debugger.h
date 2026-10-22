@@ -138,6 +138,8 @@ struct CallFrame
     u32 SP;
     u8 Mode;
     bool Exception;
+    bool HasArgs = false;
+    u32 Args[4] = {};
 };
 
 class Debugger

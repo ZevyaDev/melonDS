@@ -51,6 +51,9 @@
 
 using namespace melonDS;
 
+Q_GUI_EXPORT bool qt_sendShortcutOverrideEvent(QObject* o, ulong timestamp, int k, Qt::KeyboardModifiers mods,
+    const QString& text = QString(), bool autorep = false, ushort count = 1);
+
 void Automation::start(EmuInstance* inst)
 {
     QString dir = qEnvironmentVariable("MELONDS_AUTOMATION");
@@ -170,7 +173,7 @@ QString Automation::run(const QStringList& args)
         w->resize(args[2].toInt(), args[3].toInt());
         return "ok";
     }
-    if (c == "action" && args.size() > 2)
+    if ((c == "action" || c == "modal") && args.size() > 2)
     {
         QWidget* w = args[1] == "main" ? (QWidget*)win : FindWindow(args[1]);
         if (!w)
@@ -179,7 +182,10 @@ QString Automation::run(const QStringList& args)
         for (QAction* a : w->findChildren<QAction*>())
             if (a->text().remove('&') == text)
             {
-                a->trigger();
+                if (c == "modal")
+                    QTimer::singleShot(0, a, &QAction::trigger);
+                else
+                    a->trigger();
                 return "ok";
             }
         for (QAbstractButton* b : w->findChildren<QAbstractButton*>())
@@ -259,7 +265,7 @@ QString Automation::run(const QStringList& args)
     }
     if (c == "key" && args.size() > 2)
     {
-        QWidget* w = FindWindow(args[1]);
+        QWidget* w = args[1] == "main" ? (QWidget*)win : FindWindow(args[1]);
         if (!w)
             return "error: no window";
         QKeySequence seq(args[2]);
@@ -267,9 +273,43 @@ QString Automation::run(const QStringList& args)
             return "error: key";
         QKeyCombination kc = seq[0];
         QWidget* target = w->focusWidget() ? w->focusWidget() : w;
-        QApplication::sendEvent(target, new QKeyEvent(QEvent::ShortcutOverride, kc.key(), kc.keyboardModifiers()));
+        if (qt_sendShortcutOverrideEvent(target, 0, kc.key(), kc.keyboardModifiers()))
+            return "ok shortcut";
         QKeyEvent press(QEvent::KeyPress, kc.key(), kc.keyboardModifiers());
         QApplication::sendEvent(target, &press);
+        return "ok";
+    }
+    if (c == "activate" && args.size() > 1)
+    {
+        QWidget* w = args[1] == "main" ? (QWidget*)win : FindWindow(args[1]);
+        if (!w)
+            return "error: no window";
+        if (QApplication::activeWindow() == w)
+            return "ok";
+        w->raise();
+        w->activateWindow();
+        return "pending";
+    }
+    if (c == "tooltip" && args.size() > 3)
+    {
+        QWidget* w = FindWindow(args[1]);
+        QTreeWidget* tree = nullptr;
+        if (w)
+            for (QTreeWidget* t : w->findChildren<QTreeWidget*>())
+                if (t->headerItem()->text(0) == args[2])
+                    tree = t;
+        QStringList pos = args[3].split(',');
+        if (!tree || pos.size() != 2 || pos[0].toInt() >= tree->topLevelItemCount())
+            return "error: no item";
+        return tree->topLevelItem(pos[0].toInt())->toolTip(pos[1].toInt());
+    }
+    if (c == "focus" && args.size() > 2)
+    {
+        QWidget* w = args[1] == "main" ? (QWidget*)win : FindWindow(args[1]);
+        QWidget* target = w ? w->findChild<QWidget*>(args[2]) : nullptr;
+        if (!target)
+            return "error: no widget";
+        target->setFocus();
         return "ok";
     }
     if (c == "hold" && args.size() > 2)
@@ -332,6 +372,9 @@ QString Automation::run(const QStringList& args)
     }
     if (c == "lines")
     {
+        if (rest.isEmpty())
+            return QString("%1 %2 line rows").arg(bridge->symbols().lineSource())
+                .arg(bridge->symbols().set() ? bridge->symbols().set()->LineCount : 0);
         QString error;
         if (!LoadLines(bridge->symbols(), rest, error))
             return "error: " + error;

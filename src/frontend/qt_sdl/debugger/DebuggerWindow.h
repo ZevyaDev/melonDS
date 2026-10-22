@@ -25,8 +25,10 @@
 #include <vector>
 
 #include "DebugBridge.h"
+#include "CallArgs.h"
 
 class QComboBox;
+class QKeyEvent;
 class QLabel;
 class QLineEdit;
 class QSpinBox;
@@ -67,6 +69,7 @@ struct DebugSnapshot
     std::vector<PointInfo> Points;
     std::array<std::vector<melonDS::CallFrame>, 2> Stack;
     std::array<std::vector<std::pair<melonDS::u32, std::vector<melonDS::CallFrame>>>, 2> Threads;
+    std::array<CallArgs::Memory, 2> Args;
     std::vector<int> Overlays;
     melonDS::u64 Frame;
     bool Debug;
@@ -86,6 +89,7 @@ public:
 protected:
     void showEvent(QShowEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
+    bool eventFilter(QObject* obj, QEvent* event) override;
 
 private:
     DebugBridge* Bridge;
@@ -120,6 +124,8 @@ private:
     QAction* ActOut;
     QAction* ActBranch;
     QAction* ActTaken;
+    std::vector<QAction*> RunActions;
+    bool GameWindowKeys = true;
 
     void buildToolbar();
     void buildViewToolbar();
@@ -145,6 +151,10 @@ private:
     void applySymbols(const QString& location);
     void loadLines();
     void autoLoadSymbols();
+    void applyKeys();
+    void editKeys();
+    QAction* actionForKey(const QKeyEvent* event) const;
+    void showArgumentMemory(melonDS::u32 addr);
     QString describeBreak(const melonDS::BreakEvent& ev) const;
 };
 

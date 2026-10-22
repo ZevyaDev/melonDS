@@ -74,6 +74,7 @@ set(SOURCES_QT_SDL
     ../lua_debug/LuaDebug.cpp
 
     debugger/DebugBridge.cpp
+    debugger/CallArgs.cpp
     debugger/DebugSource.cpp
     debugger/SourceView.cpp
     debugger/DebugTool.cpp

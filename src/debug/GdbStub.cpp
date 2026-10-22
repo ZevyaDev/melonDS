@@ -352,57 +352,62 @@ StubState GdbStub::Poll(bool wait)
 		Handle_Question(this, NULL, 0); // ugly hack but it should work
 	}
 
+	// gdb pipelines its next packet behind a ^C; poll()/select() cannot see it once buffered
+	ReadResult res = RecvBufferFilled > 0 ? ParseAndSetupPacket() : ReadResult::NoPacket;
+	if (res == ReadResult::NoPacket)
+	{
 #if MOCKTEST
-	// nothing...
+		// nothing...
 #else
 #ifndef _WIN32
-	struct pollfd pfd;
-	pfd.fd = ConnFd;
-	pfd.events = POLLIN;
-	pfd.revents = 0;
+		struct pollfd pfd;
+		pfd.fd = ConnFd;
+		pfd.events = POLLIN;
+		pfd.revents = 0;
 
-	r = poll(&pfd, 1, wait ? -1 : 0);
+		r = poll(&pfd, 1, wait ? -1 : 0);
 
-	if (r == 0) return StubState::None; // nothing is happening
+		if (r == 0) return StubState::None; // nothing is happening
 
-	if (pfd.revents & (POLLHUP|POLLERR|POLLNVAL))
-	{
-		// oopsie, something happened
-		Disconnect();
-		return StubState::Disconnect;
-	}
+		if (pfd.revents & (POLLHUP|POLLERR|POLLNVAL))
+		{
+			// oopsie, something happened
+			Disconnect();
+			return StubState::Disconnect;
+		}
 #else
-	fd_set infd, outfd, errfd;
-	FD_ZERO(&infd); FD_ZERO(&outfd); FD_ZERO(&errfd);
-	FD_SET(ConnFd, &infd);
+		fd_set infd, outfd, errfd;
+		FD_ZERO(&infd); FD_ZERO(&outfd); FD_ZERO(&errfd);
+		FD_SET(ConnFd, &infd);
 
-	struct timeval to;
-	if (wait)
-	{
-		to.tv_sec = ~(time_t)0;
-		to.tv_usec = ~(long)0;
-	}
-	else
-	{
-		to.tv_sec = 0;
-		to.tv_usec = 0;
-	}
+		struct timeval to;
+		if (wait)
+		{
+			to.tv_sec = ~(time_t)0;
+			to.tv_usec = ~(long)0;
+		}
+		else
+		{
+			to.tv_sec = 0;
+			to.tv_usec = 0;
+		}
 
-	r = select(ConnFd+1, &infd, &outfd, &errfd, &to);
+		r = select(ConnFd+1, &infd, &outfd, &errfd, &to);
 
-	if (FD_ISSET(ConnFd, &errfd))
-	{
-		Disconnect();
-		return StubState::Disconnect;
-	}
-	else if (!FD_ISSET(ConnFd, &infd))
-	{
-		return StubState::None;
-	}
+		if (FD_ISSET(ConnFd, &errfd))
+		{
+			Disconnect();
+			return StubState::Disconnect;
+		}
+		else if (!FD_ISSET(ConnFd, &infd))
+		{
+			return StubState::None;
+		}
 #endif
 #endif
 
-	ReadResult res = MsgRecv();
+		res = MsgRecv();
+	}
 
 	switch (res)
 	{
@@ -522,6 +527,13 @@ StubState GdbStub::Enter(bool stay, TgtStatus stat, u32 arg, bool wait_for_conn)
 		switch (st)
 		{
 		case StubState::Break:
+			if (Stat != TgtStatus::None && Stat != TgtStatus::Running)
+			{
+				// a ^C that crossed our stop reply; a second reply would desync gdb, so drop it
+				Log(LogLevel::Info, "[GDB] ignoring break, target already stopped\n");
+				st = StubState::None;
+				break;
+			}
 			Log(LogLevel::Info, "[GDB] break execution\n");
 			SignalStatus(TgtStatus::BreakReq, ~(u32)0);
 			break;

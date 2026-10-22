@@ -19,13 +19,18 @@
 #include <functional>
 #include <vector>
 
+#include <memory>
+
 #include <QDateTime>
 #include <QDir>
 #include <QFileDialog>
+#include <QFileInfo>
+#include <QFileSystemWatcher>
 #include <QInputDialog>
 #include <QMenu>
 #include <QMessageBox>
 #include <QStandardPaths>
+#include <QTimer>
 
 #include "DebugTools.h"
 #include "DebugBridge.h"
@@ -323,6 +328,75 @@ void rememberLabels(DebugBridge* bridge, const QString& path)
     Config::Save();
 }
 
+constexpr int LineReloadDelayMs = 1000;
+
+struct LineWatch
+{
+    QString Path;
+    QDateTime Modified;
+    qint64 Size = -1;
+    bool Retry = false;
+};
+
+static void reloadLines(DebugBridge* bridge, LineWatch& watch, QTimer* timer)
+{
+    QFileInfo info(watch.Path);
+    if (watch.Path.isEmpty() || !info.exists() || (info.lastModified() == watch.Modified && info.size() == watch.Size))
+        return;
+    if (info.lastModified().msecsTo(QDateTime::currentDateTime()) < LineReloadDelayMs)
+    {
+        timer->start();
+        return;
+    }
+    DebugSymbols& syms = bridge->symbols();
+    std::vector<int> loaded = syms.loaded();
+    QString lines = watch.Path;
+    QString error;
+    if (!DebugSource::IsRemote(syms.source()))
+        syms.load(syms.source(), error, bridge->instance()->getNDS());
+    bool ok = syms.lineSource() == lines || syms.loadLines(lines, error);
+    syms.setLoaded(loaded);
+    watch.Retry = !ok;
+    emit bridge->symbolsChanged();
+}
+
+static void watchLines(DebugBridge* bridge)
+{
+    auto watch = std::make_shared<LineWatch>();
+    QFileSystemWatcher* watcher = new QFileSystemWatcher(bridge);
+    QTimer* timer = new QTimer(bridge);
+    timer->setSingleShot(true);
+    timer->setInterval(LineReloadDelayMs);
+    QObject::connect(bridge, &DebugBridge::symbolsChanged, watcher, [bridge, watcher, watch] {
+        if (watch->Retry)
+        {
+            watch->Retry = false;
+            watch->Modified = {};
+            watch->Size = -1;
+        }
+        else
+        {
+            QString path = bridge->symbols().lineSource();
+            watch->Path = DebugSource::IsRemote(path) ? QString() : path;
+            QFileInfo info(watch->Path);
+            watch->Modified = info.lastModified();
+            watch->Size = info.size();
+        }
+        QStringList want;
+        if (!watch->Path.isEmpty())
+            want << watch->Path << QFileInfo(watch->Path).absolutePath();
+        QStringList have = watcher->files() + watcher->directories();
+        if (!have.isEmpty())
+            watcher->removePaths(have);
+        if (!want.isEmpty())
+            watcher->addPaths(want);
+    });
+    auto changed = [timer] { timer->start(); };
+    QObject::connect(watcher, &QFileSystemWatcher::fileChanged, timer, changed);
+    QObject::connect(watcher, &QFileSystemWatcher::directoryChanged, timer, changed);
+    QObject::connect(timer, &QTimer::timeout, bridge, [bridge, watch, timer] { reloadLines(bridge, *watch, timer); });
+}
+
 void showDisassembly(DebugBridge* bridge, QWidget* parent, melonDS::u32 addr)
 {
     DebuggerWindow::open(bridge, parent)->goTo(addr);
@@ -343,6 +417,7 @@ void buildMenu(QMenu* menu, MainWindow* win)
     if (!watched.contains(bridge))
     {
         watched.insert(bridge);
+        watchLines(bridge);
         QObject::connect(bridge, &DebugBridge::broke, bridge, [bridge] {
             DebuggerWindow::open(bridge, bridge->instance()->getMainWindow());
         });

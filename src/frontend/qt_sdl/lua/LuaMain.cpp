@@ -296,6 +296,7 @@ void LuaBundle::createLuaState()
     QString filedir = luaDialog->currentScript.dir().path();
     lua_State* L = newState();
     QDir::setCurrent(filedir);
+    printText("Script started: " + luaDialog->currentScript.fileName());
     bool loaded;
     {
         LuaDebug::Guard guard(L);
